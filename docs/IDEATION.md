@@ -97,7 +97,11 @@ During our ideation, we queried the ScholarXIV Papers API to investigate how eco
 * **Michael, K. et al. (2023).** *The Role of User-Agent Interactions on Mobile Money Practices in Kenya and Tanzania.* [arXiv:2309.00226](https://arxiv.org/abs/2309.00226).
   * **Ideation Impact:** This paper explores how intermediary interfaces and conversational interactions mediate financial trust in East African digital money ecosystems. It confirmed that human-centric, conversational feedback (such as spoken audio confirmation) drastically reduces transaction anxiety for users navigating mobile money.
 
-### D. Informal Risk-Sharing & Social Insurance in Ethiopia
+### D. Rural Banking & Mobile Money Infrastructure Integration
+* **Quist-Aphetsi, K. (2013).** *The Role of Rural Banks in Providing Mobile Money Services to Rural Poor Communities: An effective integration approach of Rural Banks and existing mobile communications infrastructure.* [arXiv:1307.7789](https://arxiv.org/abs/1307.7789).
+  * **Ideation Impact:** Analyzes how grassroots financial institutions bridge telecom mobile money and bank accounts. Grounded our architectural bridge between Telebirr and commercial banks via Links.et.
+
+### E. Informal Risk-Sharing & Social Insurance in Ethiopia
 * **Dercon, S., De Weerdt, J., Bold, T., & Pankhurst, A. (2006).** *In sickness and in health: Risk-sharing within Ethiopian funeral societies (Iddirs).* Journal of Development Economics.
   * **Ideation Impact:** Dercon et al. provide empirical evidence that Iddirs are resilient, self-enforcing micro-insurance networks whose survival depends on transparent audit trails and clear community sanction rules.
 
@@ -140,6 +144,7 @@ Through this traced ideation process, Team GitGud developed *Sened* by:
 
 ## 7. References & Academic Sources
 
+### Primary Preprints (Attached to ScholarXIV Collection)
 1. **Abebe, R., Eck, A., Ikeokwu, C., & Taggart, S. (2022).**  
    *An Algorithmic Introduction to Savings Circles.*  
    Proceedings of the 36th AAAI Conference on Artificial Intelligence (AAAI-22).  
@@ -154,12 +159,17 @@ Through this traced ideation process, Team GitGud developed *Sened* by:
    *The Role of User-Agent Interactions on Mobile Money Practices in Kenya and Tanzania.*  
    arXiv: [2309.00226](https://arxiv.org/abs/2309.00226) *(Retrieved via ScholarXIV)*.
 
-4. **Dercon, S., De Weerdt, J., Bold, T., & Pankhurst, A. (2006).**  
+4. **Quist-Aphetsi, K. (2013).**  
+   *The Role of Rural Banks in Providing Mobile Money Services to Rural Poor Communities: An effective integration approach of Rural Banks and existing mobile communications infrastructure.*  
+   arXiv: [1307.7789](https://arxiv.org/abs/1307.7789) *(Retrieved via ScholarXIV)*.
+
+### Foundational Economics Literature (Peer-Reviewed Journals)
+5. **Dercon, S., De Weerdt, J., Bold, T., & Pankhurst, A. (2006).**  
    *In sickness and in health: Risk-sharing within Ethiopian funeral societies (Iddirs).*  
    Journal of Development Economics, 80(2), 488–510.  
    DOI: [10.1016/j.jdeveco.2005.02.001](https://doi.org/10.1016/j.jdeveco.2005.02.001).
 
-5. **Besley, T., Coate, S., & Loury, G. (1993).**  
+6. **Besley, T., Coate, S., & Loury, G. (1993).**  
    *The Economics of Rotating Savings and Credit Associations.*  
    The American Economic Review, 83(4), 792–810.  
    JSTOR: [2117580](https://www.jstor.org/stable/2117580).

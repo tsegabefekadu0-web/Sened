@@ -135,3 +135,31 @@ Through this traced ideation process, Team GitGud developed *Sened* by:
 2. **Evaluating and rejecting conventional traps:** Rejecting isolated Telegram bots, complex mobile apps, and rigid USSD menus.
 3. **Synthesizing an authentic solution:** Uniting the oral tradition of Ethiopian community governance via Voxide with automated bank verification via Links.et.
 4. **Grounding the system in peer-reviewed economics:** Leveraging ScholarXIV to apply algorithmic mechanism design to savings circles and risk-pooling networks.
+
+---
+
+## 7. References & Academic Sources
+
+1. **Abebe, R., Eck, A., Ikeokwu, C., & Taggart, S. (2022).**  
+   *An Algorithmic Introduction to Savings Circles.*  
+   Proceedings of the 36th AAAI Conference on Artificial Intelligence (AAAI-22).  
+   arXiv: [2203.12486](https://arxiv.org/abs/2203.12486) *(Retrieved via ScholarXIV)*.
+
+2. **Wang, F. (2021).**  
+   *An empirical equilibrium model of formal and informal credit markets in developing countries.*  
+   Review of Economic Dynamics, 45, 1–25.  
+   arXiv: [2204.12374](https://arxiv.org/abs/2204.12374) *(Retrieved via ScholarXIV)*.
+
+3. **Michael, K., et al. (2023).**  
+   *The Role of User-Agent Interactions on Mobile Money Practices in Kenya and Tanzania.*  
+   arXiv: [2309.00226](https://arxiv.org/abs/2309.00226) *(Retrieved via ScholarXIV)*.
+
+4. **Dercon, S., De Weerdt, J., Bold, T., & Pankhurst, A. (2006).**  
+   *In sickness and in health: Risk-sharing within Ethiopian funeral societies (Iddirs).*  
+   Journal of Development Economics, 80(2), 488–510.  
+   DOI: [10.1016/j.jdeveco.2005.02.001](https://doi.org/10.1016/j.jdeveco.2005.02.001).
+
+5. **Besley, T., Coate, S., & Loury, G. (1993).**  
+   *The Economics of Rotating Savings and Credit Associations.*  
+   The American Economic Review, 83(4), 792–810.  
+   JSTOR: [2117580](https://www.jstor.org/stable/2117580).

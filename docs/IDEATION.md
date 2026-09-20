@@ -93,6 +93,14 @@ During our ideation, we queried the ScholarXIV Papers API to investigate how eco
 * **Wang, F. (2021).** *An empirical equilibrium model of formal and informal credit markets in developing countries.* Review of Economic Dynamics. [arXiv:2204.12374](https://arxiv.org/abs/2204.12374).
   * **Ideation Impact:** Wang demonstrates that expanding formal banking does not destroy informal credit; rather, households use informal credit when fixed verification costs in formal systems are too high. This solidified our decision: **do not try to replace the Equb with a bank; instead, give the Equb automated bank-grade verification.**
 
+### C. Human-Agent Trust & Mobile Money in East Africa
+* **Michael, K. et al. (2023).** *The Role of User-Agent Interactions on Mobile Money Practices in Kenya and Tanzania.* [arXiv:2309.00226](https://arxiv.org/abs/2309.00226).
+  * **Ideation Impact:** This paper explores how intermediary interfaces and conversational interactions mediate financial trust in East African digital money ecosystems. It confirmed that human-centric, conversational feedback (such as spoken audio confirmation) drastically reduces transaction anxiety for users navigating mobile money.
+
+### D. Informal Risk-Sharing & Social Insurance in Ethiopia
+* **Dercon, S., De Weerdt, J., Bold, T., & Pankhurst, A. (2006).** *In sickness and in health: Risk-sharing within Ethiopian funeral societies (Iddirs).* Journal of Development Economics.
+  * **Ideation Impact:** Dercon et al. provide empirical evidence that Iddirs are resilient, self-enforcing micro-insurance networks whose survival depends on transparent audit trails and clear community sanction rules.
+
 ---
 
 ## 5. Architectural Safeguards & Design Decisions

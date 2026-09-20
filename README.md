@@ -4,10 +4,12 @@
 > Built by **Team GitGud** for the **STARK Official Hackathon 2026**.
 
 [![STARK Official Hackathon](https://img.shields.io/badge/STARK-Hackathon_2026-hyper?style=flat-square)](https://hackathon.stark.et/)
-[![ScholarXIV Verified](https://img.shields.io/badge/ScholarXIV-Ideation_Grounding-blue?style=flat-square)](https://scholarxiv.com)
+[![ScholarXIV Collection](https://img.shields.io/badge/ScholarXIV-Collection%20(Live)-blue?style=flat-square)](https://www.scholarxiv.com/collections/6aaf5269f7a1121dbd049897?token=293b33f942e29f15a7bc9b4fd82b33bf88eb252a190ebbdb05c5ded00cf36896)
 [![Voxide Voice](https://img.shields.io/badge/Voxide-Amharic%20%2F%20Oromiffa-purple?style=flat-square)](https://voxide.app)
 [![Links.et Payments](https://img.shields.io/badge/Links.et-17_Banks_Verified-emerald?style=flat-square)](https://links.et)
 [![EthioDeploy](https://img.shields.io/badge/EthioDeploy-Live_Hosting-orange?style=flat-square)](https://ethiodeploy.com)
+
+**Live ScholarXIV Collection:** [STARK Hackathon 2026 - Ideation & Research (GitGud)](https://www.scholarxiv.com/collections/6aaf5269f7a1121dbd049897?token=293b33f942e29f15a7bc9b4fd82b33bf88eb252a190ebbdb05c5ded00cf36896)
 
 ---
 

@@ -23,14 +23,21 @@ In Ethiopia, traditional Rotating Savings and Credit Associations (**Equb - ዕ�
 
 ## 📖 Traced Ideation & Research
 
-Our ideation journey—including why we evaluated and rejected Telegram bots, standard mobile apps, and USSD services, as well as our simulated jury review with the hackathon judges—is documented in:
+Our ideation journey—including why we evaluated and rejected Telegram bots, standard mobile apps, and USSD services—is documented in:
 
 👉 **[Read the Full Traced Ideation Journal (docs/IDEATION.md)](./docs/IDEATION.md)**
 
-### Key Research Grounding (retrieved via ScholarXIV):
-1. **Dr. Rediet Abebe et al. (AAAI 2022)** — [*An Algorithmic Introduction to Savings Circles*](https://arxiv.org/abs/2203.12486) (arXiv:2203.12486). Mechanism design for welfare guarantees in lottery and auction savings circles.
-2. **Fan Wang (2021)** — [*An empirical equilibrium model of formal and informal credit markets in developing countries*](https://arxiv.org/abs/2204.12374) (Review of Economic Dynamics).
-3. **Stefan Dercon et al. (2006)** — *In sickness and in health: Risk-sharing within Ethiopian funeral societies (Iddirs)* (Journal of Development Economics).
+### Key Research Grounding (Curated in [ScholarXIV Collection](https://www.scholarxiv.com/collections/6aaf5269f7a1121dbd049897?token=293b33f942e29f15a7bc9b4fd82b33bf88eb252a190ebbdb05c5ded00cf36896)):
+
+#### Preprints Attached to ScholarXIV Collection:
+1. **Dr. Rediet Abebe et al. (AAAI 2022)** — [*An Algorithmic Introduction to Savings Circles*](https://arxiv.org/abs/2203.12486) (`arXiv:2203.12486`). Algorithmic mechanism design for ROSCAs, fair pot allocation, and default minimization.
+2. **Fan Wang (2021)** — [*An empirical equilibrium model of formal and informal credit markets in developing countries*](https://arxiv.org/abs/2204.12374) (`arXiv:2204.12374`). Proves formal banking and informal community credit coexist when verification costs are addressed.
+3. **Karen Sowon et al. (2023)** — [*The Role of User-Agent Interactions on Mobile Money Practices in Kenya and Tanzania*](https://arxiv.org/abs/2309.00226) (`arXiv:2309.00226`). Conversational trust and audio interaction in East African mobile financial ecosystems.
+4. **Quist-Aphetsi Kester (2013)** — [*The Role of Rural Banks in Providing Mobile Money Services to Rural Poor Communities*](https://arxiv.org/abs/1307.7789) (`arXiv:1307.7789`). Integration models bridging grassroots community finance and formal mobile money infrastructure.
+
+#### Foundational Literature (Peer-Reviewed Journals):
+5. **Stefan Dercon et al. (2006)** — *In sickness and in health: Risk-sharing within Ethiopian funeral societies (Iddirs)* (*Journal of Development Economics*). Empirical evidence on informal risk-sharing resilience in Ethiopia.
+6. **Besley, Coate & Loury (1993)** — *The Economics of Rotating Savings and Credit Associations* (*The American Economic Review*). Theoretical foundations of ROSCA efficiency and social enforcement.
 
 ---
 

@@ -10,7 +10,9 @@ test-results/
 playwright-report/
 
 # Local multi-agent coordination scratchpad (not a product artifact)
+# Local multi-agent coordination scratchpads (not product artifacts)
 AGENTWORK.md
+docs/AGENT_BRIEFINGS.md
 
 # Dev screenshot artifacts in the repo root.
 # Anchored with a leading slash so product assets in public/ are NOT affected.

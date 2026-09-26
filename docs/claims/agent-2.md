@@ -7,7 +7,7 @@
 | Branch | `feat/agent-2-voice` |
 | Branched from | `main` @ `ca3a512` (baseline `d2eac5b` + coord-ignore commit) |
 | Start time | 2026-09-26 |
-| Status | **DONE** — 184 tests, 0 baseline regressions |
+| Status | **DONE (`107e9f3`)** — 184 tests, baseline 75/75 unchanged |
 
 ## §3 rows I am taking (exhaustive)
 

@@ -88,6 +88,16 @@ export interface BankProviderLookup {
 
 export interface BankProviderAdapter {
   readonly provider: BankProvider;
+  /**
+   * Permitted clock skew, in seconds, between the declared contribution time
+   * and the provider's own timestamp. Omitted means exact equality.
+   *
+   * Live provider feeds publish wall-clock timestamps at minute precision with
+   * no offset, so an adapter that reads one must state how much skew it accepts.
+   * The value narrows only the timestamp dimension; amount, currency, direction
+   * and both account fingerprints are always compared exactly.
+   */
+  readonly timestampToleranceSeconds?: number;
   isConfigured(): boolean;
   verify(lookup: BankProviderLookup): Promise<unknown>;
 }

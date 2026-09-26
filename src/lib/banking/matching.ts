@@ -14,6 +14,21 @@ export interface ExpectedBankEvidence {
   readonly senderFingerprint: string;
   readonly receiverFingerprint: string;
   readonly occurredAt: string;
+  /**
+   * Permitted clock skew, in seconds, between the declared contribution time
+   * and the bank's own timestamp.
+   *
+   * Defaults to 0, which means exact instant equality. Real bank feeds publish
+   * wall-clock timestamps at minute/second precision in EAT with no offset, and
+   * a treasurer declares when they *believe* a payment happened, so exact
+   * equality against a live feed would reject essentially every real
+   * contribution. Adapters that talk to a live provider set this explicitly; the
+   * default keeps every existing strict check unchanged.
+   *
+   * This tolerance applies to the timestamp dimension only. Amount, currency,
+   * direction and both account fingerprints remain exact.
+   */
+  readonly timestampToleranceSeconds?: number;
 }
 
 export interface BankEvidenceAssessment {
@@ -61,6 +76,30 @@ export function isCompleteSettledEvidence(
     typeof evidence.settledAt === "string" &&
     !Number.isNaN(new Date(evidence.settledAt).getTime())
   );
+}
+
+/**
+ * Compares two timestamps, allowing an optional absolute skew in seconds.
+ * A missing or unparseable tolerance-bearing timestamp is a mismatch, never a
+ * pass: a receipt whose time we cannot read must not be accepted.
+ */
+function isWithinTimestampTolerance(
+  actual: string,
+  expected: string,
+  toleranceSeconds?: number
+): boolean {
+  if (actual === expected) {
+    return true;
+  }
+  if (toleranceSeconds === undefined || toleranceSeconds <= 0) {
+    return false;
+  }
+  const actualMs = new Date(actual).getTime();
+  const expectedMs = new Date(expected).getTime();
+  if (Number.isNaN(actualMs) || Number.isNaN(expectedMs)) {
+    return false;
+  }
+  return Math.abs(actualMs - expectedMs) <= toleranceSeconds * 1_000;
 }
 
 export function assessBankProviderResult(
@@ -119,7 +158,7 @@ export function assessBankProviderResult(
   if (evidence.receiverFingerprint !== expected.receiverFingerprint) {
     mismatches.push("RECEIVER_MISMATCH");
   }
-  if (evidence.occurredAt !== expected.occurredAt) {
+  if (!isWithinTimestampTolerance(evidence.occurredAt, expected.occurredAt, expected.timestampToleranceSeconds)) {
     mismatches.push("TIMESTAMP_MISMATCH");
   }
 

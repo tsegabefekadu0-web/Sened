@@ -1,5 +1,6 @@
 import "server-only";
 import { BankVerificationError } from "./errors";
+import { isLinksEtConfigured, LinksEtBankProviderAdapter, readLinksEtConfigFromEnvironment } from "./linkset";
 import { validateNormalizedBankProviderResult } from "./schemas";
 import type { BankProvider, BankProviderAdapter, BankProviderLookup, BankProviderResult } from "./types";
 
@@ -67,7 +68,16 @@ export class FixtureBankProviderAdapter implements BankProviderAdapter {
 }
 
 export function createProductionBankProviderAdapter(provider: BankProvider): BankProviderAdapter {
-  return new UnconfiguredBankProviderAdapter(provider);
+  if (!isLinksEtConfigured()) {
+    // Fail closed. Without a links.et key there is no way to reach the issuing
+    // bank, and a "verified" badge with no bank behind it is exactly the
+    // fabricated trust signal this product exists to eliminate.
+    return new UnconfiguredBankProviderAdapter(provider);
+  }
+  return new LinksEtBankProviderAdapter({
+    provider,
+    config: readLinksEtConfigFromEnvironment()
+  });
 }
 
 export function createTestFixtureBankProviderAdapter(

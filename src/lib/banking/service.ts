@@ -106,14 +106,19 @@ function evidenceFingerprint(
     .digest("hex");
 }
 
-function expectedFromBinding(intent: BankVerificationIntent, binding: BankAccountBinding) {
+function expectedFromBinding(
+  intent: BankVerificationIntent,
+  binding: BankAccountBinding,
+  timestampToleranceSeconds?: number
+) {
   return {
     amount: intent.amount,
     currency: intent.currency,
     direction: intent.direction,
     senderFingerprint: binding.senderFingerprintHmac,
     receiverFingerprint: binding.receiverFingerprintHmac,
-    occurredAt: intent.occurredAt
+    occurredAt: intent.occurredAt,
+    ...(timestampToleranceSeconds === undefined ? {} : { timestampToleranceSeconds })
   };
 }
 
@@ -278,7 +283,10 @@ export class BankVerificationService {
       providerResult = asPendingResult(request.provider, error);
     }
 
-    const assessment = assessBankProviderResult(providerResult, expectedFromBinding(created.intent, binding));
+    const assessment = assessBankProviderResult(
+      providerResult,
+      expectedFromBinding(created.intent, binding, adapter.timestampToleranceSeconds)
+    );
     const now = this.clock();
     const keyForFingerprint = requireHmacKey(this);
     const evidence = assessment.evidence;
@@ -361,7 +369,10 @@ export class BankVerificationService {
     } catch (error) {
       result = asPendingResult(intent.provider, error);
     }
-    const assessment = assessBankProviderResult(result, expectedFromBinding(intent, binding));
+    const assessment = assessBankProviderResult(
+      result,
+      expectedFromBinding(intent, binding, adapter.timestampToleranceSeconds)
+    );
     const key = requireHmacKey(this);
     const evidenceHash = assessment.evidence
       ? evidenceFingerprint(intent.provider, assessment.evidence, key)

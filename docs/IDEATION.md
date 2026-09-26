@@ -22,25 +22,7 @@ The problem is not that banking in Ethiopia isn't digital. The problem is that *
 
 ## 2. The Road Not Taken: Alternative Routes & Why We Rejected Them
 
-Before arriving at *Sened*, our team analyzed and debated four different architectural routes to solve this problem. Here is why each was evaluated and ultimately rejected:
-
-```
-+-----------------------------------------------------------------------------+
-|                          EXPLORED ALTERNATIVES                              |
-+-----------------------------------------------------------------------------+
-| Route A: Telegram Bot          | Rejected: High bot drop-off for elders,    |
-|                                | fragile Telegram API limits, no voice TTS  |
-+--------------------------------+--------------------------------------------+
-| Route B: Standard Banking App  | Rejected: Cognitive overload, nested menus,|
-| (Mobile App / SuperApp clone)  | hostile to non-tech-savvy community elders |
-+--------------------------------+--------------------------------------------+
-| Route C: USSD Service (*804#)  | Rejected: 120s session timeout, expensive  |
-|                                | telecom gateway fees, zero visual audit    |
-+--------------------------------+--------------------------------------------+
-| Final Choice: Sened (Voice +   | Selected: Respects oral tradition via      |
-| Instant Bank Verification)     | Voxide, automated verification via Links   |
-+-----------------------------------------------------------------------------+
-```
+Before arriving at *Sened*, our team analyzed and debated four different architectural routes to solve this problem:
 
 ### Route A: A Telegram Bot (The Obvious Trap)
 * **The Hypothesis:** Since every Ethiopian is already on Telegram, why not build a Telegram bot where members send receipts?

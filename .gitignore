@@ -1,0 +1,25 @@
+# Dependencies & Environments
+node_modules/
+.env
+.env.local
+.env.*.local
+
+# Playwright & Browser MCP artifacts
+.playwright-mcp/
+test-results/
+playwright-report/
+
+# Local multi-agent coordination scratchpad (not a product artifact)
+AGENTWORK.md
+
+# Dev screenshot artifacts in the repo root.
+# Anchored with a leading slash so product assets in public/ are NOT affected.
+/*.png
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+*.log
+.next/
+coverage/
+*.tsbuildinfo

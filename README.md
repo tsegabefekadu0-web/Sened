@@ -25,7 +25,8 @@ In Ethiopia, traditional Rotating Savings and Credit Associations (**Equb - ዕ�
 
 Our ideation journey—including why we evaluated and rejected Telegram bots, standard mobile apps, and USSD services—is documented in:
 
-👉 **[Read the Full Traced Ideation Journal (docs/IDEATION.md)](./docs/IDEATION.md)**
+👉 **[Read the Full Traced Ideation Journal (docs/IDEATION.md)](./docs/IDEATION.md)**  
+👉 **[View the Technical & Product Roadmap (ROADMAP.md)](./ROADMAP.md)**
 
 ### Key Research Grounding (Curated in [ScholarXIV Collection](https://www.scholarxiv.com/collections/6aaf5269f7a1121dbd049897?token=293b33f942e29f15a7bc9b4fd82b33bf88eb252a190ebbdb05c5ded00cf36896)):
 

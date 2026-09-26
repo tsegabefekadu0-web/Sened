@@ -38,3 +38,96 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/*
+ * Offline-first PWA — AGENT-4 (M6.1).
+ *
+ * `globals.css` is AGENT-4's per AGENTWORK §4.2; A2 and A3 own their own CSS
+ * files. Everything below is additive and scoped to the offline desk.
+ */
+
+/*
+ * A pending badge must be unmistakable even for a treasurer who cannot read the
+ * colour, so the state is carried by a border *and* a background *and* an
+ * animated dot, not by hue alone.
+ */
+.offline-state-pending {
+  border-color: rgba(184, 134, 47, 0.55);
+  background-color: rgba(184, 134, 47, 0.12);
+  color: #f0d9a8;
+}
+
+.offline-state-synced {
+  border-color: rgba(16, 185, 129, 0.45);
+  background-color: rgba(16, 185, 129, 0.1);
+  color: #a7f3d0;
+}
+
+.offline-state-rejected {
+  border-color: rgba(198, 83, 43, 0.55);
+  background-color: rgba(198, 83, 43, 0.14);
+  color: #f4c3ae;
+}
+
+.offline-state-blocked {
+  border-color: rgba(134, 50, 20, 0.7);
+  background-color: rgba(134, 50, 20, 0.3);
+  color: #f0b49a;
+}
+
+/* A draft that has never been queued. Quieter than pending on purpose. */
+.offline-state-draft {
+  border-color: rgba(139, 124, 116, 0.5);
+  background-color: rgba(139, 124, 116, 0.1);
+  color: #ded3cb;
+}
+
+.offline-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background-color: currentColor;
+  flex: none;
+}
+
+.offline-dot-pending {
+  animation: offlineDot 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes offlineDot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+/* A recorded hash is the strongest local evidence there is, so it is monospaced
+   and never truncated without an accessible full value beside it. */
+.offline-hash {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.6875rem;
+  letter-spacing: 0.02em;
+  word-break: break-all;
+}
+
+/* The fork banner is the one place offline mode shouts. */
+.offline-fork-banner {
+  border: 1px solid rgba(198, 83, 43, 0.6);
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(198, 83, 43, 0.16) 0 10px,
+      rgba(198, 83, 43, 0.06) 10px 20px
+    );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .offline-dot-pending {
+    animation: none;
+  }
+}

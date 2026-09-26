@@ -215,6 +215,18 @@ function mapSupabaseError(error: { readonly code?: string; readonly message?: st
   if (message === "draw_commitment_mismatch") return new DrawError("COMMITMENT_MISMATCH", message);
   if (message === "draw_already_revealed") return new DrawError("ALREADY_REVEALED", message);
   if (message === "draw_not_committed") return new DrawError("NOT_COMMITTED", message);
+  // Enforced by the database, not the application: the winner must be the
+  // member standing at selected_index in the committed ticket order, and the
+  // two digests are never taken on trust from the caller.
+  if (message === "draw_winner_binding_mismatch") return new DrawError("INTEGRITY_FAILURE", message);
+  if (message === "draw_winning_ticket_mismatch") return new DrawError("INTEGRITY_FAILURE", message);
+  if (message === "draw_payout_amount_mismatch") return new DrawError("INTEGRITY_FAILURE", message);
+  if (message === "draw_payout_split_mismatch") return new DrawError("INTEGRITY_FAILURE", message);
+  if (message === "draw_selection_out_of_range") return new DrawError("INVALID_REQUEST", message);
+  // Rotation is only sound if rounds are revealed in ascending order, because
+  // every prior-winner check looks backwards.
+  if (message === "draw_round_out_of_order") return new DrawError("ROUND_OUT_OF_ORDER", message);
+  if (message === "draw_not_revealed") return new DrawError("NOT_COMMITTED", message);
   if (unavailable) return new DrawError("UNAVAILABLE", "draw_tables_unavailable");
   return new DrawError("STORAGE_FAILURE", message);
 }
@@ -392,6 +404,9 @@ export function drawErrorStatus(code: DrawErrorCode): number {
     case "COMMITMENT_MISMATCH":
     case "NO_ELIGIBLE_PARTICIPANTS":
     case "UNIFORMITY_EXHAUSTED":
+    // The caller tried to reveal out of turn. Distinct from a repeat winner so
+    // the client can tell "wait your turn" from "that member already drew".
+    case "ROUND_OUT_OF_ORDER":
       return 422;
     case "UNAVAILABLE":
       return 503;

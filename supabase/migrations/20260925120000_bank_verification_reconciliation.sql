@@ -239,7 +239,7 @@ alter table public.bank_reconciliation_jobs enable row level security;
 alter table private.bank_verification_secrets enable row level security;
 
 create or replace function public.sened_bank_intent_response(
-  intent_row public.bank_verification_intents%rowtype,
+  intent_row public.bank_verification_intents,
   replayed boolean
 )
 returns jsonb
@@ -285,7 +285,7 @@ as $$
 $$;
 
 create or replace function public.sened_bank_intent_json(
-  intent_row public.bank_verification_intents%rowtype
+  intent_row public.bank_verification_intents
 )
 returns jsonb
 language sql
@@ -297,7 +297,7 @@ as $$
 $$;
 
 create or replace function public.sened_bank_job_json(
-  job_row public.bank_reconciliation_jobs%rowtype
+  job_row public.bank_reconciliation_jobs
 )
 returns jsonb
 language sql
@@ -1141,7 +1141,7 @@ revoke all on function public.enqueue_bank_reconciliation_job_v1(uuid, integer) 
 revoke all on function public.claim_bank_reconciliation_job_v1(text, integer) from public, anon, authenticated;
 revoke all on function public.get_bank_reconciliation_job_v1(uuid) from public, anon;
 revoke all on function public.reschedule_bank_reconciliation_job_v1(uuid, text, uuid, text, timestamptz) from public, anon, authenticated;
-revoke all on function public.finalize_bank_reconciliation_job_v1(uuid, text, uuid, text, text, text, uuid) from public, anon, authenticated;
+revoke all on function public.finalize_bank_reconciliation_job_v1(uuid, text, uuid, text, text, text, text, uuid) from public, anon, authenticated;
 revoke all on function public.plan_bank_compensating_reversal_v1(uuid) from public, anon;
 
 grant execute on function public.get_bank_account_binding_v1(uuid) to authenticated;
@@ -1153,4 +1153,4 @@ grant execute on function public.get_bank_reconciliation_job_v1(uuid) to authent
 grant execute on function public.plan_bank_compensating_reversal_v1(uuid) to authenticated;
 grant execute on function public.claim_bank_reconciliation_job_v1(text, integer) to service_role;
 grant execute on function public.reschedule_bank_reconciliation_job_v1(uuid, text, uuid, text, timestamptz) to service_role;
-grant execute on function public.finalize_bank_reconciliation_job_v1(uuid, text, uuid, text, text, text, uuid) to service_role;
+grant execute on function public.finalize_bank_reconciliation_job_v1(uuid, text, uuid, text, text, text, text, uuid) to service_role;

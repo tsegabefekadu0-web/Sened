@@ -7,7 +7,7 @@
 | Branch | `feat/agent-3-draw` |
 | Branched from | `main` @ `d2eac5b` (baseline: 129 files, 75 tests / 12 files) |
 | Start time | 2026-09-26 |
-| Status | **DONE** — all 5 board items complete |
+| Status | **DONE (`c2f127b`)** — all 5 board items complete |
 
 Greenfield milestone. Nothing existed at `main` beyond decorative artwork
 (`public/reference_assets/mesob_*.png`) and two dead components with zero
@@ -66,7 +66,7 @@ triple in `docs/requests/agent-3.md`.
 | No secrets or real transactions | none; all fixtures are synthetic UUIDs |
 | Fail closed | verified: refused reveal names no winner; broken hasher → `INTEGRITY_FAILURE`; unconfigured → 503 |
 | Claim row updated | this file |
-| PR | branch pushed; PR to be opened against `main` |
+| PR | `c2f127b` on `feat/agent-3-draw`, 32 files, +7204. Branch is the integration point, so the commit sits on top of `cec7cc4`. |
 
 > A1 moved this branch onto the integrated head (`cec7cc4`) while I was working,
 > so I re-ran every check against the tree that now contains all four lanes. My

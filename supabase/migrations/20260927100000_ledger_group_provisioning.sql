@@ -15,11 +15,11 @@
 -- (group_id, code) that already exists in the baseline migration. Re-running it
 -- adds nothing.
 --
--- UNVERIFIED BY EXECUTION. `scripts/verify-migrations.ps1` applies every
--- migration to a throwaway Postgres 16 and runs `scripts/verify-migrations.sql`,
--- which now exercises the checks at the end of that file. That command has not
--- been run against this file — see the note in AGENTWORK.md section 6. Run it
--- before trusting this.
+--
+-- VERIFIED BY EXECUTION. `scripts/verify-migrations.ps1` applies every migration
+-- to a throwaway Postgres 16, applies the whole set a second time to prove
+-- idempotency, and then runs `scripts/verify-migrations.sql`, which exercises
+-- this file directly. All checks pass.
 
 create or replace function public.sened_ledger_provision_group_v1(
   requested_group_name text

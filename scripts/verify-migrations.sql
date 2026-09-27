@@ -94,6 +94,33 @@ begin
 end;
 $$;
 
+-- A sealed member contribution, shared by every draw check below. The M4.3
+-- protocol refuses a commitment with none, and the draw RPCs were reissued at the
+-- new arity by 20260927130000_draw_member_rpcs.sql, so every call here carries a
+-- digest and a set.
+create or replace function pg_temp.member_digest() returns text
+  language sql immutable as $$ select repeat('e', 64) $$;
+
+create or replace function pg_temp.member_set() returns jsonb
+  language sql immutable as $$
+    select jsonb_build_array(
+      jsonb_build_object(
+        'memberId', '44444444-4444-4444-8444-444444444444',
+        'sealed', repeat('c', 64)
+      )
+    )
+  $$;
+
+create or replace function pg_temp.member_nonces() returns jsonb
+  language sql immutable as $$
+    select jsonb_build_array(
+      jsonb_build_object(
+        'memberId', '44444444-4444-4444-8444-444444444444',
+        'nonce', repeat('m', 24)
+      )
+    )
+  $$;
+
 -- ===========================================================================
 -- CHECK 2: an honest reveal is accepted
 --
@@ -106,15 +133,18 @@ begin
   perform public.commit_draw_v1(
     'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
     'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
-    1, 'dddddddd-0000-4000-8000-000000000001'::uuid,
-    commitment, repeat('n', 32), repeat('2', 64), pg_temp.roster(),
+    1, 'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
+    commitment, repeat('n', 32), repeat('2', 64),
+    pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
     3000.00, 8, 1000, 'verify-honest-round-1', now()
   );
 
   perform public.reveal_draw_v1(
-    'dddddddd-0000-4000-8000-000000000001'::uuid,
+    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
     'seed-value-for-round-one-000000000000',
-    commitment, repeat('3', 64), repeat('4', 64),
+    commitment,
+    pg_temp.member_digest(), pg_temp.member_nonces(),
+    repeat('3', 64), repeat('4', 64),
     0, '44444444-4444-4444-8444-444444444444'::uuid, repeat('a', 64),
     2700.00, 300.00, now()
   );
@@ -138,7 +168,8 @@ begin
     'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
     'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
     2, 'dddddddd-0000-4000-8000-000000000002'::uuid,
-    commitment, repeat('o', 32), repeat('6', 64), pg_temp.roster(),
+    commitment, repeat('o', 32), repeat('6', 64),
+    pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
     3000.00, 8, 1000, 'verify-forged-round-2', now()
   );
 
@@ -147,7 +178,9 @@ begin
     perform public.reveal_draw_v1(
       'dddddddd-0000-4000-8000-000000000002'::uuid,
       'seed-value-for-round-two-0000000000000',
-      commitment, repeat('7', 64), repeat('8', 64),
+      commitment,
+    pg_temp.member_digest(), pg_temp.member_nonces(),
+    repeat('7', 64), repeat('8', 64),
       0, '22222222-2222-4222-8222-222222222222'::uuid, repeat('c', 64),
       2700.00, 300.00, now()
     );
@@ -165,7 +198,9 @@ begin
     perform public.reveal_draw_v1(
       'dddddddd-0000-4000-8000-000000000002'::uuid,
       'seed-value-for-round-two-0000000000000',
-      commitment, repeat('7', 64), repeat('8', 64),
+      commitment,
+    pg_temp.member_digest(), pg_temp.member_nonces(),
+    repeat('7', 64), repeat('8', 64),
       2, '22222222-2222-4222-8222-222222222222'::uuid, repeat('a', 64),
       2700.00, 300.00, now()
     );
@@ -190,15 +225,17 @@ begin
   perform public.commit_draw_v1(
     'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
     'aaaaaaaa-0000-4000-8000-0000000000c2'::uuid,
-    1, 'eeeeeeee-0000-4000-8000-000000000001'::uuid,
-    repeat('d1', 32), repeat('r1', 32), repeat('e1', 32), pg_temp.roster(),
+    1, 'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
+    repeat('d1', 32), repeat('r1', 32), repeat('e1', 32),
+    pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
     3000.00, 8, 1000, 'verify-order-c2-round-1', now()
   );
   perform public.commit_draw_v1(
     'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
     'aaaaaaaa-0000-4000-8000-0000000000c2'::uuid,
     2, 'eeeeeeee-0000-4000-8000-000000000002'::uuid,
-    repeat('d2', 32), repeat('r2', 32), repeat('e2', 32), pg_temp.roster(),
+    repeat('d2', 32), repeat('r2', 32), repeat('e2', 32),
+    pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
     3000.00, 8, 1000, 'verify-order-c2-round-2', now()
   );
 
@@ -208,7 +245,9 @@ begin
     perform public.reveal_draw_v1(
       'eeeeeeee-0000-4000-8000-000000000002'::uuid,
       'seed-cycle-two-round-two-000000000',
-      repeat('d2', 32), repeat('f1', 32), repeat('f2', 32),
+      repeat('d2', 32),
+      pg_temp.member_digest(), pg_temp.member_nonces(),
+      repeat('f1', 32), repeat('f2', 32),
       2, '22222222-2222-4222-8222-222222222222'::uuid, repeat('c', 64),
       2700.00, 300.00, now()
     );
@@ -222,9 +261,11 @@ begin
   -- Round 1 now succeeds, proving the guard is ordering-based rather than
   -- simply refusing everything.
   perform public.reveal_draw_v1(
-    'eeeeeeee-0000-4000-8000-000000000001'::uuid,
+    'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
     'seed-cycle-two-round-one-000000000',
-    repeat('d1', 32), repeat('f3', 32), repeat('f4', 32),
+    repeat('d1', 32),
+    pg_temp.member_digest(), pg_temp.member_nonces(),
+    repeat('f3', 32), repeat('f4', 32),
     0, '44444444-4444-4444-8444-444444444444'::uuid, repeat('a', 64),
     2700.00, 300.00, now()
   );
@@ -233,7 +274,9 @@ begin
   perform public.reveal_draw_v1(
     'eeeeeeee-0000-4000-8000-000000000002'::uuid,
     'seed-cycle-two-round-two-000000000',
-    repeat('d2', 32), repeat('f1', 32), repeat('f2', 32),
+    repeat('d2', 32),
+    pg_temp.member_digest(), pg_temp.member_nonces(),
+    repeat('f1', 32), repeat('f2', 32),
     2, '22222222-2222-4222-8222-222222222222'::uuid, repeat('c', 64),
     2700.00, 300.00, now()
   );
@@ -274,7 +317,7 @@ begin
   -- Payout for a different amount than the reveal recorded must be refused.
   begin
     perform public.record_draw_payout_v1(
-      'dddddddd-0000-4000-8000-000000000001'::uuid,
+      'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
       entry_id,
       '44444444-4444-4444-8444-444444444444'::uuid,
       9999.00, 300.00, now()
@@ -291,7 +334,7 @@ begin
   -- error); the new trigger is the backstop for a direct table insert.
   begin
     perform public.record_draw_payout_v1(
-      'dddddddd-0000-4000-8000-000000000001'::uuid,
+      'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
       entry_id,
       '22222222-2222-4222-8222-222222222222'::uuid,
       2700.00, 300.00, now()
@@ -306,7 +349,7 @@ begin
 
   -- The honest payout is accepted.
   perform public.record_draw_payout_v1(
-    'dddddddd-0000-4000-8000-000000000001'::uuid,
+    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
     entry_id,
     '44444444-4444-4444-8444-444444444444'::uuid,
     2700.00, 300.00, now()
@@ -381,8 +424,12 @@ begin
     null,
     null,
     jsonb_build_array(
-      jsonb_build_object('accountId', cash_id, 'direction', 'debit', 'amount', 5000.00),
-      jsonb_build_object('accountId', income_id, 'direction', 'credit', 'amount', 5000.00)
+      -- The wire form is a *string*: `post_ledger_entry_v1` rejects a JSON
+      -- number here, which is the same rule the TypeScript `formatEtbAmount`
+      -- enforces. Passing 5000.00 rather than '5000.00' is rejected as
+      -- ledger_invalid_posting.
+      jsonb_build_object('accountId', cash_id, 'direction', 'debit', 'amount', '5000.00'),
+      jsonb_build_object('accountId', income_id, 'direction', 'credit', 'amount', '5000.00')
     )
   );
 
@@ -432,9 +479,9 @@ $provision$;
 do $member$
 declare
   draw_uuid constant uuid := 'cccccccc-0000-4000-8000-000000000001';
-  group_uuid constant uuid := 'dddddddd-0000-4000-8000-000000000001';
+  group_uuid constant uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
   tenant_uuid constant uuid := 'bbbbbbbb-0000-4000-8000-000000000001';
-  cycle_uuid constant uuid := 'eeeeeeee-0000-4000-8000-000000000001';
+  cycle_uuid constant uuid := 'aaaaaaaa-0000-4000-8000-0000000000c1';
   actor_uuid constant uuid := '11111111-1111-4111-8111-111111111111';
 begin
   -- A commitment carrying a real member set is accepted.
@@ -443,15 +490,28 @@ begin
     member_digest, member_commitments, roster_digest, participants, pot_amount,
     total_rounds, reserve_ratio_bps, actor_id, idempotency_key
   ) values (
-    draw_uuid, group_uuid, tenant_uuid, cycle_uuid, 1, 'a'.repeat(64),
-    'nonce-0123456789abcdef-XYZ', 'e'.repeat(64),
+    draw_uuid, group_uuid, tenant_uuid, cycle_uuid, 1, repeat('a', 64),
+    'nonce-0123456789abcdef-XYZ', repeat('e', 64),
     jsonb_build_array(
       jsonb_build_object(
         'memberId', '44444444-4444-4444-8444-444444444444',
-        'sealed', 'c'.repeat(64)
+        'sealed', repeat('c', 64)
       )
     ),
-    'b'.repeat(64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-1'
+    repeat('b', 64),
+    -- One participant, so the reveal's selected_index 0 is a real member. The
+    -- reveal trigger checks the index against the committed roster and raises
+    -- draw_selection_out_of_range otherwise, which would mask the constraint
+    -- these checks are actually about.
+    jsonb_build_array(
+      jsonb_build_object(
+        'memberId', '44444444-4444-4444-8444-444444444444',
+        'displayName', 'Member A',
+        'ticket', repeat('c', 64),
+        'contributionAmount', '5000.00'
+      )
+    ),
+    5000.00, 5, 1000, actor_uuid, 'member-commit-1'
   );
 
   if not exists (
@@ -471,8 +531,8 @@ begin
       total_rounds, reserve_ratio_bps, actor_id, idempotency_key
     ) values (
       'cccccccc-0000-4000-8000-000000000002', group_uuid, tenant_uuid, cycle_uuid,
-      2, 'a'.repeat(64), 'nonce-0123456789abcdef-XYZ', 'e'.repeat(64), '[]'::jsonb,
-      'b'.repeat(64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-empty'
+      2, repeat('a', 64), 'nonce-0123456789abcdef-XYZ', repeat('e', 64), '[]'::jsonb,
+      repeat('b', 64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-empty'
     );
     raise exception 'MEMBER 2 FAILED: a commitment with an EMPTY member set was ACCEPTED';
   exception when others then
@@ -489,8 +549,8 @@ begin
       total_rounds, reserve_ratio_bps, actor_id, idempotency_key
     ) values (
       'cccccccc-0000-4000-8000-000000000003', group_uuid, tenant_uuid, cycle_uuid,
-      3, 'a'.repeat(64), 'nonce-0123456789abcdef-XYZ', 'not-a-digest', '[]'::jsonb,
-      'b'.repeat(64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-baddigest'
+      3, repeat('a', 64), 'nonce-0123456789abcdef-XYZ', 'not-a-digest', '[]'::jsonb,
+      repeat('b', 64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-baddigest'
     );
     raise exception 'MEMBER 3 FAILED: a non-digest member_digest was ACCEPTED';
   exception when others then
@@ -501,16 +561,20 @@ begin
 
   -- A reveal that opens an empty set is refused for the same reason: the
   -- randomness that decided the winner would not be public.
+  --
+  -- The split must balance first: the reveal validation trigger runs before the
+  -- table constraint, and 5000 + 500 against a 5000 pot trips
+  -- draw_payout_split_mismatch long before the nonce set is ever examined.
   begin
     insert into public.draw_reveals (
       draw_id, commitment, seed, member_digest, member_nonces, transcript_digest,
       selection_digest, selected_index, winner_member_id, winning_ticket,
       payout_amount, reserve_amount, actor_id
     ) values (
-      draw_uuid, 'a'.repeat(64), 'reveal-seed-0123456789', 'e'.repeat(64), '[]'::jsonb,
-      'f'.repeat(64), 'a'.repeat(64), 0,
-      '44444444-4444-4444-8444-444444444444', 'c'.repeat(64),
-      5000.00, 500.00, actor_uuid
+      draw_uuid, repeat('a', 64), 'reveal-seed-0123456789', repeat('e', 64), '[]'::jsonb,
+      repeat('f', 64), repeat('a', 64), 0,
+      '44444444-4444-4444-8444-444444444444', repeat('c', 64),
+      4500.00, 500.00, actor_uuid
     );
     raise exception 'MEMBER 4 FAILED: a reveal with an EMPTY member nonce set was ACCEPTED';
   exception when others then
@@ -539,14 +603,14 @@ begin
   -- A commit with an empty member set is refused by the function itself.
   begin
     perform public.commit_draw_v1(
-      'dddddddd-0000-4000-8000-000000000001'::uuid,
-      'eeeeeeee-0000-4000-8000-000000000001'::uuid,
+      'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
+      'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
       1,
       'cccccccc-0000-4000-8000-000000000010'::uuid,
-      'a'.repeat(64),
+      repeat('a', 64),
       'nonce-0123456789abcdef-XYZ',
-      'b'.repeat(64),
-      'e'.repeat(64),
+      repeat('b', 64),
+      repeat('e', 64),
       '[]'::jsonb,
       '[]'::jsonb,
       5000.00, 5, 1000, 'rpc-empty-member-set', now()
@@ -561,13 +625,13 @@ begin
   -- A null member set is refused too, not silently defaulted.
   begin
     perform public.commit_draw_v1(
-      'dddddddd-0000-4000-8000-000000000001'::uuid,
-      'eeeeeeee-0000-4000-8000-000000000001'::uuid,
+      'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
+      'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
       1,
       'cccccccc-0000-4000-8000-000000000011'::uuid,
-      'a'.repeat(64),
+      repeat('a', 64),
       'nonce-0123456789abcdef-XYZ',
-      'b'.repeat(64),
+      repeat('b', 64),
       null, null, '[]'::jsonb, 5000.00, 5, 1000, 'rpc-null-member-set', now()
     );
     raise exception 'RPC 2 FAILED: commit_draw_v1 ACCEPTED a null member set';
@@ -577,20 +641,23 @@ begin
     end if;
   end;
 
-  -- An honest commit through the RPC is accepted and stores the set.
+  -- An honest commit through the RPC is accepted and stores the set. Round 2 of
+  -- a cycle whose total is 5, because CHECK 2 already holds round 1 of cycle 1
+  -- and `draw_commitments_cycle_round_key` is unique while
+  -- `draw_commitments_round_total_check` requires round <= total_rounds.
   perform public.commit_draw_v1(
-    'dddddddd-0000-4000-8000-000000000001'::uuid,
-    'eeeeeeee-0000-4000-8000-000000000001'::uuid,
-    1,
+    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
+    'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
+    2,
     'cccccccc-0000-4000-8000-000000000012'::uuid,
-    'a'.repeat(64),
+    repeat('a', 64),
     'nonce-0123456789abcdef-XYZ',
-    'b'.repeat(64),
-    'e'.repeat(64),
+    repeat('b', 64),
+    repeat('e', 64),
     jsonb_build_array(
       jsonb_build_object(
         'memberId', '44444444-4444-4444-8444-444444444444',
-        'sealed', 'c'.repeat(64)
+        'sealed', repeat('c', 64)
       )
     ),
     '[]'::jsonb,
@@ -609,9 +676,9 @@ begin
   begin
     perform public.reveal_draw_v1(
       'cccccccc-0000-4000-8000-000000000012'::uuid,
-      'reveal-seed-0123456789', 'a'.repeat(64), 'e'.repeat(64), '[]'::jsonb,
-      'f'.repeat(64), 'a'.repeat(64), 0,
-      '44444444-4444-4444-8444-444444444444', 'c'.repeat(64),
+      'reveal-seed-0123456789', repeat('a', 64), repeat('e', 64), '[]'::jsonb,
+      repeat('f', 64), repeat('a', 64), 0,
+      '44444444-4444-4444-8444-444444444444', repeat('c', 64),
       5000.00, 500.00, now()
     );
     raise exception 'RPC 4 FAILED: reveal_draw_v1 ACCEPTED an empty nonce set';
@@ -625,12 +692,12 @@ begin
   begin
     perform public.reveal_draw_v1(
       'cccccccc-0000-4000-8000-000000000012'::uuid,
-      'reveal-seed-0123456789', 'a'.repeat(64), '1'.repeat(64),
+      'reveal-seed-0123456789', repeat('a', 64), repeat('1', 64),
       jsonb_build_array(
         jsonb_build_object('memberId', '44444444-4444-4444-8444-444444444444', 'nonce', 'n')
       ),
-      'f'.repeat(64), 'a'.repeat(64), 0,
-      '44444444-4444-4444-8444-444444444444', 'c'.repeat(64),
+      repeat('f', 64), repeat('a', 64), 0,
+      '44444444-4444-4444-8444-444444444444', repeat('c', 64),
       5000.00, 500.00, now()
     );
     raise exception 'RPC 5 FAILED: reveal_draw_v1 ACCEPTED a swapped member digest';

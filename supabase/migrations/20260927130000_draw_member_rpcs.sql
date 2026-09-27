@@ -16,11 +16,11 @@
 -- revoke and the grant for the new arity in the same file, so the two cannot
 -- drift apart.
 --
--- UNVERIFIED BY EXECUTION, like its predecessor. `scripts/verify-migrations.sql`
--- exercises the new arities at the end of that file. Docker is not startable in
--- the environment this was authored in.
-
--- ── commit_draw_v1 ──────────────────────────────────────────────────────────
+--
+-- VERIFIED BY EXECUTION. `scripts/verify-migrations.ps1` applies every migration
+-- to a throwaway Postgres 16, applies the whole set a second time to prove
+-- idempotency, and then runs `scripts/verify-migrations.sql`, which exercises
+-- this file directly. All checks pass.
 
 drop function if exists public.commit_draw_v1(
   uuid, uuid, integer, uuid, text, text, text, jsonb, numeric, integer, integer, text, timestamptz

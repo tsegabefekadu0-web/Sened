@@ -41,12 +41,23 @@ docker run -d --name $container `
     -e POSTGRES_PASSWORD=$password -e POSTGRES_DB=sened `
     postgres:16-alpine | Out-Null
 
-for ($i = 0; $i -lt 30; $i++) {
-    docker exec $container pg_isready -U postgres 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) { break }
+# Wait for Postgres to actually answer a query.
+#
+# `pg_isready` alone is not enough: it can report ready while the postmaster is
+# still coming up, and the first real connection then fails with
+# "connection to server on socket ... No such file or directory". That is exactly
+# what happened once this script was run repeatedly, so readiness is now proven
+# with the same connection path every migration will use.
+$ready = $false
+for ($i = 0; $i -lt 60; $i++) {
+    docker exec $container psql -U postgres -d postgres -c 'select 1' 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { $ready = $true; break }
     Start-Sleep -Seconds 1
 }
-if ($LASTEXITCODE -ne 0) { throw 'Postgres did not become ready' }
+if (-not $ready) {
+    docker logs $container 2>&1 | Out-String | Write-Host
+    throw 'Postgres did not become ready'
+}
 
 $migrations = Get-ChildItem (Join-Path $repoRoot 'supabase\migrations\*.sql') | Sort-Object Name
 
@@ -69,6 +80,25 @@ foreach ($migration in $migrations) {
         throw "Migration failed: $($migration.Name)"
     }
 }
+
+# Apply the whole set a second time.
+#
+# Every migration in this repository claims to be idempotent - `create table if
+# not exists`, `add column if not exists`, `on conflict do nothing` - and a
+# migration that can only be applied once is a migration nobody can safely
+# re-run. Nothing proved the claim until this pass existed: the three M4.3
+# migrations and the provisioning migration all rely on it.
+Write-Host 'Re-applying every migration to prove idempotency...' -ForegroundColor Cyan
+foreach ($migration in $migrations) {
+    $result = Invoke-Db -SqlFile $migration.FullName
+    if ($result.Code -ne 0) {
+        Write-Host "  $($migration.Name) failed on the second pass:" -ForegroundColor Red
+        Write-Host $result.Out -ForegroundColor Red
+        docker rm -f $container 2>&1 | Out-Null
+        throw "Migration is not idempotent: $($migration.Name)"
+    }
+}
+Write-Host '  every migration re-applied cleanly.' -ForegroundColor Green
 
 Write-Host 'Running verification checks...' -ForegroundColor Cyan
 $check = Invoke-Db -SqlFile (Join-Path $repoRoot 'scripts\verify-migrations.sql')

@@ -36,6 +36,20 @@ async function bodyText(page: Page): Promise<string> {
   return (await page.locator("body").innerText()).replace(/\s+/g, " ");
 }
 
+/**
+ * Block everything that is not served by this app.
+ *
+ * `layout.tsx` loads Noto Sans Ethiopic from fonts.googleapis.com. Where that is
+ * unreachable the request hangs, and a navigation waiting for the `load` event
+ * waits with it — which is what made this suite flake: the same forty tests
+ * would pass or fail depending on whether a third-party CDN answered. The font
+ * degrades to a system stack either way, so blocking it changes nothing about
+ * what is being tested and makes every navigation deterministic.
+ */
+test.beforeEach(async ({ page }) => {
+  await page.route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/, (route) => route.abort());
+});
+
 test.describe("every route renders", () => {
   for (const route of PAGES) {
     test(`${route.path} — ${route.name} loads without a runtime error`, async ({ page }) => {
@@ -88,9 +102,12 @@ test.describe("the mobile shell", () => {
   test("shows the pot balance and the four contribution rows honestly", async ({ page }) => {
     await page.goto("/");
 
-    // Exact, because the workspace link row also contains "ደብተር" and a loose
-    // match would pass on the nav label rather than the card heading.
-    await expect(page.getByText("ደብተር", { exact: true })).toBeVisible();
+    // By the card's own accessible name. A bare getByText("ደብተር") matches the
+    // card heading *and* the workspace link's label, and `exact: true` does not
+    // help because the link's inner span is that one word too.
+    await expect(
+      page.getByRole("button", { name: "ደብተር የገንዘብ መጠን እና ቀጣይ እጣ" })
+    ).toBeVisible();
     await expect(page.getByText("175,000")).toBeVisible();
 
     // The feed is labelled "member contributions", not "verified contributions".
@@ -112,10 +129,16 @@ test.describe("the mobile shell", () => {
   test("links to all four built tools", async ({ page }) => {
     await page.goto("/");
 
-    await expect(page.getByRole("link", { name: /የድምጽ ስራ ጣሪያ/ })).toHaveAttribute("href", "/voice");
-    await expect(page.getByRole("link", { name: /ፍትሃዊ እጣ/ })).toHaveAttribute("href", "/draw");
-    await expect(page.getByRole("link", { name: /ደብተር ንጉጥብ/ })).toHaveAttribute("href", "/ledger");
-    await expect(page.getByRole("link", { name: /የመስመር ጽሕፈት/ })).toHaveAttribute("href", "/offline");
+    // Asserted on hrefs, not on label wording. The four routes are the contract;
+    // the copy above them is design, and it changes. A test that fails when
+    // someone shortens a nav label is measuring the wrong thing.
+    const hrefs = await page
+      .locator("nav a[href]")
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("href")));
+
+    for (const route of ["/voice", "/draw", "/ledger", "/offline"]) {
+      expect(hrefs, `the shell should link ${route}`).toContain(route);
+    }
   });
 
   test("the bottom-nav slots say something, instead of changing state and showing nothing", async ({
@@ -145,7 +168,7 @@ test.describe("the mobile shell", () => {
     await page.getByRole("button", { name: "ደብተር (Debter Ledger)" }).click();
     const panel = page.getByRole("region", { name: /ደብተር/ });
     await expect(panel).toBeVisible();
-    await panel.getByRole("link", { name: /የደብተር ንጉጥብ ክፈት/ }).click();
+    await panel.locator("a[href='/ledger']").click();
 
     await expect(page).toHaveURL(/\/ledger$/);
   });

@@ -15,11 +15,11 @@
 -- The columns below store both halves so any member can recompute the ceremony
 -- from published values alone, which is the whole social contract of an Equb.
 --
--- UNVERIFIED BY EXECUTION. `scripts/verify-migrations.ps1` applies every
--- migration to a throwaway Postgres 16 and then runs `scripts/verify-migrations.sql`,
--- which exercises these columns at the end of that file. That command has not
--- been run against this file — Docker is not startable in the environment this
--- was authored in. Run it before trusting this.
+--
+-- VERIFIED BY EXECUTION. `scripts/verify-migrations.ps1` applies every migration
+-- to a throwaway Postgres 16, applies the whole set a second time to prove
+-- idempotency, and then runs `scripts/verify-migrations.sql`, which exercises
+-- this file directly. All checks pass.
 
 alter table public.draw_commitments
   add column if not exists member_digest text

@@ -5,10 +5,10 @@ import {
   canonicalSerializeRoster,
   computeRosterDigest,
   MAX_SELECTION_ROUNDS,
-  nodeDrawHasher,
   selectWinnerIndex,
   toVerificationTranscript
 } from "@/lib/draw/canonical";
+import { nodeDrawHasher } from "@/lib/draw/nodeHasher";
 import { DrawError } from "@/lib/draw/errors";
 import { createCommitment, openReveal, verifyRound, verifyTranscript } from "@/lib/draw/engine";
 import {

@@ -106,6 +106,22 @@ export class ReconciliationCoordinator {
   ) {}
 
   async run(workerId: string, leaseMs: number): Promise<ReconciliationJob | null> {
+    const settled = await this.runWithOutcome(workerId, leaseMs);
+    return settled?.job ?? null;
+  }
+
+  /**
+   * Same work, but hands back the provider's verdict as well as the job.
+   *
+   * `run` cannot report whether it settled a job as VERIFIED or REJECTED —
+   * `finalize` records both as `SUCCEEDED` and the difference only survives on
+   * the intent. A drain that could not tell those apart would be reporting a
+   * number nobody could act on.
+   */
+  async runWithOutcome(
+    workerId: string,
+    leaseMs: number
+  ): Promise<{ job: ReconciliationJob; outcome: ReconciliationCoordinatorOutcome } | null> {
     const now = this.clock();
     const claim = await this.store.claimNext(workerId, now, leaseMs);
     if (!claim || !claim.job.leaseToken) {
@@ -132,25 +148,100 @@ export class ReconciliationCoordinator {
             outcome.retryAfterSeconds
           )
       );
-      return this.store.reschedule(
-        claim.job.id,
-        workerId,
-        claim.job.leaseToken,
-        outcome.reasonCode,
-        nextAttemptAt
-      );
+      return {
+        outcome,
+        job: await this.store.reschedule(
+          claim.job.id,
+          workerId,
+          claim.job.leaseToken,
+          outcome.reasonCode,
+          nextAttemptAt
+        )
+      };
     }
     if (outcome.state === "VERIFIED" || outcome.state === "REJECTED") {
-      return this.store.finalize(claim.job.id, workerId, claim.job.leaseToken, {
-        state: outcome.state,
-        reasonCode: outcome.reasonCode,
-        evidenceFingerprint: outcome.evidenceFingerprint,
-        providerTransactionIdentityHmac: outcome.providerTransactionIdentityHmac,
-        ledgerEntryId: outcome.ledgerEntryId
-      });
+      return {
+        outcome,
+        job: await this.store.finalize(claim.job.id, workerId, claim.job.leaseToken, {
+          state: outcome.state,
+          reasonCode: outcome.reasonCode,
+          evidenceFingerprint: outcome.evidenceFingerprint,
+          providerTransactionIdentityHmac: outcome.providerTransactionIdentityHmac,
+          ledgerEntryId: outcome.ledgerEntryId
+        })
+      };
     }
     throw new BankVerificationError("INTEGRITY_FAILURE", "Reconciliation outcome is invalid");
   }
+}
+
+export interface ReconciliationDrainResult {
+  /** Jobs this call took a lease on. */
+  readonly attempted: number;
+  readonly verified: number;
+  readonly rejected: number;
+  /** Left for a later attempt; `nextAttemptAt` is in the future. */
+  readonly rescheduled: number;
+  /** Attempts exhausted. These need a person, not another retry. */
+  readonly manualReview: number;
+  /** True when the loop stopped on its iteration bound rather than an empty queue. */
+  readonly truncated: boolean;
+}
+
+/**
+ * Drain the reconciliation queue until nothing is claimable.
+ *
+ * `ReconciliationCoordinator` was written, tested, and then never driven: it
+ * processes exactly one job per call and nothing called it, so every
+ * `PENDING_RECONCILIATION` produced by a bank timeout stayed pending forever.
+ * The ROADMAP's promise — an exponential backoff queue that "automatically
+ * checks bank status when connectivity returns" — had no entry point.
+ *
+ * The loop terminates because a rescheduled job's `nextAttemptAt` is in the
+ * future, which makes it unclaimable on the next pass. The iteration bound is a
+ * backstop against a store that keeps handing back work, not the normal exit.
+ *
+ * A drain is a batch, not a transaction: one job failing is caught by the
+ * coordinator and rescheduled rather than aborting the rest of the queue.
+ */
+export async function drainReconciliationQueue(
+  coordinator: ReconciliationCoordinator,
+  options: {
+    readonly workerId: string;
+    readonly leaseMs: number;
+    /** Backstop. Defaults to 100. */
+    readonly maxIterations?: number;
+  }
+): Promise<ReconciliationDrainResult> {
+  const maxIterations = Math.max(1, Math.floor(options.maxIterations ?? 100));
+  let attempted = 0;
+  let verified = 0;
+  let rejected = 0;
+  let rescheduled = 0;
+  let manualReview = 0;
+
+  while (attempted < maxIterations) {
+    const settled = await coordinator.runWithOutcome(options.workerId, options.leaseMs);
+    if (!settled) {
+      return { attempted, verified, rejected, rescheduled, manualReview, truncated: false };
+    }
+    attempted += 1;
+    if (settled.job.state === "MANUAL_REVIEW") {
+      manualReview += 1;
+      continue;
+    }
+    if (settled.outcome.state === "VERIFIED") {
+      verified += 1;
+      continue;
+    }
+    if (settled.outcome.state === "REJECTED") {
+      rejected += 1;
+      continue;
+    }
+    rescheduled += 1;
+  }
+
+  return { attempted, verified, rejected, rescheduled, manualReview, truncated: true };
 }
 
 export class InMemoryReconciliationJobStore implements ReconciliationJobStore {

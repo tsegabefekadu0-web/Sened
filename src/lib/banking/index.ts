@@ -1,4 +1,5 @@
 export * from "./errors";
+export * from "./ledgerSink";
 export * from "./matching";
 export * from "./reconciliation";
 export * from "./repository";

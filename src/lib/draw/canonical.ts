@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { DrawError } from "./errors";
 import type {
   DrawCommitment,
@@ -58,17 +56,14 @@ export function assertHex64(value: unknown, label: string): string {
   return value;
 }
 
-export function sha256Hex(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-/** Node implementation of the hashing seam, for the server and the test suite. */
-export const nodeDrawHasher: DrawHasher = async (data: string) => sha256Hex(data);
-
 /**
  * Browser implementation, used by the `/draw` route so a member can verify a
  * published draw on their own device. Falls closed if WebCrypto is missing
  * rather than substituting a weaker hash.
+ *
+ * The Node hasher lives in `./nodeHasher` and is deliberately not imported here:
+ * this module is reachable from a client component, and a `node:crypto` import
+ * anywhere in its graph makes `/draw` unbuildable.
  */
 export const webDrawHasher: DrawHasher = async (data: string) => {
   const subtle = globalThis.crypto?.subtle;

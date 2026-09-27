@@ -3,7 +3,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { LedgerService, SupabaseLedgerRepository } from "@/lib/ledger";
 
-import { nodeDrawHasher } from "./canonical";
+import { nodeDrawHasher } from "./nodeHasher";
 import { SupabaseDrawRepository, type DrawRepository } from "./repository";
 import { DrawService, type DrawServiceOptions } from "./service";
 import type { DrawHasher } from "./types";

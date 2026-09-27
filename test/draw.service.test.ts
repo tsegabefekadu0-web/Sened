@@ -6,7 +6,7 @@ import {
   verifyLedgerChain,
   type LedgerEntry
 } from "@/lib/ledger";
-import { nodeDrawHasher } from "@/lib/draw/canonical";
+import { nodeDrawHasher } from "@/lib/draw/nodeHasher";
 import { InMemoryDrawRepository } from "@/lib/draw/repository";
 import { DrawService, payoutIdempotencyKey } from "@/lib/draw/service";
 import type { DrawMember } from "@/lib/draw/types";

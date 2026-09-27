@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import { isLedgerError, LedgerService, type LedgerEntry } from "@/lib/ledger";
-import { nodeDrawHasher, toVerificationTranscript } from "./canonical";
+import { toVerificationTranscript } from "./canonical";
+import { nodeDrawHasher } from "./nodeHasher";
 import { createCommitment, openReveal, verifyRound, type CommitRequest } from "./engine";
 import { DrawError } from "./errors";
 import {

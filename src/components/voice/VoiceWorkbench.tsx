@@ -62,6 +62,38 @@ const OCCURRED_AT = "2026-09-26T09:30:00.000Z";
 const IDEMPOTENCY_KEY = "voice-workbench-1";
 
 /**
+ * Read a browser capability once the component has mounted.
+ *
+ * `isRecordingSupported()` and `isSpeechRecognitionSupported()` read
+ * `navigator`, which does not exist while the server renders. Calling either
+ * during render makes the server emit "this browser does not support recording"
+ * and the client emit the opposite, which React reports as a hydration mismatch
+ * (error #418) and then answers by discarding the server HTML entirely (#423).
+ *
+ * That is not a warning. The page loses its server-rendered content on every
+ * load, and on a Sunday meeting behind a slow connection that is the difference
+ * between a shell that paints instantly and one that does not.
+ *
+ * `false` is the first value on both sides, so the two renders agree. The cost is
+ * a single frame in which a capable browser is told it is not; the alternative
+ * is a hydration failure every time.
+ *
+ * `VoiceModal` already did this with an inline `typeof window` guard. The
+ * workbench did not, and no test could see it: jsdom has no `navigator.mediaDevices`
+ * either, so the server and the test client agreed with each other and both
+ * disagreed with Chromium.
+ */
+function useBrowserCapability(check: () => boolean): boolean {
+  const [supported, setSupported] = useState(false);
+  const checkRef = useRef(check);
+  checkRef.current = check;
+  useEffect(() => {
+    setSupported(checkRef.current());
+  }, []);
+  return supported;
+}
+
+/**
  * The `/voice` workbench.
  *
  * Four panels, each proving one claim:
@@ -85,6 +117,7 @@ export function VoiceWorkbench() {
   const [text, setText] = useState<string>(SAMPLES[0].text);
   const [capability, setCapability] = useState<VoiceCapability | null>(null);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
+  const recognitionSupported = useBrowserCapability(isSpeechRecognitionSupported);
 
   const draft = useMemo(
     () => (text.trim().length > 0 ? parseContributionUtterance(text) : null),
@@ -239,7 +272,7 @@ export function VoiceWorkbench() {
             </button>
 
             <p className="sened-voice-card__description">
-              {isSpeechRecognitionSupported()
+              {recognitionSupported
                 ? "This browser exposes the Web Speech API, so on-device transcription is available with no credential."
                 : "This browser does not expose the Web Speech API."}
             </p>
@@ -392,7 +425,7 @@ function RecorderCard({
   const [message, setMessage] = useState<string | null>(null);
   const recorderRef = useRef<VoiceRecorder | null>(null);
 
-  const supported = isRecordingSupported();
+  const supported = useBrowserCapability(isRecordingSupported);
 
   useEffect(
     () => () => {

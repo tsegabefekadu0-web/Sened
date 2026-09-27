@@ -9,7 +9,9 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:all": "npm run lint && npm run typecheck && npm test && npm run build && npm run test:e2e"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.1",
@@ -22,6 +24,7 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@testing-library/jest-dom": "6.6.3",
     "@testing-library/react": "16.1.0",
     "@testing-library/user-event": "14.5.2",

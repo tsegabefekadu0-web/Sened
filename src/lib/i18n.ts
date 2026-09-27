@@ -357,6 +357,17 @@ export const en = {
   "voice.recordLocally": "Record on this device",
   "voice.recordLocallyBody": "Kept on this phone only. It is not a receipt and it does not enter the ledger until a bank confirms it.",
   "voice.recordLocallyFailed": "The note could not be saved on this device. Nothing was recorded.",
+  // The bottom-nav slots. Four tabs used to change state and render nothing,
+  // which is a control that lies; two of them now have a destination and two say
+  // plainly that they are not built. Both languages, because this is the surface
+  // a reviewer sees first.
+  "tab.panels.ledger": "Ledger",
+  "tab.panels.members": "Members",
+  "tab.panels.profile": "Profile",
+  "tab.panels.home": "Home",
+  "tab.panels.pending": "Not built yet. A member roster and a treasurer profile both need a signed-in treasurer with a provisioned group, which this build does not have.",
+  "tab.panels.ledgerLink": "Open the ledger review",
+  "tab.panels.back": "Back to the pot",
   // ── A3 · /draw route ─────────────────────────────────────────────────────
   // ── A4 · /offline route ──────────────────────────────────────────────────
   // Folded in from the two lane-local tables at integration (A3 R-3, A4 R3).
@@ -810,6 +821,13 @@ const am: Record<MessageKey, string> = {
   "voice.recordLocally": "\u1260\u12da\u1205 \u1218\u1223\u122a\u12eb \u120b\u12ed \u12a0\u1235\u1240\u121d\u1325",
   "voice.recordLocallyBody": "\u1260\u12da\u1205 \u1235\u120d\u12ad \u120b\u12ed \u1265\u127b \u12ed\u1240\u122b\u120d\u1362 \u12e8\u1270\u12a8\u1348\u1208 \u12f0\u1228\u1230\u129d \u12a0\u12ed\u12f0\u1208\u121d\u1364 \u1263\u1295\u12a9 \u12ab\u1228\u130b\u1308\u1320 \u12c8\u12f0 \u1212\u1233\u1265 \u12a0\u12eb\u1208\u1308\u1263\u121d\u1362",
   "voice.recordLocallyFailed": "\u12ed\u1205\u1295 \u121b\u1235\u1273\u12c8\u123b \u1260\u12da\u1205 \u1218\u1223\u122a\u12eb \u120b\u12ed \u1218\u1235\u1240\u1218\u1325 \u12a0\u120d\u1270\u127b\u1208\u121d\u1362 \u121d\u1295\u121d \u12a0\u120d\u1270\u1218\u12d8\u1308\u1260\u121d\u1362",
+  "tab.panels.ledger": "\u12f0\u1265\u1270\u122d",
+  "tab.panels.members": "\u12a0\u1263\u120b\u1275",
+  "tab.panels.profile": "\u1218\u1208\u12eb",
+  "tab.panels.home": "\u1218\u1290\u123b",
+  "tab.panels.pending": "\u1308\u1293 \u12a0\u120d\u1270\u1308\u1290\u1260\u121d\u1362 \u12e8\u12a0\u1263\u120b\u1275 \u12dd\u122d\u12dd\u122d\u1293 \u12e8\u1270\u1320\u1243\u121a \u1218\u1208\u12eb \u1201\u1208\u1271\u121d \u1260\u1270\u130d\u1263\u122d \u12e8\u12f0\u1228\u1230 \u121d\u12ad\u122d \u12eb\u1235\u1348\u120d\u130b\u120d\u1364 \u12ed\u1205 \u121d\u122d\u1303 \u12eb\u120b\u12cd\u1240\u12cd\u121d\u1362",
+  "tab.panels.ledgerLink": "\u12e8\u12f0\u1265\u1270\u122d \u1295\u1309\u1325\u1265 \u12ad\u1348\u1275",
+  "tab.panels.back": "\u12c8\u12f0 \u1260\u122d\u1270\u122d \u1270\u1218\u1208\u1235",
   // ── A3 · /draw route ─────────────────────────────────────────────────────
   // ── A4 · /offline route ──────────────────────────────────────────────────
   "offline.title": "የመስመር መዝገብ ጠረጴዛ",

@@ -118,6 +118,38 @@ test.describe("the mobile shell", () => {
     await expect(page.getByRole("link", { name: /የመስመር ጽሕፈት/ })).toHaveAttribute("href", "/offline");
   });
 
+  test("the bottom-nav slots say something, instead of changing state and showing nothing", async ({
+    page
+  }) => {
+    // Four tabs used to set state and render nothing, which is a control that
+    // lies about being a feature. Each now either has a destination or says it
+    // is not built.
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /አባላት/ }).click();
+    const members = page.getByRole("region", { name: /አባላት/ });
+    await expect(members).toBeVisible();
+    await expect(members).toHaveText(/ገና አልተገነበም/);
+
+    await page.getByRole("button", { name: /መለያ/ }).click();
+    const profile = page.getByRole("region", { name: /መለያ/ });
+    await expect(profile).toBeVisible();
+    await expect(profile).toHaveText(/ገና አልተገነበም/);
+  });
+
+  test("the ledger slot links to the real dashboard rather than an empty panel", async ({ page }) => {
+    await page.goto("/");
+
+    // The bottom-nav slot's own label. A loose /ደብተር/ also matches the Debter
+    // card, which navigates somewhere else entirely.
+    await page.getByRole("button", { name: "ደብተር (Debter Ledger)" }).click();
+    const panel = page.getByRole("region", { name: /ደብተር/ });
+    await expect(panel).toBeVisible();
+    await panel.getByRole("link", { name: /የደብተር ንጉጥብ ክፈት/ }).click();
+
+    await expect(page).toHaveURL(/\/ledger$/);
+  });
+
   test("the draw affordance leads to the draw engine, not the audio digest", async ({ page }) => {
     await page.goto("/");
 

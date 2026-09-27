@@ -9,6 +9,8 @@ import { ContributionFeed, type MemberContribution } from "@/components/contribu
 import { BottomVoiceNav } from "@/components/navigation/BottomVoiceNav";
 import { VoiceModal } from "@/components/voice/VoiceModal";
 import { AudioDigestModal } from "@/components/voice/AudioDigestModal";
+import { TabPanel } from "@/components/shell/TabPanel";
+import type { Locale } from "@/lib/i18n";
 import { getSenedDatabase, isOfflineStorageAvailable } from "@/lib/db";
 import { saveSpokenNote } from "@/lib/db/notes";
 import type { PaymentChannel, SpokenNoteLocale } from "@/lib/db/types";
@@ -83,6 +85,10 @@ const referenceContributions: MemberContribution[] = [
 
 export default function SenedHome() {
   const router = useRouter();
+  // The shell is Ge'ez-primary, so it opens in Amharic. It is also the first
+  // surface to call `t()` rather than hard-coding literals, which the rest of
+  // the Gen A tree still does.
+  const [locale] = useState<Locale>("am");
   const [activeTab, setActiveTab] = useState<"home" | "ledger" | "members" | "profile">("home");
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isDigestModalOpen, setIsDigestModalOpen] = useState(false);
@@ -167,12 +173,22 @@ export default function SenedHome() {
           <ContributionFeed contributions={contributions} />
         </div>
 
-        {/* Curved Dark Espresso Voice Navigation Bar */}
+        {/* Curved Dark Espresso Voice Navigation Bar.
+            The slots are real where a destination exists and say so plainly
+            where one does not — see `TabPanel` below. */}
         <BottomVoiceNav
           activeTab={activeTab}
           onTabChange={setActiveTab}
           onVoiceClick={() => setIsVoiceModalOpen(true)}
         />
+
+        {activeTab !== "home" && (
+          <TabPanel
+            tab={activeTab}
+            onBack={() => setActiveTab("home")}
+            locale={locale}
+          />
+        )}
 
         {/* Spoken Voice Logging Modal.
             No `onRequestVerification` is wired: that handler must POST to

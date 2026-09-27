@@ -8,6 +8,7 @@ export const DRAW_VERIFICATION_CODES = [
   "ok",
   "commitment_mismatch",
   "roster_mismatch",
+  "member_commitment_mismatch",
   "incomplete_transcript",
   "selection_mismatch",
   "suspicious_commitment_history"
@@ -22,6 +23,8 @@ export const DRAW_ERROR_CODES = [
   "REPEAT_WINNER",
   "NO_ELIGIBLE_PARTICIPANTS",
   "COMMITMENT_MISMATCH",
+  "MEMBER_COMMITMENT_MISSING",
+  "MEMBER_COMMITMENT_MISMATCH",
   "ROUND_OUT_OF_ORDER",
   "ALREADY_COMMITTED",
   "ALREADY_REVEALED",
@@ -83,6 +86,26 @@ export interface DrawCycle {
   readonly closedAt: string | null;
 }
 
+/**
+ * One member's sealed contribution to the draw.
+ *
+ * A member picks a nonce, publishes only its hash, and keeps the nonce until the
+ * reveal. Because this is sealed *before* the treasurer commits, the treasurer
+ * cannot search for a nonce that hands the pot to a chosen member — which is the
+ * one thing a single treasurer-chosen seed could never prevent.
+ */
+export interface DrawMemberCommitment {
+  readonly memberId: string;
+  /** `SHA-256` of the member's nonce, bound to this draw. 64 lowercase hex. */
+  readonly sealed: string;
+}
+
+/** The revealed half of a {@link DrawMemberCommitment}. */
+export interface DrawMemberNonce {
+  readonly memberId: string;
+  readonly nonce: string;
+}
+
 export interface DrawCommitment {
   readonly drawId: string;
   readonly groupId: string;
@@ -96,6 +119,17 @@ export interface DrawCommitment {
    * before the ceremony begins, which is the whole point.
    */
   readonly commitmentNonce: string;
+  /**
+   * Digest over every member contribution, in memberId order.
+   *
+   * This is what makes the draw fair rather than merely honest. With a
+   * treasurer-chosen seed alone, the treasurer could try seeds until one
+   * favoured a friend and commit to that one; the reveal would then be perfectly
+   * consistent and completely rigged. The winner now depends on randomness the
+   * treasurer does not have.
+   */
+  readonly memberDigest: string;
+  readonly memberCommitments: readonly DrawMemberCommitment[];
   readonly rosterDigest: string;
   readonly participants: readonly DrawParticipant[];
   readonly potAmount: string;
@@ -115,6 +149,9 @@ export interface DrawReveal {
   readonly drawId: string;
   readonly commitment: string;
   readonly seed: string;
+  readonly memberDigest: string;
+  /** The nonces behind every sealed member contribution. */
+  readonly memberNonces: readonly DrawMemberNonce[];
   readonly transcriptDigest: string;
   readonly selectionDigest: string;
   readonly selectedIndex: number;

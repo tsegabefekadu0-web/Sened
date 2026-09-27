@@ -30,6 +30,7 @@ const payoutAccount = "44444444-4444-4444-8444-444444444444";
 
 const commitment = "a".repeat(64);
 const rosterDigest = "b".repeat(64);
+const memberDigest = "e".repeat(64);
 
 const round: DrawRound = {
   drawId,
@@ -38,6 +39,8 @@ const round: DrawRound = {
   round: 1,
   commitment,
   commitmentNonce: "nonce-abcdefghijklmnop",
+  memberDigest,
+  memberCommitments: [{ memberId: "00014444-4444-8444-8444-444444444444", sealed: "f".repeat(64) }],
   rosterDigest,
   participants: [
     {
@@ -121,6 +124,13 @@ const commitBody = {
   reserveRatioBps: 1000,
   members: [
     { memberId: "00014444-4444-8444-8444-444444444444", displayName: "አባላት 1", contributionAmount: "5000.00" }
+  ],
+  // A round cannot commit without a sealed member contribution, so every commit
+  // request carries one. There is deliberately no server-side fallback: if the
+  // server could invent a contribution, the fairness property would be worth
+  // nothing.
+  memberCommitments: [
+    { memberId: "00014444-4444-8444-8444-444444444444", sealed: "e".repeat(64) }
   ],
   idempotencyKey: "draw-commit-1"
 };
@@ -283,7 +293,17 @@ describe("POST /api/draw/commits", () => {
 });
 
 describe("POST /api/draw/reveals", () => {
-  const revealBody = { drawId, seed: "reveal-seed-abcdefghij", idempotencyKey: "draw-reveal-1" };
+  const revealBody = {
+    drawId,
+    seed: "reveal-seed-abcdefghij",
+    // The reveal carries every member nonce, because the winner depends on
+    // randomness the treasurer did not choose. A reveal without them is not a
+    // request to complete the ceremony.
+    memberNonces: [
+      { memberId: "00014444-4444-8444-8444-444444444444", nonce: "member-nonce-0123456789" }
+    ],
+    idempotencyKey: "draw-reveal-1"
+  };
 
   it("403s a member", async () => {
     mocks.getUser.mockResolvedValue({

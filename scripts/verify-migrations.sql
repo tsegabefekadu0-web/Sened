@@ -414,4 +414,111 @@ begin
 end;
 $provision$;
 
+-- ---------------------------------------------------------------------------
+-- Member-seed commitments
+--
+-- The seed-grinding attack: a treasurer could search seeds for a favourable
+-- outcome and commit to the one they liked, and the reveal would be perfectly
+-- consistent. These checks confirm the database can *hold* the member
+-- contributions and refuses the shapes that would let a commitment or reveal
+-- claim a ceremony nobody can check.
+--
+-- Scope: this migration adds storage and constraints. Passing them through
+-- `commit_draw_v1` and `reveal_draw_v1` is the remaining piece and is recorded
+-- in AGENTWORK.md section 6 — the RPCs keep their committed signatures, and
+-- changing a granted function's arity is how the bank migration became
+-- unappliable.
+-- ---------------------------------------------------------------------------
+do $member$
+declare
+  draw_uuid constant uuid := 'cccccccc-0000-4000-8000-000000000001';
+  group_uuid constant uuid := 'dddddddd-0000-4000-8000-000000000001';
+  tenant_uuid constant uuid := 'bbbbbbbb-0000-4000-8000-000000000001';
+  cycle_uuid constant uuid := 'eeeeeeee-0000-4000-8000-000000000001';
+  actor_uuid constant uuid := '11111111-1111-4111-8111-111111111111';
+begin
+  -- A commitment carrying a real member set is accepted.
+  insert into public.draw_commitments (
+    draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce,
+    member_digest, member_commitments, roster_digest, participants, pot_amount,
+    total_rounds, reserve_ratio_bps, actor_id, idempotency_key
+  ) values (
+    draw_uuid, group_uuid, tenant_uuid, cycle_uuid, 1, 'a'.repeat(64),
+    'nonce-0123456789abcdef-XYZ', 'e'.repeat(64),
+    jsonb_build_array(
+      jsonb_build_object(
+        'memberId', '44444444-4444-4444-8444-444444444444',
+        'sealed', 'c'.repeat(64)
+      )
+    ),
+    'b'.repeat(64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-1'
+  );
+
+  if not exists (
+    select 1 from public.draw_commitments
+    where draw_id = draw_uuid
+      and jsonb_array_length(member_commitments) = 1
+  ) then
+    raise exception 'MEMBER 1 FAILED: the member contribution was not stored';
+  end if;
+
+  -- A commitment that claims a digest but carries an empty set is refused. This
+  -- is the shape that would make a "fair" draw unfalsifiable.
+  begin
+    insert into public.draw_commitments (
+      draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce,
+      member_digest, member_commitments, roster_digest, participants, pot_amount,
+      total_rounds, reserve_ratio_bps, actor_id, idempotency_key
+    ) values (
+      'cccccccc-0000-4000-8000-000000000002', group_uuid, tenant_uuid, cycle_uuid,
+      2, 'a'.repeat(64), 'nonce-0123456789abcdef-XYZ', 'e'.repeat(64), '[]'::jsonb,
+      'b'.repeat(64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-empty'
+    );
+    raise exception 'MEMBER 2 FAILED: a commitment with an EMPTY member set was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_commitments_member_set_present%' then
+      raise exception 'MEMBER 2 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- A digest that is not a SHA-256 hex string is refused.
+  begin
+    insert into public.draw_commitments (
+      draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce,
+      member_digest, member_commitments, roster_digest, participants, pot_amount,
+      total_rounds, reserve_ratio_bps, actor_id, idempotency_key
+    ) values (
+      'cccccccc-0000-4000-8000-000000000003', group_uuid, tenant_uuid, cycle_uuid,
+      3, 'a'.repeat(64), 'nonce-0123456789abcdef-XYZ', 'not-a-digest', '[]'::jsonb,
+      'b'.repeat(64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-baddigest'
+    );
+    raise exception 'MEMBER 3 FAILED: a non-digest member_digest was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_commitments%' then
+      raise exception 'MEMBER 3 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- A reveal that opens an empty set is refused for the same reason: the
+  -- randomness that decided the winner would not be public.
+  begin
+    insert into public.draw_reveals (
+      draw_id, commitment, seed, member_digest, member_nonces, transcript_digest,
+      selection_digest, selected_index, winner_member_id, winning_ticket,
+      payout_amount, reserve_amount, actor_id
+    ) values (
+      draw_uuid, 'a'.repeat(64), 'reveal-seed-0123456789', 'e'.repeat(64), '[]'::jsonb,
+      'f'.repeat(64), 'a'.repeat(64), 0,
+      '44444444-4444-4444-8444-444444444444', 'c'.repeat(64),
+      5000.00, 500.00, actor_uuid
+    );
+    raise exception 'MEMBER 4 FAILED: a reveal with an EMPTY member nonce set was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_reveals_member_set_matches%' then
+      raise exception 'MEMBER 4 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+end;
+$member$;
+
 select 'ALL DRAW BINDING CHECKS PASSED' as result;

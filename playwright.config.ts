@@ -31,6 +31,13 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
+  // Measured, not guessed. Running `test:all` cold — build immediately followed by
+  // the browser suite — six workers all issued their first navigation while
+  // `next start` was still warming, and five of them hit the 30s navigation
+  // timeout. The same forty tests pass in 25s once the server is warm. Fewer
+  // workers plus a longer first-navigation budget fixes the cold case without
+  // adding a retry that would mask a real hang.
+  workers: process.env.CI ? 2 : 4,
   // A failing assertion is a real failure here, not a flake to be papered over.
   reporter: [["list"]],
   timeout: 30_000,
@@ -39,6 +46,8 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL,
     trace: "retain-on-failure",
+    // The first navigation of a run pays for the server warming up.
+    navigationTimeout: 60_000,
     // A treasurer is on a phone in a room with poor signal. The service worker
     // must never turn a failed navigation into a stale cached shell that looks
     // like the live app.

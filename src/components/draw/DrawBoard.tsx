@@ -3,12 +3,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { toVerificationTranscript, webDrawHasher } from "@/lib/draw/canonical";
-import { createCommitment, openReveal, verifyRound } from "@/lib/draw/engine";
+import { createCommitment, openReveal, sealMemberContribution, verifyRound } from "@/lib/draw/engine";
 import { excludePriorWinners } from "@/lib/draw/rotation";
 import { formatEtbDisplay } from "@/lib/ledger/money";
 import type {
   DrawCommitment,
   DrawMember,
+  DrawMemberCommitment,
+  DrawMemberNonce,
   DrawReveal,
   DrawRiskAssessment,
   DrawRound,
@@ -93,6 +95,20 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
    * anyone knows the seed, not by a seed we happen to still be holding.
    */
   const [sealedSeed, setSealedSeed] = useState<string | null>(null);
+  /**
+   * A member's sealed contribution, generated on this device.
+   *
+   * This board plays both roles in the demonstration — treasurer *and* one
+   * member — because that is the smallest ceremony that is still fair. The
+   * member's nonce is sealed here, only its digest is published at commit, and
+   * the nonce itself is not revealed until the draw. That is the whole reason a
+   * treasurer cannot search for a seed that hands the pot to a friend: the value
+   * they would need to search over is not theirs.
+   */
+  const [sealedMember, setSealedMember] = useState<{
+    readonly contribution: DrawMemberCommitment;
+    readonly nonce: string;
+  } | null>(null);
   const [reveal, setReveal] = useState<DrawReveal | null>(null);
   const [risk, setRisk] = useState<DrawRiskAssessment | null>(null);
   const [verification, setVerification] = useState<DrawVerificationResult>(PENDING_VERIFICATION);
@@ -107,16 +123,31 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
     setError(null);
     setVerification(PENDING_VERIFICATION);
     const seed = entropy();
+    const drawId = globalThis.crypto.randomUUID();
     try {
+      // The member seals first. In a real ceremony this happens on that
+      // member's own phone, minutes before the treasurer commits; the ordering is
+      // the entire security property, so it is modelled explicitly here.
+      const contributor = eligible[0];
+      if (contributor === undefined) {
+        throw new Error("No eligible member can contribute");
+      }
+      const memberNonce = entropy();
+      const contribution = await sealMemberContribution(
+        { drawId, memberId: contributor.memberId, nonce: memberNonce },
+        webDrawHasher
+      );
+
       const created = await createCommitment(
         {
           groupId: GROUP_ID,
           cycleId: CYCLE_ID,
           round: roundNumber,
           totalRounds: TOTAL_ROUNDS,
-          drawId: globalThis.crypto.randomUUID(),
+          drawId,
           commitmentNonce: entropy(),
           seed,
+          memberCommitments: [contribution],
           potAmount: POT_AMOUNT,
           reserveRatioBps: RESERVE_RATIO_BPS,
           members: [...eligible],
@@ -129,6 +160,7 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
       );
       setCommitment(created);
       setSealedSeed(seed);
+      setSealedMember({ contribution, nonce: memberNonce });
       setPhase("sealed");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -137,13 +169,17 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
   }, [eligible, roundNumber, winners]);
 
   const doReveal = useCallback(
-    async (source: DrawCommitment, seed: string) => {
+    async (
+      source: DrawCommitment,
+      seed: string,
+      memberNonces: readonly DrawMemberNonce[]
+    ) => {
       setError(null);
       setPhase(reducedMotion ? "revealed" : "revealing");
       try {
         const opened = await openReveal(
           source,
-          { seed, revealedBy: "local-treasurer", revealedAt: new Date().toISOString() },
+          { seed, memberNonces, revealedBy: "local-treasurer", revealedAt: new Date().toISOString() },
           webDrawHasher
         );
         setReveal(opened.reveal);
@@ -165,7 +201,7 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
   );
 
   const revealSeed = useCallback(async () => {
-    if (commitment === null || sealedSeed === null) return;
+    if (commitment === null || sealedSeed === null || sealedMember === null) return;
     setPhase(reducedMotion ? "revealed" : "shaking");
     // The tamper switch flips one character. Nothing in the pipeline can tell it
     // was flipped — the commitment check is what catches it, and that is the
@@ -173,8 +209,10 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
     const published = tampersSeed
       ? `${sealedSeed.slice(0, -1)}${sealedSeed.endsWith("a") ? "b" : "a"}`
       : sealedSeed;
-    await doReveal(commitment, published);
-  }, [commitment, doReveal, reducedMotion, sealedSeed, tampersSeed]);
+    await doReveal(commitment, published, [
+      { memberId: sealedMember.contribution.memberId, nonce: sealedMember.nonce }
+    ]);
+  }, [commitment, doReveal, reducedMotion, sealedMember, sealedSeed, tampersSeed]);
 
   const nextRound = useCallback(() => {
     if (reveal !== null) {
@@ -185,6 +223,7 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
     setRoundNumber((value) => value + 1);
     setCommitment(null);
     setSealedSeed(null);
+    setSealedMember(null);
     setReveal(null);
     setRisk(null);
     setVerification(PENDING_VERIFICATION);

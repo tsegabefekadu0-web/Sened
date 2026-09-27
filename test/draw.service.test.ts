@@ -8,6 +8,7 @@ import {
 } from "@/lib/ledger";
 import { nodeDrawHasher } from "@/lib/draw/nodeHasher";
 import { InMemoryDrawRepository } from "@/lib/draw/repository";
+import { sealMemberContribution } from "@/lib/draw/engine";
 import { DrawService, payoutIdempotencyKey } from "@/lib/draw/service";
 import type { DrawMember } from "@/lib/draw/types";
 
@@ -46,21 +47,72 @@ interface Harness {
   readonly service: DrawService;
   readonly ledger: InMemoryLedgerRepository;
   readonly drawRepo: InMemoryDrawRepository;
+  readonly hasher: typeof nodeDrawHasher;
+  /** What each round's contributor sealed, so a reveal can open it. */
+  readonly sealed: Map<string, { memberId: string; nonce: string }>;
 }
 
 function harness(options: { readonly hasher?: typeof nodeDrawHasher } = {}): Harness {
   const ledger = ledgerRepository();
   const drawRepo = new InMemoryDrawRepository();
+  const drawHasher = options.hasher ?? hasher;
+  const sealed = new Map<string, { memberId: string; nonce: string }>();
   let counter = 0;
   return {
     ledger,
     drawRepo,
+    hasher: drawHasher,
+    sealed,
     service: new DrawService(drawRepo, new LedgerService(ledger), {
-      hasher: options.hasher ?? hasher,
+      hasher: drawHasher,
       clock: () => new Date("2026-09-26T10:00:00.000Z"),
       entropyFactory: () => `entropy-${String(counter++).padStart(4, "0")}-abcdefghij`
     })
   };
+}
+
+/** The nonces that open whatever this harness sealed for `drawId`. */
+function revealNonces(h: Harness, drawId: string): { memberId: string; nonce: string }[] {
+  const entry = h.sealed.get(drawId);
+  if (entry === undefined) {
+    throw new Error(`nothing was sealed for ${drawId}`);
+  }
+  return [entry];
+}
+
+const MEMBER_NONCE = "member-nonce-0123456789-QQQ";
+
+/**
+ * The round's id, published before anyone seals.
+ *
+ * A member's nonce is bound to the draw it belongs to, so the id has to exist
+ * before the sealing step — the service would otherwise mint one and the
+ * commitment could not be reproduced at reveal. The client supplies it, and
+ * this fixture does the same.
+ */
+function drawIdFor(round: number): string {
+  return `dddddddd-0000-4000-8000-${String(round).padStart(12, "0")}`;
+}
+
+/**
+ * The first member still eligible to contribute.
+ *
+ * A member who has already won is dropped from the roster for the rest of the
+ * cycle, so the same member cannot keep contributing randomness to later rounds.
+ * That refusal is the product working, not a fixture problem.
+ */
+function firstEligible(priorWinnerIds: readonly string[] = []): DrawMember {
+  return roster.find((entry) => !priorWinnerIds.includes(entry.memberId)) ?? roster[0]!;
+}
+
+async function memberCommitment(
+  h: Harness,
+  round: number,
+  memberId: string = firstEligible().memberId,
+  nonce: string = MEMBER_NONCE
+) {
+  h.sealed.set(drawIdFor(round), { memberId, nonce });
+  return sealMemberContribution({ drawId: drawIdFor(round), memberId, nonce }, h.hasher);
 }
 
 async function commitRound(
@@ -75,9 +127,17 @@ async function commitRound(
       cycleId,
       round,
       totalRounds,
+      drawId: drawIdFor(round),
+      // Deterministic, so a repeated call is genuinely the same commitment and
+      // the repository's replay path is exercised rather than sidestepped.
+      seed: `round-seed-${round}-abcdefghij`,
+      commitmentNonce: `round-nonce-${round}-abcdefghij`,
       potAmount: "25000.00",
       reserveRatioBps: 1000,
       members: [...roster],
+      memberCommitments: [
+        await memberCommitment(h, round, firstEligible(priorWinnerIds).memberId)
+      ],
       priorWinnerIds,
       idempotencyKey: `draw-commit-${round}`
     },
@@ -129,6 +189,7 @@ describe("DrawService — commit and reveal", () => {
           potAmount: "25000.00",
           reserveRatioBps: 1000,
           members: [...roster],
+          memberCommitments: [await memberCommitment(h, 1)],
           priorWinnerIds: [],
           idempotencyKey: "draw-commit-1"
         },
@@ -143,6 +204,7 @@ describe("DrawService — commit and reveal", () => {
       {
         groupId,
         cycleId,
+        drawId: drawIdFor(1),
         round: 1,
         totalRounds: 5,
         seed: "reveal-seed-abcdefghij",
@@ -150,6 +212,7 @@ describe("DrawService — commit and reveal", () => {
         potAmount: "25000.00",
         reserveRatioBps: 1000,
         members: [...roster],
+        memberCommitments: [await memberCommitment(h, 1)],
         priorWinnerIds: [],
         idempotencyKey: "draw-commit-reveal"
       },
@@ -157,7 +220,7 @@ describe("DrawService — commit and reveal", () => {
     );
 
     const revealed = await h.service.reveal(
-      { drawId: committed.round.drawId, seed: "reveal-seed-abcdefghij" },
+      { drawId: committed.round.drawId, seed: "reveal-seed-abcdefghij", memberNonces: revealNonces(h, committed.round.drawId) },
       { userId: treasurer }
     );
 
@@ -172,7 +235,8 @@ describe("DrawService — commit and reveal", () => {
     const committed = await commitRound(h, 1, 5);
 
     await expect(
-      h.service.reveal({ drawId: committed.round.drawId, seed: "a-forged-seed-abcdefgh" }, { userId: treasurer })
+      h.service.reveal(
+      { drawId: committed.round.drawId, seed: "a-forged-seed-abcdefgh", memberNonces: revealNonces(h, committed.round.drawId) }, { userId: treasurer })
     ).rejects.toMatchObject({ code: "COMMITMENT_MISMATCH" });
   });
 
@@ -180,7 +244,8 @@ describe("DrawService — commit and reveal", () => {
     const h = harness();
 
     await expect(
-      h.service.reveal({ drawId: "88888888-8888-4888-8888-888888888888", seed: "x".repeat(20) }, { userId: treasurer })
+      h.service.reveal(
+      { drawId: "88888888-8888-4888-8888-888888888888", seed: "x".repeat(20), memberNonces: [] }, { userId: treasurer })
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
@@ -190,6 +255,7 @@ describe("DrawService — commit and reveal", () => {
       {
         groupId,
         cycleId,
+        drawId: drawIdFor(1),
         round: 1,
         totalRounds: 5,
         seed: "twice-seed-abcdefghij",
@@ -197,15 +263,18 @@ describe("DrawService — commit and reveal", () => {
         potAmount: "25000.00",
         reserveRatioBps: 1000,
         members: [...roster],
+        memberCommitments: [await memberCommitment(h, 1)],
         priorWinnerIds: [],
         idempotencyKey: "draw-commit-twice"
       },
       { userId: treasurer }
     );
 
-    await h.service.reveal({ drawId: committed.round.drawId, seed: "twice-seed-abcdefghij" }, { userId: treasurer });
+    await h.service.reveal(
+      { drawId: committed.round.drawId, seed: "twice-seed-abcdefghij", memberNonces: revealNonces(h, committed.round.drawId) }, { userId: treasurer });
     await expect(
-      h.service.reveal({ drawId: committed.round.drawId, seed: "twice-seed-abcdefghij" }, { userId: treasurer })
+      h.service.reveal(
+      { drawId: committed.round.drawId, seed: "twice-seed-abcdefghij", memberNonces: revealNonces(h, committed.round.drawId) }, { userId: treasurer })
     ).rejects.toMatchObject({ code: "ALREADY_REVEALED" });
   });
 });
@@ -225,6 +294,7 @@ describe("DrawService — payout posts a balanced hash-chained ledger entry", ()
       {
         groupId,
         cycleId,
+        drawId: drawIdFor(1),
         round: 1,
         totalRounds: 5,
         seed: "payout-seed-abcdefghij",
@@ -232,12 +302,14 @@ describe("DrawService — payout posts a balanced hash-chained ledger entry", ()
         potAmount: "25000.00",
         reserveRatioBps: 1000,
         members: [...roster],
+        memberCommitments: [await memberCommitment(h, 1)],
         priorWinnerIds: [],
         idempotencyKey: "draw-commit-payout"
       },
       { userId: treasurer }
     );
-    await h.service.reveal({ drawId: committed.round.drawId, seed: "payout-seed-abcdefghij" }, { userId: treasurer });
+    await h.service.reveal(
+      { drawId: committed.round.drawId, seed: "payout-seed-abcdefghij", memberNonces: revealNonces(h, committed.round.drawId) }, { userId: treasurer });
     return committed.round.drawId;
   }
 
@@ -370,6 +442,7 @@ describe("DrawService — a full cycle", () => {
         {
           groupId,
           cycleId,
+          drawId: drawIdFor(round),
           round,
           totalRounds: 5,
           seed: `cycle-seed-${round}-abcdefghij`,
@@ -377,6 +450,7 @@ describe("DrawService — a full cycle", () => {
           potAmount: "25000.00",
           reserveRatioBps: 1000,
           members: [...roster],
+          memberCommitments: [await memberCommitment(h, round, firstEligible([...seenWinners]).memberId)],
           priorWinnerIds: [...seenWinners],
           idempotencyKey: `cycle-commit-${round}`
         },
@@ -384,7 +458,7 @@ describe("DrawService — a full cycle", () => {
       );
 
       const revealed = await h.service.reveal(
-        { drawId: committed.round.drawId, seed: `cycle-seed-${round}-abcdefghij` },
+      { drawId: committed.round.drawId, seed: `cycle-seed-${round}-abcdefghij`, memberNonces: revealNonces(h, committed.round.drawId) },
         { userId: treasurer }
       );
       const winner = revealed.round.reveal?.winnerMemberId ?? "";
@@ -416,6 +490,7 @@ describe("DrawService — a full cycle", () => {
         {
           groupId,
           cycleId,
+          drawId: drawIdFor(round),
           round,
           totalRounds: 5,
           seed: `rot-seed-${round}-abcdefghijkl`,
@@ -423,6 +498,7 @@ describe("DrawService — a full cycle", () => {
           potAmount: "25000.00",
           reserveRatioBps: 1000,
           members: [...roster],
+          memberCommitments: [await memberCommitment(h, round, firstEligible([...winners]).memberId)],
           priorWinnerIds: [...winners],
           idempotencyKey: `rot-commit-${round}`
         },
@@ -433,7 +509,7 @@ describe("DrawService — a full cycle", () => {
         expect(committed.round.participants.map((p) => p.memberId)).not.toContain(winner);
       }
       const revealed = await h.service.reveal(
-        { drawId: committed.round.drawId, seed: `rot-seed-${round}-abcdefghijkl` },
+      { drawId: committed.round.drawId, seed: `rot-seed-${round}-abcdefghijkl`, memberNonces: revealNonces(h, committed.round.drawId) },
         { userId: treasurer }
       );
       winners.push(revealed.round.reveal?.winnerMemberId ?? "");
@@ -449,6 +525,7 @@ describe("DrawService — a full cycle", () => {
         {
           groupId,
           cycleId,
+          drawId: drawIdFor(round),
           round,
           totalRounds: 5,
           seed: `sum-seed-${round}-abcdefghijkl`,
@@ -456,13 +533,14 @@ describe("DrawService — a full cycle", () => {
           potAmount: "25000.00",
           reserveRatioBps: 1000,
           members: [...roster],
+          memberCommitments: [await memberCommitment(h, round, firstEligible([...winners]).memberId)],
           priorWinnerIds: [...winners],
           idempotencyKey: `sum-commit-${round}`
         },
         { userId: treasurer }
       );
       const revealed = await h.service.reveal(
-        { drawId: committed.round.drawId, seed: `sum-seed-${round}-abcdefghijkl` },
+      { drawId: committed.round.drawId, seed: `sum-seed-${round}-abcdefghijkl`, memberNonces: revealNonces(h, committed.round.drawId) },
         { userId: treasurer }
       );
       expect(revealed.round.reveal?.winnerMemberId).toBeTruthy();
@@ -485,6 +563,7 @@ describe("DrawService — a full cycle", () => {
       {
         groupId,
         cycleId,
+        drawId: drawIdFor(1),
         round: 1,
         totalRounds: 5,
         seed: "defence-seed-one-abcdefg",
@@ -492,13 +571,14 @@ describe("DrawService — a full cycle", () => {
         potAmount: "25000.00",
         reserveRatioBps: 1000,
         members: [roster[0]],
+        memberCommitments: [await memberCommitment(h, 1)],
         priorWinnerIds: [],
         idempotencyKey: "defence-commit-1"
       },
       { userId: treasurer }
     );
     const firstReveal = await h.service.reveal(
-      { drawId: first.round.drawId, seed: "defence-seed-one-abcdefg" },
+      { drawId: first.round.drawId, seed: "defence-seed-one-abcdefg", memberNonces: revealNonces(h, first.round.drawId) },
       { userId: treasurer }
     );
     const winner = firstReveal.round.reveal?.winnerMemberId ?? "";
@@ -510,6 +590,7 @@ describe("DrawService — a full cycle", () => {
       {
         groupId,
         cycleId,
+        drawId: drawIdFor(2),
         round: 2,
         totalRounds: 5,
         seed: "defence-seed-two-abcdefg",
@@ -517,6 +598,7 @@ describe("DrawService — a full cycle", () => {
         potAmount: "25000.00",
         reserveRatioBps: 1000,
         members: [roster[0]],
+        memberCommitments: [await memberCommitment(h, 2)],
         priorWinnerIds: [],
         idempotencyKey: "defence-commit-2"
       },
@@ -524,7 +606,8 @@ describe("DrawService — a full cycle", () => {
     );
 
     await expect(
-      h.service.reveal({ drawId: second.round.drawId, seed: "defence-seed-two-abcdefg" }, { userId: treasurer })
+      h.service.reveal(
+      { drawId: second.round.drawId, seed: "defence-seed-two-abcdefg", memberNonces: revealNonces(h, second.round.drawId) }, { userId: treasurer })
     ).rejects.toMatchObject({ code: "REPEAT_WINNER" });
   });
 
@@ -541,6 +624,7 @@ describe("DrawService — a full cycle", () => {
         {
           groupId,
           cycleId,
+          drawId: drawIdFor(round),
           round,
           totalRounds: 2,
           seed,
@@ -548,6 +632,7 @@ describe("DrawService — a full cycle", () => {
           potAmount: "15000.00",
           reserveRatioBps: 1000,
           members: [roster[0], roster[1]],
+          memberCommitments: [await memberCommitment(h, round, firstEligible([]).memberId)],
           priorWinnerIds: [],
           idempotencyKey: `repeat-commit-${round}`
         },
@@ -557,7 +642,7 @@ describe("DrawService — a full cycle", () => {
     }
 
     const firstReveal = await h.service.reveal(
-      { drawId: commits[0], seed: seeds[0] },
+      { drawId: commits[0], seed: seeds[0], memberNonces: revealNonces(h, commits[0]) },
       { userId: treasurer }
     );
     const firstWinner = firstReveal.round.reveal?.winnerMemberId ?? "";
@@ -570,7 +655,7 @@ describe("DrawService — a full cycle", () => {
     // draw picks the other member (fine) or the service refuses (also fine).
     // Both outcomes are acceptable; a repeat winner being paid is not.
     const secondReveal = await h.service.reveal(
-      { drawId: commits[1], seed: seeds[1] },
+      { drawId: commits[1], seed: seeds[1], memberNonces: revealNonces(h, commits[1]) },
       { userId: treasurer }
     ).catch((error: unknown) => error);
 

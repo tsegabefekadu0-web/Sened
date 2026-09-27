@@ -8,11 +8,13 @@ import type {
   DrawRound
 } from "./types";
 
-export const DRAW_COMMIT_SERIALIZATION_VERSION = "sened-draw-commit-v1";
+export const DRAW_COMMIT_SERIALIZATION_VERSION = "sened-draw-commit-v2";
 export const DRAW_ROSTER_SERIALIZATION_VERSION = "sened-draw-roster-v1";
-export const DRAW_TRANSCRIPT_SERIALIZATION_VERSION = "sened-draw-reveal-v1";
+export const DRAW_TRANSCRIPT_SERIALIZATION_VERSION = "sened-draw-reveal-v2";
 export const DRAW_TICKET_SERIALIZATION_VERSION = "sened-draw-ticket-v1";
 export const DRAW_SELECTION_SERIALIZATION_VERSION = "sened-draw-selection-v1";
+export const DRAW_MEMBER_COMMITMENT_SERIALIZATION_VERSION = "sened-draw-member-v1";
+export const DRAW_MEMBER_SET_SERIALIZATION_VERSION = "sened-draw-member-set-v1";
 
 export const HEX_64_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -89,6 +91,59 @@ export function canonicalSerializeRoster(participants: readonly DrawRosterEntry[
   );
 }
 
+/**
+ * One member's sealed contribution to the draw.
+ *
+ * This is the whole point of the second commitment. `sened-draw-commit-v1` bound
+ * a seed the *treasurer* chose, which is not a commitment in any useful sense:
+ * the treasurer can try seeds until one hands the pot to a friend, then commit
+ * to that one. Nothing about the old scheme prevented it, and nothing in the
+ * reveal can detect it afterwards — by then the seed is simply the seed.
+ *
+ * A member's contribution is chosen by the member and sealed before the
+ * treasurer commits, so the treasurer cannot search for it. Binding the *hash*
+ * here and revealing the nonce later is what makes that checkable by every
+ * member on their own phone: nobody has to trust that a nonce was contributed,
+ * only that the published one is the one that was sealed.
+ */
+export function canonicalSerializeMemberCommitment(input: {
+  readonly drawId: string;
+  readonly memberId: string;
+  readonly nonce: string;
+}): string {
+  return joinVersion(DRAW_MEMBER_COMMITMENT_SERIALIZATION_VERSION, [
+    canonicalLine("drawId", input.drawId),
+    canonicalLine("memberId", input.memberId),
+    canonicalLine("nonce", input.nonce)
+  ]);
+}
+
+/**
+ * The aggregate of every member contribution, in memberId order.
+ *
+ * Sorted here rather than trusting the caller's order, so two members submitting
+ * in opposite orders produce the same digest. An unsorted list would let a
+ * treasurer reorder contributions and land on a different commitment for the
+ * same set.
+ */
+export function canonicalSerializeMemberSet(input: {
+  readonly drawId: string;
+  readonly contributions: readonly { readonly memberId: string; readonly sealed: string }[];
+}): string {
+  const ordered = [...input.contributions].sort((left, right) =>
+    left.memberId < right.memberId ? -1 : left.memberId > right.memberId ? 1 : 0
+  );
+  return joinVersion(DRAW_MEMBER_SET_SERIALIZATION_VERSION, [
+    canonicalLine("drawId", input.drawId),
+    ...ordered.map((contribution, index) =>
+      [
+        canonicalLine(`member.${index}.memberId`, contribution.memberId),
+        canonicalLine(`member.${index}.sealed`, contribution.sealed)
+      ].join("\n")
+    )
+  ]);
+}
+
 export function canonicalSerializeCommit(input: {
   readonly groupId: string;
   readonly cycleId: string;
@@ -96,6 +151,7 @@ export function canonicalSerializeCommit(input: {
   readonly drawId: string;
   readonly rosterDigest: string;
   readonly commitmentNonce: string;
+  readonly memberDigest: string;
   readonly seed: string;
 }): string {
   return joinVersion(DRAW_COMMIT_SERIALIZATION_VERSION, [
@@ -105,6 +161,7 @@ export function canonicalSerializeCommit(input: {
     canonicalLine("drawId", input.drawId),
     canonicalLine("rosterDigest", input.rosterDigest),
     canonicalLine("commitmentNonce", input.commitmentNonce),
+    canonicalLine("memberDigest", input.memberDigest),
     canonicalLine("seed", input.seed)
   ]);
 }
@@ -112,13 +169,15 @@ export function canonicalSerializeCommit(input: {
 export function canonicalSerializeTranscript(input: {
   readonly drawId: string;
   readonly commitment: string;
-  readonly seed: string;
   readonly rosterDigest: string;
+  readonly memberDigest: string;
+  readonly seed: string;
 }): string {
   return joinVersion(DRAW_TRANSCRIPT_SERIALIZATION_VERSION, [
     canonicalLine("drawId", input.drawId),
     canonicalLine("commitment", input.commitment),
     canonicalLine("rosterDigest", input.rosterDigest),
+    canonicalLine("memberDigest", input.memberDigest),
     canonicalLine("seed", input.seed)
   ]);
 }
@@ -180,6 +239,23 @@ export async function computeRosterDigest(
   return sha256With(hasher, canonicalSerializeRoster(participants));
 }
 
+export async function computeMemberCommitment(
+  input: { readonly drawId: string; readonly memberId: string; readonly nonce: string },
+  hasher: DrawHasher
+): Promise<string> {
+  return sha256With(hasher, canonicalSerializeMemberCommitment(input));
+}
+
+export async function computeMemberDigest(
+  input: {
+    readonly drawId: string;
+    readonly contributions: readonly { readonly memberId: string; readonly sealed: string }[];
+  },
+  hasher: DrawHasher
+): Promise<string> {
+  return sha256With(hasher, canonicalSerializeMemberSet(input));
+}
+
 export async function computeCommitment(
   input: {
     readonly groupId: string;
@@ -188,6 +264,7 @@ export async function computeCommitment(
     readonly drawId: string;
     readonly rosterDigest: string;
     readonly commitmentNonce: string;
+    readonly memberDigest: string;
     readonly seed: string;
   },
   hasher: DrawHasher
@@ -200,6 +277,7 @@ export async function computeTranscriptDigest(
     readonly drawId: string;
     readonly commitment: string;
     readonly rosterDigest: string;
+    readonly memberDigest: string;
     readonly seed: string;
   },
   hasher: DrawHasher
@@ -285,6 +363,16 @@ export interface DrawVerificationTranscript {
   readonly commitment: string;
   readonly rosterDigest: string;
   readonly commitmentNonce: string;
+  /**
+   * The sealed member contributions and their digest.
+   *
+   * A member verifying a draw needs both: the digest proves what was committed,
+   * and the commitments are what each revealed nonce is checked against. Without
+   * them a verifier could only confirm the treasurer was consistent with
+   * himself.
+   */
+  readonly memberDigest: string;
+  readonly memberCommitments: readonly { readonly memberId: string; readonly sealed: string }[];
   readonly seed: string;
   readonly participants: readonly {
     readonly memberId: string;
@@ -302,6 +390,11 @@ export function toVerificationTranscript(round: DrawRound): DrawVerificationTran
     commitment: round.commitment,
     rosterDigest: round.rosterDigest,
     commitmentNonce: round.commitmentNonce,
+    memberDigest: round.memberDigest,
+    memberCommitments: round.memberCommitments.map((contribution) => ({
+      memberId: contribution.memberId,
+      sealed: contribution.sealed
+    })),
     seed: round.reveal?.seed ?? "",
     participants: round.participants.map((participant) => ({
       memberId: participant.memberId,

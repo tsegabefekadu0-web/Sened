@@ -62,10 +62,37 @@ export const drawParticipantSchema = z
   .strict();
 
 /**
+ * One member's sealed contribution, as published before the ceremony.
+ *
+ * Only the hash travels. A member seals on their own device and keeps the nonce
+ * until the reveal, so a treasurer who wanted a particular winner could not
+ * search for it.
+ */
+export const drawMemberCommitmentSchema = z
+  .object({
+    memberId: z.string().min(1).max(64),
+    sealed: hex64Schema
+  })
+  .strict();
+
+/** The revealed half of a member commitment. */
+export const drawMemberNonceSchema = z
+  .object({
+    memberId: z.string().min(1).max(64),
+    nonce: entropySchema
+  })
+  .strict();
+
+/**
  * M4.1 step 1. The client may supply `seed` and `commitmentNonce` — an offline
  * treasurer generates them on-device so the values never touch our servers
  * before the ceremony. Both are optional; the server fills them from a CSPRNG
  * when absent, and refuses anything under 16 characters either way.
+ *
+ * `memberCommitments` is **not** optional and has no server-side fallback. That
+ * asymmetry is the point: the treasurer's own entropy is a convenience, a
+ * member's is the guarantee. If the server could invent a contribution, the
+ * property would be worth nothing.
  */
 export const drawCommitRequestSchema = z
   .object({
@@ -76,6 +103,8 @@ export const drawCommitRequestSchema = z
     drawId: uuidSchema.optional(),
     commitmentNonce: entropySchema.optional(),
     seed: entropySchema.optional(),
+    memberCommitments: z.array(drawMemberCommitmentSchema).min(1).max(2_000),
+    minMemberCommitments: z.number().int().min(1).max(2_000).optional(),
     potAmount: amountSchema,
     reserveRatioBps: z.number().int().min(0).max(3_333),
     members: z.array(drawMemberSchema).min(1).max(2_000),
@@ -98,6 +127,25 @@ export const drawCommitRequestSchema = z
         message: "The commitment nonce must differ from the seed"
       });
     }
+    const required = value.minMemberCommitments ?? 1;
+    if (value.memberCommitments.length < required) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["memberCommitments"],
+        message: `At least ${required} sealed member contribution is required before a round may commit`
+      });
+    }
+    const contributorIds = new Set<string>();
+    for (const [index, contribution] of value.memberCommitments.entries()) {
+      if (contributorIds.has(contribution.memberId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["memberCommitments", index, "memberId"],
+          message: "A member may contribute once per round"
+        });
+      }
+      contributorIds.add(contribution.memberId);
+    }
     const memberIds = new Set<string>();
     for (const [index, member] of value.members.entries()) {
       if (memberIds.has(member.memberId)) {
@@ -109,12 +157,27 @@ export const drawCommitRequestSchema = z
       }
       memberIds.add(member.memberId);
     }
+    for (const [index, contribution] of value.memberCommitments.entries()) {
+      if (!memberIds.has(contribution.memberId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["memberCommitments", index, "memberId"],
+          message: "Only members on the roster may contribute"
+        });
+      }
+    }
   });
 
+/**
+ * M4.1 step 2. The reveal carries the treasurer's seed **and** every member
+ * nonce, because the draw is only fair once the randomness the treasurer did not
+ * choose is public too.
+ */
 export const drawRevealRequestSchema = z
   .object({
     drawId: uuidSchema,
     seed: entropySchema,
+    memberNonces: z.array(drawMemberNonceSchema).min(1).max(2_000),
     idempotencyKey: idempotencyKeySchema
   })
   .strict();

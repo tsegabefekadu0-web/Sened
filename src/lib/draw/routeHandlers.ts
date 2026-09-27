@@ -231,7 +231,14 @@ export function createRevealHandler(
 
     try {
       const service = serviceFactory(supabase);
-      const result = await service.reveal({ drawId: parsed.data.drawId, seed: parsed.data.seed }, auth.context);
+      const result = await service.reveal(
+        {
+          drawId: parsed.data.drawId,
+          seed: parsed.data.seed,
+          memberNonces: parsed.data.memberNonces
+        },
+        auth.context
+      );
       return jsonOk(
         {
           round: publicRound(result.round),

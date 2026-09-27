@@ -10,13 +10,24 @@ import {
 } from "@/lib/draw/canonical";
 import { nodeDrawHasher } from "@/lib/draw/nodeHasher";
 import { DrawError } from "@/lib/draw/errors";
-import { createCommitment, openReveal, verifyRound, verifyTranscript } from "@/lib/draw/engine";
+import {
+  createCommitment,
+  openReveal,
+  sealMemberContribution,
+  verifyRound,
+  verifyTranscript
+} from "@/lib/draw/engine";
 import {
   assertNotPriorWinner,
   excludePriorWinners,
   rotationExhausted
 } from "@/lib/draw/rotation";
-import type { DrawMember, DrawRound } from "@/lib/draw/types";
+import type {
+  DrawMember,
+  DrawMemberCommitment,
+  DrawMemberNonce,
+  DrawRound
+} from "@/lib/draw/types";
 
 const hasher = nodeDrawHasher;
 const groupId = "22222222-2222-4222-8222-222222222222";
@@ -24,10 +35,6 @@ const cycleId = "77777777-7777-4777-8777-777777777777";
 const treasurer = "11111111-1111-4111-8111-111111111111";
 const SEED = "seed-0123456789abcdef-ABC";
 const REVEALED_AT = "2026-09-26T09:30:00.000Z";
-
-function reveal(commitment: Awaited<ReturnType<typeof createCommitment>>, seed = SEED) {
-  return openReveal(commitment, { seed, revealedBy: treasurer, revealedAt: REVEALED_AT }, hasher);
-}
 
 function member(index: number, overrides: Partial<DrawMember> = {}): DrawMember {
   const hex = String(index).padStart(4, "0");
@@ -42,15 +49,56 @@ function member(index: number, overrides: Partial<DrawMember> = {}): DrawMember 
 
 const roster: DrawMember[] = [member(1), member(2), member(3), member(4), member(5)];
 
+const drawId = "55555555-5555-4555-8555-555555555555";
+/** A member's nonce. Chosen by the member, never by the treasurer. */
+const MEMBER_NONCE = "member-nonce-0123456789-QQQ";
+
+/**
+ * Seal a member's contribution.
+ *
+ * Every existing draw test now needs one, because a round can no longer commit
+ * without it. That is the point of the change: the fixtures had to be rewritten
+ * to include randomness the treasurer does not control, which is exactly the
+ * thing that used to be missing.
+ */
+async function sealOne(
+  memberId: string = roster[0]!.memberId,
+  nonce: string = MEMBER_NONCE
+): Promise<DrawMemberCommitment> {
+  return sealMemberContribution({ drawId, memberId, nonce }, hasher);
+}
+
+async function noncesFor(
+  commitments: readonly DrawMemberCommitment[]
+): Promise<DrawMemberNonce[]> {
+  return Promise.all(
+    commitments.map(async (contribution) => ({
+      memberId: contribution.memberId,
+      nonce: contribution.memberId === roster[0]!.memberId ? MEMBER_NONCE : `${contribution.memberId}-nonce`
+    }))
+  );
+}
+
+async function reveal(
+  commitment: Awaited<ReturnType<typeof createCommitment>>,
+  seed = SEED
+) {
+  return openReveal(
+    commitment,
+    { seed, memberNonces: await noncesFor(commitment.memberCommitments), revealedBy: treasurer, revealedAt: REVEALED_AT },
+    hasher
+  );
+}
+
 function commitRequest(overrides: Partial<Parameters<typeof createCommitment>[0]> = {}) {
   return {
     groupId,
     cycleId,
     round: 1,
     totalRounds: 5,
-    drawId: "55555555-5555-4555-8555-555555555555",
+    drawId,
     commitmentNonce: "nonce-0123456789abcdef-XYZ",
-    seed: "seed-0123456789abcdef-ABC",
+    seed: SEED,
     potAmount: "25000.00",
     reserveRatioBps: 1000,
     members: roster,
@@ -62,8 +110,23 @@ function commitRequest(overrides: Partial<Parameters<typeof createCommitment>[0]
   };
 }
 
+/** `commitRequest` with one member's contribution already sealed. */
+async function commitRequestWithMember(
+  overrides: Partial<Parameters<typeof createCommitment>[0]> = {}
+) {
+  // Seal from a member who is still eligible. A member already drawn is off the
+  // roster, and refusing their contribution is the product working.
+  const priorWinners = overrides.priorWinnerIds ?? [];
+  const eligible =
+    roster.find((entry) => !priorWinners.includes(entry.memberId))?.memberId ?? roster[0]!.memberId;
+  return {
+    ...commitRequest(overrides),
+    memberCommitments: [await sealOne(eligible)]
+  };
+}
+
 async function committedDraw(overrides: Partial<Parameters<typeof createCommitment>[0]> = {}) {
-  return createCommitment(commitRequest(overrides), hasher);
+  return createCommitment(await commitRequestWithMember(overrides), hasher);
 }
 
 function asRound(commitment: Awaited<ReturnType<typeof createCommitment>>): DrawRound {
@@ -84,10 +147,11 @@ describe("canonical encoding", () => {
       drawId: "d",
       rosterDigest: "e",
       commitmentNonce: "f",
+      memberDigest: "0".repeat(64),
       seed: "g"
     });
 
-    expect(serialized.startsWith("20:sened-draw-commit-v1")).toBe(true);
+    expect(serialized.startsWith("20:sened-draw-commit-v2")).toBe(true);
     expect(serialized).toContain("7:groupId\n2:ab");
     expect(serialized).toContain("7:cycleId\n1:c");
   });
@@ -282,6 +346,8 @@ describe("independent verification", () => {
         commitment: commitment.commitment,
         rosterDigest: commitment.rosterDigest,
         commitmentNonce: commitment.commitmentNonce,
+        memberDigest: commitment.memberDigest,
+        memberCommitments: commitment.memberCommitments,
         seed: SEED,
         participants: commitment.participants.map((p) => ({
           memberId: p.memberId,
@@ -328,6 +394,8 @@ describe("independent verification", () => {
         commitment: "f".repeat(64),
         rosterDigest: commitment.rosterDigest,
         commitmentNonce: commitment.commitmentNonce,
+        memberDigest: commitment.memberDigest,
+        memberCommitments: commitment.memberCommitments,
         seed: SEED,
         participants: commitment.participants.map((p) => ({
           memberId: p.memberId,
@@ -354,6 +422,8 @@ describe("independent verification", () => {
         commitment: commitment.commitment,
         rosterDigest: commitment.rosterDigest,
         commitmentNonce: commitment.commitmentNonce,
+        memberDigest: commitment.memberDigest,
+        memberCommitments: commitment.memberCommitments,
         seed: SEED,
         participants: commitment.participants.slice(1).map((p) => ({
           memberId: p.memberId,
@@ -389,6 +459,8 @@ describe("independent verification", () => {
         commitment: commitment.commitment,
         rosterDigest: commitment.rosterDigest,
         commitmentNonce: commitment.commitmentNonce,
+        memberDigest: commitment.memberDigest,
+        memberCommitments: commitment.memberCommitments,
         seed: SEED,
         participants: swapped
       },
@@ -411,6 +483,8 @@ describe("independent verification", () => {
         commitment: commitment.commitment,
         rosterDigest: commitment.rosterDigest,
         commitmentNonce: commitment.commitmentNonce,
+        memberDigest: commitment.memberDigest,
+        memberCommitments: commitment.memberCommitments,
         seed: "",
         participants: commitment.participants.map((p) => ({
           memberId: p.memberId,
@@ -437,6 +511,8 @@ describe("independent verification", () => {
         commitment: "not-a-hash",
         rosterDigest: commitment.rosterDigest,
         commitmentNonce: commitment.commitmentNonce,
+        memberDigest: commitment.memberDigest,
+        memberCommitments: commitment.memberCommitments,
         seed: SEED,
         participants: commitment.participants.map((p) => ({
           memberId: p.memberId,

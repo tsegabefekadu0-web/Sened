@@ -1,5 +1,7 @@
 import {
   computeCommitment,
+  computeMemberCommitment,
+  computeMemberDigest,
   computeRosterDigest,
   computeTranscriptDigest,
   deriveTicket,
@@ -15,6 +17,8 @@ import type {
   DrawCommitment,
   DrawHasher,
   DrawMember,
+  DrawMemberCommitment,
+  DrawMemberNonce,
   DrawReveal,
   DrawRiskAssessment,
   DrawRound,
@@ -22,6 +26,18 @@ import type {
   DrawVerificationError,
   DrawVerificationResult
 } from "./types";
+
+/**
+ * How many members must seal a contribution before a round may commit.
+ *
+ * One is the minimum that makes grinding pointless: the treasurer can no longer
+ * search for an outcome, because a value they do not have is inside the
+ * commitment. More is better, and a group that trusts its members should raise
+ * it — but refusing to run a draw because nobody could be bothered to seal a
+ * nonce would push groups back to the treasurer-chosen seed, which is the thing
+ * this exists to remove. One is the floor, not the target.
+ */
+export const MIN_MEMBER_COMMITMENTS = 1;
 
 export interface CommitRequest {
   readonly groupId: string;
@@ -31,6 +47,13 @@ export interface CommitRequest {
   readonly drawId: string;
   readonly commitmentNonce: string;
   readonly seed: string;
+  /**
+   * Sealed contributions from members, published as hashes. The nonces stay with
+   * their owners until the reveal.
+   */
+  readonly memberCommitments: readonly DrawMemberCommitment[];
+  /** Defaults to {@link MIN_MEMBER_COMMITMENTS}. */
+  readonly minMemberCommitments?: number;
   readonly potAmount: string;
   readonly reserveRatioBps: number;
   readonly members: readonly DrawMember[];
@@ -38,6 +61,68 @@ export interface CommitRequest {
   readonly committedBy: string;
   readonly committedAt: string;
   readonly idempotencyKey: string;
+}
+
+/**
+ * Order contributions by member so the digest cannot depend on submission order.
+ * Exported because the reveal and the member's own verification both need the
+ * same ordering, and a second implementation of it would be a second bug.
+ */
+export function sortMemberContributions<T extends { readonly memberId: string }>(
+  contributions: readonly T[]
+): T[] {
+  return [...contributions].sort((left, right) =>
+    left.memberId < right.memberId ? -1 : left.memberId > right.memberId ? 1 : 0
+  );
+}
+
+/**
+ * Validate a set of sealed member contributions.
+ *
+ * Every check here closes a way to make the count look satisfied without a
+ * member having actually contributed: a duplicate id, an outsider, a value that
+ * is not a digest.
+ */
+function assertMemberContributions(
+  contributions: readonly DrawMemberCommitment[],
+  eligibleMemberIds: ReadonlySet<string>,
+  minimum: number
+): DrawMemberCommitment[] {
+  if (contributions.length < minimum) {
+    throw new DrawError(
+      "MEMBER_COMMITMENT_MISSING",
+      `A draw needs at least ${minimum} sealed member contribution(s) before the treasurer can commit. ` +
+        "Without one the treasurer chooses the winner by searching seeds."
+    );
+  }
+
+  const seen = new Set<string>();
+  for (const contribution of contributions) {
+    if (!contribution.memberId || contribution.memberId.length > 64) {
+      throw new DrawError("INVALID_REQUEST", "A member contribution has an invalid memberId");
+    }
+    if (seen.has(contribution.memberId)) {
+      throw new DrawError(
+        "INVALID_REQUEST",
+        "A member may contribute once per round; a duplicate would let one member stand in for the quorum."
+      );
+    }
+    seen.add(contribution.memberId);
+    if (!eligibleMemberIds.has(contribution.memberId)) {
+      throw new DrawError(
+        "INVALID_REQUEST",
+        "Only members on the eligible roster may contribute. An outsider's contribution is not the group's randomness."
+      );
+    }
+    if (!isHex64(contribution.sealed)) {
+      throw new DrawError(
+        "INVALID_REQUEST",
+        "A member contribution must be a 64-character lowercase SHA-256 digest"
+      );
+    }
+  }
+
+  return sortMemberContributions(contributions);
 }
 
 function unverified(
@@ -110,6 +195,20 @@ export async function createCommitment(
     hasher
   );
   const rosterDigest = await computeRosterDigest(participants, hasher);
+
+  const minimum = Math.max(
+    MIN_MEMBER_COMMITMENTS,
+    Math.floor(request.minMemberCommitments ?? MIN_MEMBER_COMMITMENTS)
+  );
+  const memberCommitments = assertMemberContributions(
+    request.memberCommitments,
+    new Set(participants.map((participant) => participant.memberId)),
+    minimum
+  );
+  const memberDigest = await computeMemberDigest(
+    { drawId: request.drawId, contributions: memberCommitments },
+    hasher
+  );
   const commitment = await computeCommitment(
     {
       groupId: request.groupId,
@@ -118,6 +217,7 @@ export async function createCommitment(
       drawId: request.drawId,
       rosterDigest,
       commitmentNonce: request.commitmentNonce,
+      memberDigest,
       seed: request.seed
     },
     hasher
@@ -130,6 +230,8 @@ export async function createCommitment(
     round: request.round,
     commitment,
     commitmentNonce: request.commitmentNonce,
+    memberDigest,
+    memberCommitments,
     rosterDigest,
     participants,
     potAmount: request.potAmount,
@@ -155,11 +257,110 @@ export interface RevealResult {
  * the draw is refused, not "flagged and paid anyway". That is the fail-closed
  * behaviour §12.5 requires.
  */
+/**
+ * Recompute the member digest from revealed nonces, checking each against the
+ * hash that was sealed at commit time.
+ *
+ * This is the heart of the fairness property. A member's nonce is only accepted
+ * if it hashes to what that member published before the ceremony; the aggregate
+ * is then compared with the digest bound into the commitment. Change one nonce
+ * and the digest changes, so the commitment cannot be reproduced — which is
+ * exactly what stops a treasurer from revealing a nonce of their own choosing.
+ */
+export async function resolveMemberDigest(
+  commitment: DrawCommitment,
+  nonces: readonly DrawMemberNonce[],
+  hasher: DrawHasher
+): Promise<string> {
+  if (nonces.length !== commitment.memberCommitments.length) {
+    throw new DrawError(
+      "MEMBER_COMMITMENT_MISSING",
+      `The reveal opened ${nonces.length} member contribution(s) but ${commitment.memberCommitments.length} were sealed. The draw is refused.`
+    );
+  }
+
+  const sealedByMember = new Map(
+    commitment.memberCommitments.map((contribution) => [contribution.memberId, contribution.sealed])
+  );
+
+  for (const entry of nonces) {
+    const sealed = sealedByMember.get(entry.memberId);
+    if (sealed === undefined) {
+      throw new DrawError(
+        "MEMBER_COMMITMENT_MISSING",
+        "A revealed contribution belongs to a member who sealed nothing. The draw is refused."
+      );
+    }
+    if (!entry.nonce || entry.nonce.length < 16) {
+      throw new DrawError(
+        "INVALID_REQUEST",
+        "A revealed member nonce must carry at least 16 characters of entropy"
+      );
+    }
+    const recomputed = await computeMemberCommitment(
+      { drawId: commitment.drawId, memberId: entry.memberId, nonce: entry.nonce },
+      hasher
+    );
+    if (recomputed !== sealed) {
+      throw new DrawError(
+        "MEMBER_COMMITMENT_MISMATCH",
+        `The nonce revealed for ${entry.memberId} does not match what that member sealed. The draw is refused.`
+      );
+    }
+  }
+
+  const memberDigest = await computeMemberDigest(
+    { drawId: commitment.drawId, contributions: commitment.memberCommitments },
+    hasher
+  );
+  if (memberDigest !== commitment.memberDigest) {
+    throw new DrawError(
+      "MEMBER_COMMITMENT_MISMATCH",
+      "The member contributions no longer hash to the committed digest. The draw is refused."
+    );
+  }
+  return memberDigest;
+}
+
+/**
+ * Seal one member's contribution.
+ *
+ * A member runs this on their own phone, publishes only the digest, and keeps
+ * the nonce. The digest is what the treasurer commits against; the nonce is what
+ * the ceremony reveals.
+ */
+export async function sealMemberContribution(
+  input: { readonly drawId: string; readonly memberId: string; readonly nonce: string },
+  hasher: DrawHasher
+): Promise<DrawMemberCommitment> {
+  if (!input.nonce || input.nonce.length < 16) {
+    throw new DrawError(
+      "INVALID_REQUEST",
+      "A member nonce must carry at least 16 characters of entropy"
+    );
+  }
+  return {
+    memberId: input.memberId,
+    sealed: await computeMemberCommitment(input, hasher)
+  };
+}
+
 export async function openReveal(
   commitment: DrawCommitment,
-  input: { readonly seed: string; readonly revealedBy: string; readonly revealedAt: string },
+  input: {
+    readonly seed: string;
+    readonly memberNonces: readonly DrawMemberNonce[];
+    readonly revealedBy: string;
+    readonly revealedAt: string;
+  },
   hasher: DrawHasher
 ): Promise<RevealResult> {
+  // Every sealed contribution must be opened, and opened correctly, before the
+  // winner is derived. This is the step that makes the draw fair: the winner
+  // depends on nonces the treasurer chose not, so no seed search could have
+  // reached this outcome.
+  const memberDigest = await resolveMemberDigest(commitment, input.memberNonces, hasher);
+
   const recomputed = await computeCommitment(
     {
       groupId: commitment.groupId,
@@ -168,6 +369,7 @@ export async function openReveal(
       drawId: commitment.drawId,
       rosterDigest: commitment.rosterDigest,
       commitmentNonce: commitment.commitmentNonce,
+      memberDigest,
       seed: input.seed
     },
     hasher
@@ -176,7 +378,7 @@ export async function openReveal(
   if (recomputed !== commitment.commitment) {
     throw new DrawError(
       "COMMITMENT_MISMATCH",
-      "The revealed seed does not reproduce the published commitment. The draw is refused."
+      "The revealed seed and member contributions do not reproduce the published commitment. The draw is refused."
     );
   }
 
@@ -193,6 +395,7 @@ export async function openReveal(
       drawId: commitment.drawId,
       commitment: commitment.commitment,
       rosterDigest: commitment.rosterDigest,
+      memberDigest,
       seed: input.seed
     },
     hasher
@@ -241,6 +444,8 @@ export async function openReveal(
       drawId: commitment.drawId,
       commitment: commitment.commitment,
       seed: input.seed,
+      memberDigest,
+      memberNonces: sortMemberContributions(input.memberNonces),
       transcriptDigest,
       selectionDigest: selection.digest,
       selectedIndex: selection.index,
@@ -299,7 +504,8 @@ export async function verifyTranscript(
 
   for (const [label, value] of [
     ["commitment", transcript.commitment],
-    ["rosterDigest", transcript.rosterDigest]
+    ["rosterDigest", transcript.rosterDigest],
+    ["memberDigest", transcript.memberDigest]
   ] as const) {
     if (!isHex64(value)) {
       codes.push("incomplete_transcript");
@@ -361,7 +567,24 @@ export async function verifyTranscript(
     }
   }
 
-  // 3. Does the seed reproduce the commitment?
+  // 3. Do the published member contributions still hash to the committed
+  // member digest? Without this a treasurer could publish an empty contribution
+  // set and be self-consistent, which is precisely the grinding attack this
+  // digest exists to close.
+  const publishedMemberDigest = await computeMemberDigest(
+    { drawId: transcript.drawId, contributions: transcript.memberCommitments },
+    hasher
+  );
+  if (publishedMemberDigest !== transcript.memberDigest) {
+    codes.push("member_commitment_mismatch");
+    errors.push({
+      code: "member_commitment_mismatch",
+      detail:
+        "The published member contributions do not hash to the member digest inside the commitment. The set of contributing members was changed."
+    });
+  }
+
+  // 4. Does the seed reproduce the commitment?
   const recomputedCommitment = await computeCommitment(
     {
       groupId: transcript.groupId,
@@ -370,6 +593,7 @@ export async function verifyTranscript(
       drawId: transcript.drawId,
       rosterDigest: transcript.rosterDigest,
       commitmentNonce: transcript.commitmentNonce,
+      memberDigest: transcript.memberDigest,
       seed: transcript.seed
     },
     hasher
@@ -388,6 +612,7 @@ export async function verifyTranscript(
       drawId: transcript.drawId,
       commitment: transcript.commitment,
       rosterDigest: transcript.rosterDigest,
+      memberDigest: transcript.memberDigest,
       seed: transcript.seed
     },
     hasher
@@ -490,6 +715,11 @@ export async function verifyRound(
       commitment: round.commitment,
       rosterDigest: round.rosterDigest,
       commitmentNonce: round.commitmentNonce,
+      memberDigest: round.memberDigest,
+      memberCommitments: round.memberCommitments.map((contribution) => ({
+        memberId: contribution.memberId,
+        sealed: contribution.sealed
+      })),
       seed: round.reveal?.seed ?? "",
       participants: round.participants.map((participant) => ({
         memberId: participant.memberId,

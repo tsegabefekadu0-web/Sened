@@ -14,6 +14,7 @@ import { mapDrawError, type DrawActorContext, type DrawRepository } from "./repo
 import type {
   DrawHasher,
   DrawMember,
+  DrawMemberNonce,
   DrawRiskAssessment,
   DrawRound,
   DrawVerificationResult
@@ -174,7 +175,11 @@ export class DrawService {
   }
 
   async reveal(
-    input: { readonly drawId: string; readonly seed: string },
+    input: {
+      readonly drawId: string;
+      readonly seed: string;
+      readonly memberNonces: readonly DrawMemberNonce[];
+    },
     context: DrawActorContext
   ): Promise<DrawRevealResult> {
     try {
@@ -195,6 +200,7 @@ export class DrawService {
         round,
         {
           seed: input.seed,
+          memberNonces: input.memberNonces,
           revealedBy: context.userId,
           revealedAt: this.clock().toISOString()
         },

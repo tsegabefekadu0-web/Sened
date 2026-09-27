@@ -251,6 +251,8 @@ function parseRound(value: unknown): DrawRound {
     round: Number(parsed.round),
     commitment: String(parsed.commitment),
     commitmentNonce: String(parsed.commitmentNonce),
+    memberDigest: String(parsed.memberDigest ?? ""),
+    memberCommitments: (parsed.memberCommitments ?? []) as DrawRound["memberCommitments"],
     rosterDigest: String(parsed.rosterDigest),
     participants: (parsed.participants ?? []) as DrawRound["participants"],
     potAmount: String(parsed.potAmount),
@@ -404,6 +406,11 @@ export function drawErrorStatus(code: DrawErrorCode): number {
     case "COMMITMENT_MISMATCH":
     case "NO_ELIGIBLE_PARTICIPANTS":
     case "UNIFORMITY_EXHAUSTED":
+    // A member nonce that does not open, or a quorum that was never sealed.
+    // 422 rather than 409: the request was well-formed and the ceremony cannot
+    // be completed as described.
+    case "MEMBER_COMMITMENT_MISSING":
+    case "MEMBER_COMMITMENT_MISMATCH":
     // The caller tried to reveal out of turn. Distinct from a repeat winner so
     // the client can tell "wait your turn" from "that member already drew".
     case "ROUND_OUT_OF_ORDER":

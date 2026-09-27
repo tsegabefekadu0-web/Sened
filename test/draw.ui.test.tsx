@@ -107,7 +107,9 @@ describe("DrawBoard ceremony", () => {
     // the verification panel keeps reporting the honest "not yet" state rather
     // than anything that could be mistaken for a successful draw.
     await waitFor(() => {
-      expect(screen.getByText(/does not reproduce the published commitment/i)).toBeInTheDocument();
+      // The wording names the member contributions too, because they are part of
+      // what has to reproduce the commitment for the draw to stand.
+      expect(screen.getByText(/do not reproduce the published commitment/i)).toBeInTheDocument();
     });
     expect(screen.queryByText("እጣ ተጠናቋል")).not.toBeInTheDocument();
     expect(panel("verify").getByText("ገና አልተረጋግጠም")).toBeInTheDocument();
@@ -174,6 +176,10 @@ describe("VerifyPanel tamper reporting", () => {
     commitment: "a".repeat(64),
     rosterDigest: "b".repeat(64),
     commitmentNonce: "nonce-abcdefghijklmnop",
+    memberDigest: "e".repeat(64),
+    memberCommitments: [
+      { memberId: "00014444-4444-8444-8444-444444444444", sealed: "f".repeat(64) }
+    ],
     seed: "seed-abcdefghijklmnop",
     participants: [
       {

@@ -521,4 +521,153 @@ begin
 end;
 $member$;
 
+-- ---------------------------------------------------------------------------
+-- The draw RPCs refuse a ceremony nobody can check
+--
+-- The application already refuses a commitment with no member contribution, but
+-- `commit_draw_v1` is reachable directly through PostgREST. If the function
+-- accepted an empty set, the fairness property would be a convention rather than
+-- a guarantee — and a caller going straight to the database is exactly who an
+-- attacker is.
+--
+-- These also confirm the new arities exist and are granted, which is the class
+-- of defect that made the bank migration unappliable: a revoke or grant naming a
+-- function that does not exist.
+-- ---------------------------------------------------------------------------
+do $rpc$
+begin
+  -- A commit with an empty member set is refused by the function itself.
+  begin
+    perform public.commit_draw_v1(
+      'dddddddd-0000-4000-8000-000000000001'::uuid,
+      'eeeeeeee-0000-4000-8000-000000000001'::uuid,
+      1,
+      'cccccccc-0000-4000-8000-000000000010'::uuid,
+      'a'.repeat(64),
+      'nonce-0123456789abcdef-XYZ',
+      'b'.repeat(64),
+      'e'.repeat(64),
+      '[]'::jsonb,
+      '[]'::jsonb,
+      5000.00, 5, 1000, 'rpc-empty-member-set', now()
+    );
+    raise exception 'RPC 1 FAILED: commit_draw_v1 ACCEPTED an empty member set';
+  exception when others then
+    if sqlerrm not like '%draw_member_commitment_missing%' then
+      raise exception 'RPC 1 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- A null member set is refused too, not silently defaulted.
+  begin
+    perform public.commit_draw_v1(
+      'dddddddd-0000-4000-8000-000000000001'::uuid,
+      'eeeeeeee-0000-4000-8000-000000000001'::uuid,
+      1,
+      'cccccccc-0000-4000-8000-000000000011'::uuid,
+      'a'.repeat(64),
+      'nonce-0123456789abcdef-XYZ',
+      'b'.repeat(64),
+      null, null, '[]'::jsonb, 5000.00, 5, 1000, 'rpc-null-member-set', now()
+    );
+    raise exception 'RPC 2 FAILED: commit_draw_v1 ACCEPTED a null member set';
+  exception when others then
+    if sqlerrm not like '%draw_member_commitment_missing%' then
+      raise exception 'RPC 2 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- An honest commit through the RPC is accepted and stores the set.
+  perform public.commit_draw_v1(
+    'dddddddd-0000-4000-8000-000000000001'::uuid,
+    'eeeeeeee-0000-4000-8000-000000000001'::uuid,
+    1,
+    'cccccccc-0000-4000-8000-000000000012'::uuid,
+    'a'.repeat(64),
+    'nonce-0123456789abcdef-XYZ',
+    'b'.repeat(64),
+    'e'.repeat(64),
+    jsonb_build_array(
+      jsonb_build_object(
+        'memberId', '44444444-4444-4444-8444-444444444444',
+        'sealed', 'c'.repeat(64)
+      )
+    ),
+    '[]'::jsonb,
+    5000.00, 5, 1000, 'rpc-honest-member-set', now()
+  );
+
+  if not exists (
+    select 1 from public.draw_commitments
+    where idempotency_key = 'rpc-honest-member-set'
+      and jsonb_array_length(member_commitments) = 1
+  ) then
+    raise exception 'RPC 3 FAILED: the honest member set was not stored';
+  end if;
+
+  -- A reveal that opens fewer nonces than were sealed is refused.
+  begin
+    perform public.reveal_draw_v1(
+      'cccccccc-0000-4000-8000-000000000012'::uuid,
+      'reveal-seed-0123456789', 'a'.repeat(64), 'e'.repeat(64), '[]'::jsonb,
+      'f'.repeat(64), 'a'.repeat(64), 0,
+      '44444444-4444-4444-8444-444444444444', 'c'.repeat(64),
+      5000.00, 500.00, now()
+    );
+    raise exception 'RPC 4 FAILED: reveal_draw_v1 ACCEPTED an empty nonce set';
+  exception when others then
+    if sqlerrm not like '%draw_member_commitment_missing%' then
+      raise exception 'RPC 4 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- A reveal carrying a different member digest than was committed is refused.
+  begin
+    perform public.reveal_draw_v1(
+      'cccccccc-0000-4000-8000-000000000012'::uuid,
+      'reveal-seed-0123456789', 'a'.repeat(64), '1'.repeat(64),
+      jsonb_build_array(
+        jsonb_build_object('memberId', '44444444-4444-4444-8444-444444444444', 'nonce', 'n')
+      ),
+      'f'.repeat(64), 'a'.repeat(64), 0,
+      '44444444-4444-4444-8444-444444444444', 'c'.repeat(64),
+      5000.00, 500.00, now()
+    );
+    raise exception 'RPC 5 FAILED: reveal_draw_v1 ACCEPTED a swapped member digest';
+  exception when others then
+    if sqlerrm not like '%draw_member_commitment_mismatch%' then
+      raise exception 'RPC 5 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- The new arities are the only ones that exist, and they are granted. This is
+  -- the check that would have caught the bank migration's mismatched grants.
+  if exists (
+    select 1 from pg_proc
+    join pg_namespace on pg_namespace.oid = pg_proc.pronamespace
+    where pg_namespace.nspname = 'public'
+      and pg_proc.proname = 'commit_draw_v1'
+      and pg_proc.pronargs <> 15
+  ) then
+    raise exception 'RPC 6 FAILED: an old commit_draw_v1 arity still exists';
+  end if;
+
+  if not has_function_privilege(
+    'authenticated',
+    'public.commit_draw_v1(uuid, uuid, integer, uuid, text, text, text, text, jsonb, jsonb, numeric, integer, integer, text, timestamptz)',
+    'EXECUTE'
+  ) then
+    raise exception 'RPC 7 FAILED: authenticated cannot execute the new commit_draw_v1';
+  end if;
+
+  if has_function_privilege(
+    'anon',
+    'public.commit_draw_v1(uuid, uuid, integer, uuid, text, text, text, text, jsonb, jsonb, numeric, integer, integer, text, timestamptz)',
+    'EXECUTE'
+  ) then
+    raise exception 'RPC 8 FAILED: anon can execute commit_draw_v1';
+  end if;
+end;
+$rpc$;
+
 select 'ALL DRAW BINDING CHECKS PASSED' as result;

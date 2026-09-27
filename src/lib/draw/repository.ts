@@ -282,6 +282,14 @@ export class SupabaseDrawRepository implements DrawRepository {
       p_commitment: commitment.commitment,
       p_commitment_nonce: commitment.commitmentNonce,
       p_roster_digest: commitment.rosterDigest,
+      // The member contributions are what make the draw fair rather than merely
+      // honest, so they go to the database with the commitment. The RPC refuses
+      // an empty set: reaching this function without them would produce exactly
+      // the row the fairness property depends on not existing.
+      p_member_digest: commitment.memberDigest,
+      p_member_commitments: commitment.memberCommitments.map((contribution) => ({
+        ...contribution
+      })),
       p_participants: commitment.participants.map((participant) => ({ ...participant })),
       p_pot_amount: commitment.potAmount,
       p_total_rounds: commitment.totalRounds,
@@ -304,6 +312,11 @@ export class SupabaseDrawRepository implements DrawRepository {
       p_draw_id: reveal.drawId,
       p_seed: reveal.seed,
       p_commitment: reveal.commitment,
+      // Every member nonce travels with the seed. A member verifying the draw
+      // needs them to check each nonce against the hash that was sealed, and the
+      // RPC refuses a reveal that opens fewer than were sealed.
+      p_member_digest: reveal.memberDigest,
+      p_member_nonces: reveal.memberNonces.map((entry) => ({ ...entry })),
       p_transcript_digest: reveal.transcriptDigest,
       p_selection_digest: reveal.selectionDigest,
       p_selected_index: reveal.selectedIndex,

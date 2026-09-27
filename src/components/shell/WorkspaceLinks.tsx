@@ -2,7 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
-import { Mic, Dices, WifiOff } from "lucide-react";
+import { BookOpenText, Mic, Dices, WifiOff } from "lucide-react";
 
 /**
  * The lanes, reachable.
@@ -13,6 +13,11 @@ import { Mic, Dices, WifiOff } from "lucide-react";
  * concluded the three engines behind it were mockups. Both filings asked for
  * exactly this — A2 R-3, A3 R-4, A4 R3 — and all three are the same one-line
  * omission in a file the requester was not allowed to edit.
+ *
+ * `/ledger` is here for the same reason. `m2-dashboard.tsx` is 847 lines of
+ * built, fully translated, honest UI that no route rendered, and it is the only
+ * view in the product that shows the chain seal and the pending / manual-review
+ * split — the part of the trust story a reviewer most wants to read.
  *
  * The M1 bottom-nav slots are left alone: Home / ደብተር / Members / Profile are
  * design pillars from ROADMAP §1.4, and two of them have no destination yet.
@@ -33,6 +38,12 @@ const DESTINATIONS = [
     icon: Dices,
     label: "ፍትሃዊ እጣ",
     sub: "Commit-reveal draw"
+  },
+  {
+    href: "/ledger",
+    icon: BookOpenText,
+    label: "ደብተር ንጉጥብ",
+    sub: "Ledger review"
   },
   {
     href: "/offline",

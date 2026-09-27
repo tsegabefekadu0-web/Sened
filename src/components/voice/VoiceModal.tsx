@@ -53,24 +53,16 @@ export interface VoiceModalProps {
   isOpen: boolean;
   onClose: () => void;
   /**
-   * Legacy Gen A callback, kept so `src/app/page.tsx` keeps compiling.
-   *
-   * A2's lane will **not** call it from speech. A voice note is provisional
-   * forever; only AGENT-1's bank verification can set `verified`, and only
-   * through `onRequestVerification`. See `docs/requests/agent-2.md` R-2 and
-   * R-5, and `docs/architecture/voice.md` §6.
-   */
-  onAddContribution?: (data: {
-    name: string;
-    amharicName: string;
-    amount: number;
-    channel: "Telebirr" | "CBE Birr";
-    txRef: string;
-  }) => void;
-  /**
    * Hands a sound draft to AGENT-1's `/api/bank-verifications`. Supplied at
    * integration. While absent, the submit control is disabled and says why —
    * a dead fetch would be a fake, and a local success would be a lie.
+   *
+   * There is deliberately no "add this to the treasury" callback any more. The
+   * one this file used to expose was wired in `page.tsx` to
+   * `telebirrVerified: newEntry.channel === "Telebirr"`, which turned a spoken
+   * sentence into a bank confirmation — §12.3. Nothing may reach the ledger
+   * from speech; only a real `VERIFIED` result may, and that arrives through
+   * the verifier's response, not through a second, unchecked door.
    */
   onRequestVerification?: (draft: ProvisionalContribution) => Promise<BankVerificationOutcome>;
   /** Defaults to `am` so the M1 shell's existing Amharic copy is unchanged. */
@@ -90,7 +82,6 @@ type Stage =
 export function VoiceModal({
   isOpen,
   onClose,
-  onAddContribution,
   onRequestVerification,
   locale = "am",
   language = "am"
@@ -276,22 +267,16 @@ export function VoiceModal({
         setSubmitError(t("voice.submitUnverifiedReason"));
         return;
       }
-      // A genuine bank VERIFIED. Only now is it legitimate to touch the
-      // caller's ledger callback.
-      onAddContribution?.({
-        name: "",
-        amharicName: "",
-        amount: draft.amount ?? 0,
-        channel: draft.provider === "telebirr" ? "Telebirr" : "CBE Birr",
-        txRef: draft.txRef ?? ""
-      });
+      // A genuine bank VERIFIED. The result — not the transcript — is what the
+      // caller acts on, and it carries its own verificationId and provenance.
+      // Nothing is written locally on the strength of what was said.
       onClose();
     } catch {
       setSubmitError(t("voice.submitUnverifiedReason"));
     } finally {
       setSubmitting(false);
     }
-  }, [draft, onAddContribution, onClose, onRequestVerification, t]);
+  }, [draft, onClose, onRequestVerification, t]);
 
   if (!isOpen) {
     return null;

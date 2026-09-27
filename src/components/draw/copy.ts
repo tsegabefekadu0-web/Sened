@@ -1,19 +1,21 @@
-export type Locale = "am" | "en";
+import { translate, type Locale } from "@/lib/i18n";
 
 /**
- * AGENT-3 lane-local copy.
+ * AGENT-3's ceremonial copy, sourced from the shared dictionary.
  *
- * `src/lib/i18n.ts` is single-writer and belongs to AGENT-2 (AGENTWORK.md §4.1),
- * so this lane cannot add keys to it. I filed the full `draw.*` key triples in
- * `docs/requests/agent-3.md` (R-3) for A2 to fold in.
+ * This table used to be the lane's own `en`/`am` pair, mirroring the
+ * `draw.*` triples filed in `docs/requests/agent-3.md` R-3, for the same reason
+ * A4 had one: `src/lib/i18n.ts` belongs to A2 alone. Those keys are in the
+ * dictionary now, so the strings are read from there instead of being kept a
+ * second time.
  *
- * Until then this table is the honest interim: **both** languages are present,
- * which is what §12.6 requires. The Gen A components (`DebterCard`,
- * `ContributionFeed`, `Header`) hard-code Ge'ez literals and never call `t()`,
- * so a locale table inside my own folder is consistent with the surrounding UI
- * rather than a workaround. When A2 lands the `draw.*` keys, delete this file
- * and switch `DrawBoard` to `createTranslator(locale)`.
+ * The `DrawCopy` shape is unchanged so `DrawBoard`, `MesobCeremony`,
+ * `VerifyPanel` and `RiskPanel` are untouched. A3's note that this file should
+ * be deleted once the keys land is satisfied in substance — the duplication is
+ * gone; what remains is the field-name adapter the components import.
  */
+
+export type { Locale };
 
 export interface DrawCopy {
   readonly localeName: string;
@@ -42,66 +44,60 @@ export interface DrawCopy {
   readonly localNote: string;
 }
 
-const am: DrawCopy = {
-  localeName: "አማርኛ",
-  roundLabel: (round, total) => `ዙር ${round} / ${total}`,
-  ceremonyTitle: "የመሶብ እጣ ሥርዓት",
-  stepCommit: "ደረጃ 1 — ቃል መዋጮ",
-  stepCommitIdle: "ዘመኑ ከመታወቁ በፊት በአጥር ላይ ይሸጣል።",
-  stepCommitDone: "ቃል መዋጮው ተሸጥቷል፤ አባላቱ ተሸጥተዋል።",
-  stepReveal: "ደረጃ 2 — መስበር",
-  stepRevealIdle: "የመሶቡ ውስጥ እየተጨማረ አሸናፊው ይለያል።",
-  stepRevealDone: "ዘመኑ ተገልጧል፤ አሸናፊው ተወስዷል።",
-  stepVerify: "ደረጃ 3 — ማረጋገጥ",
-  stepVerifyDetail: "እያንዳንዱ አባላት በስልክው ላይ ራሱ ይመልከታል።",
-  actionCommit: "ቃል መዋጮ አስገባ",
-  actionReveal: "ዘመኑን አሳይ",
-  actionNextRound: "ወደ ቀጣይ ዙር ቀጥል",
-  tamperToggle:
-    "ለማሳያ ብቻ፦ ዘመኑን በአንድ ፊደል ማስተካከል። ማንኛውም አሸናፊ ሲከልን ይህ ራሱ ይሳዳል።",
-  rotationTitle: "ዙር መኸረድ",
-  rotationDetail: "በዚህ ዙር ያሸነፉ አባላት ከቀጣይ እጣዎች ውስጥ ይገገማሉ።",
-  alreadyWon: "አሸናፊ ሆነዋል",
-  eligible: "ይገባል",
-  commitmentTitle: "የቃል መዋጮ መረጃ",
-  commitmentIdle: "እጅግ ቃል መዋጮ አልተሰጠም።",
-  participants: "ተሳታፊዎች",
-  currency: "ብር",
-  localNote:
-    "ይህ ማሳያ በስልክህ ላይ ብቻ ይሠራል — SHA-256 በስልክህ WebCrypto እንደሚሰራ ነው። ለማስተካከል አገልግሎቱ ላይ አይተማርንም።"
-};
-
-const en: DrawCopy = {
-  localeName: "English",
-  roundLabel: (round, total) => `Round ${round} / ${total}`,
-  ceremonyTitle: "Mesob draw ceremony",
-  stepCommit: "Step 1 — Commit",
-  stepCommitIdle: "The seed is fixed in wax before the draw begins.",
-  stepCommitDone: "The commitment is sealed and the roster is published.",
-  stepReveal: "Step 2 — Reveal",
-  stepRevealIdle: "The winner is drawn as the mesob is turned.",
-  stepRevealDone: "The seed is published and the winner is determined.",
-  stepVerify: "Step 3 — Verify",
-  stepVerifyDetail: "Any member can recompute this on their own phone.",
-  actionCommit: "Seal the commitment",
-  actionReveal: "Reveal the seed",
-  actionNextRound: "Continue to the next round",
-  tamperToggle:
-    "Demonstration only: flip one character of the seed. The commitment check will catch it, and that is the entire point.",
-  rotationTitle: "Rotation",
-  rotationDetail: "Members who have already been drawn this cycle are excluded from the remaining draws.",
-  alreadyWon: "Already won",
-  eligible: "Eligible",
-  commitmentTitle: "Commitment",
-  commitmentIdle: "No commitment sealed yet.",
-  participants: "Participants",
-  currency: "ETB",
-  localNote:
-    "This demonstration runs entirely on your device using WebCrypto for SHA-256. Verifying the draw does not depend on the server."
-};
-
-const TABLES: Record<Locale, DrawCopy> = { am, en };
+const FIELDS = {
+  localeName: "draw.localeName",
+  ceremonyTitle: "draw.ceremonyTitle",
+  stepCommit: "draw.stepCommit",
+  stepCommitIdle: "draw.stepCommitIdle",
+  stepCommitDone: "draw.stepCommitDone",
+  stepReveal: "draw.stepReveal",
+  stepRevealIdle: "draw.stepRevealIdle",
+  stepRevealDone: "draw.stepRevealDone",
+  stepVerify: "draw.stepVerify",
+  stepVerifyDetail: "draw.stepVerifyDetail",
+  actionCommit: "draw.actionCommit",
+  actionReveal: "draw.actionReveal",
+  actionNextRound: "draw.actionNextRound",
+  tamperToggle: "draw.tamperToggle",
+  rotationTitle: "draw.rotationTitle",
+  rotationDetail: "draw.rotationDetail",
+  alreadyWon: "draw.alreadyWon",
+  eligible: "draw.eligible",
+  commitmentTitle: "draw.commitmentTitle",
+  commitmentIdle: "draw.commitmentIdle",
+  participants: "draw.participants",
+  currency: "draw.currency",
+  localNote: "draw.localNote"
+} as const satisfies Record<Exclude<keyof DrawCopy, "roundLabel">, string>;
 
 export function t(locale: Locale): DrawCopy {
-  return TABLES[locale];
+  const read = (key: string): string => translate(locale, key as never);
+
+  return {
+    localeName: read(FIELDS.localeName),
+    roundLabel: (round: number, total: number): string =>
+      translate(locale, "draw.roundLabel" as never, { round, total }),
+    ceremonyTitle: read(FIELDS.ceremonyTitle),
+    stepCommit: read(FIELDS.stepCommit),
+    stepCommitIdle: read(FIELDS.stepCommitIdle),
+    stepCommitDone: read(FIELDS.stepCommitDone),
+    stepReveal: read(FIELDS.stepReveal),
+    stepRevealIdle: read(FIELDS.stepRevealIdle),
+    stepRevealDone: read(FIELDS.stepRevealDone),
+    stepVerify: read(FIELDS.stepVerify),
+    stepVerifyDetail: read(FIELDS.stepVerifyDetail),
+    actionCommit: read(FIELDS.actionCommit),
+    actionReveal: read(FIELDS.actionReveal),
+    actionNextRound: read(FIELDS.actionNextRound),
+    tamperToggle: read(FIELDS.tamperToggle),
+    rotationTitle: read(FIELDS.rotationTitle),
+    rotationDetail: read(FIELDS.rotationDetail),
+    alreadyWon: read(FIELDS.alreadyWon),
+    eligible: read(FIELDS.eligible),
+    commitmentTitle: read(FIELDS.commitmentTitle),
+    commitmentIdle: read(FIELDS.commitmentIdle),
+    participants: read(FIELDS.participants),
+    currency: read(FIELDS.currency),
+    localNote: read(FIELDS.localNote)
+  };
 }

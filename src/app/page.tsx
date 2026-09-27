@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Header } from "@/components/shell/Header";
 import { WorkspaceLinks } from "@/components/shell/WorkspaceLinks";
@@ -9,6 +9,41 @@ import { ContributionFeed, type MemberContribution } from "@/components/contribu
 import { BottomVoiceNav } from "@/components/navigation/BottomVoiceNav";
 import { VoiceModal } from "@/components/voice/VoiceModal";
 import { AudioDigestModal } from "@/components/voice/AudioDigestModal";
+import { getSenedDatabase, isOfflineStorageAvailable } from "@/lib/db";
+import { saveSpokenNote } from "@/lib/db/notes";
+import type { PaymentChannel, SpokenNoteLocale } from "@/lib/db/types";
+import type { ProvisionalContribution } from "@/lib/voice/types";
+
+/**
+ * The group this shell is looking at.
+ *
+ * A single treasury is signed in on one device at a time in this build, and the
+ * roster arrives from the sync mirror. Until there is a session there is no
+ * group to read, so the shell names one — and says so, rather than inventing
+ * rows that would look like a synced roster.
+ */
+const LOCAL_GROUP_ID = "local-unprovisioned-group";
+
+/** The parser's provider names map onto the offline store's rails one-for-one. */
+const CHANNEL_FOR_PROVIDER: Readonly<Record<string, PaymentChannel>> = {
+  telebirr: "telebirr",
+  cbe: "cbe-birr",
+  awash: "bank-transfer"
+};
+
+/**
+ * The parser reports a *detection*, which can be "mixed" or "unknown". The store
+ * wants one concrete locale, so an ambiguous detection is recorded as `am` —
+ * this is a Ge'ez-primary product and the honest default is the language the
+ * note is expected to be in, not a guess at what was said.
+ */
+const SPOKEN_NOTE_LOCALE_FOR: Readonly<Record<string, SpokenNoteLocale>> = {
+  am: "am",
+  om: "om",
+  en: "en",
+  mixed: "am",
+  unknown: "am"
+};
 
 /**
  * Every row here is PROVISIONAL.
@@ -52,8 +87,61 @@ export default function SenedHome() {
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isDigestModalOpen, setIsDigestModalOpen] = useState(false);
 
-  const [contributions] = useState<MemberContribution[]>(referenceContributions);
+  const [contributions, setContributions] = useState<MemberContribution[]>(referenceContributions);
   const [potBalance] = useState(175000);
+
+  /**
+   * Record a spoken contribution on this device, as a provisional note.
+   *
+   * This is what the mic dock does now, and it is deliberately *not* a
+   * verification. `/api/bank-verifications` needs a signed-in treasurer with a
+   * bound account; during a Sunday meeting there is no session and often no
+   * connection, so the only honest thing the shell can do with a parsed sentence
+   * is keep it, label it provisional, and leave it for the sync queue.
+   *
+   * It goes into the same Dexie store as `/offline`, so there is one set of
+   * notes rather than two, and the row is content-hashed by A4's own code.
+   *
+   * Two things it must never do: report success if the write failed, and touch
+   * the pot balance as though the money had arrived. The pot is the sum of
+   * *verified* contributions; adding a spoken one to it would make the ደብተር
+   * lie in the same way the badge used to.
+   */
+  const recordVoiceNoteLocally = useCallback(
+    async (
+      draft: ProvisionalContribution,
+      origin: { readonly transcriptSource: "human-typed" | "asr" }
+    ) => {
+      if (!isOfflineStorageAvailable()) {
+        throw new Error("offline-storage-unavailable");
+      }
+      const note = await saveSpokenNote(getSenedDatabase(), {
+        groupId: LOCAL_GROUP_ID,
+        locale: SPOKEN_NOTE_LOCALE_FOR[draft.language] ?? "am",
+        transcript: draft.utterance,
+        // Stated by the caller, never inferred. A note labelled `asr` that was
+        // actually typed is a false claim about how a treasurer worked.
+        transcriptSource: origin.transcriptSource,
+        amountEtb: draft.amountWire,
+        channel: draft.provider ? CHANNEL_FOR_PROVIDER[draft.provider] ?? null : null,
+        occurredAt: new Date().toISOString()
+      });
+
+      setContributions((previous) => [
+        {
+          id: note.id,
+          name: "የተናገረ ልይል",
+          avatar: "/avatars/elder_photo.png",
+          amount: draft.amount ?? undefined,
+          channel: draft.provider ?? undefined,
+          transactionId: draft.txRef ?? undefined,
+          status: "PROVISIONAL"
+        },
+        ...previous
+      ]);
+    },
+    []
+  );
 
   return (
     <main className="min-h-screen w-full bg-[#120D0A] flex flex-col items-center justify-center sm:py-6 antialiased selection:bg-amber-500 selection:text-coffee-950">
@@ -87,12 +175,16 @@ export default function SenedHome() {
         />
 
         {/* Spoken Voice Logging Modal.
-            No `onRequestVerification` is wired yet: that handler must POST to
+            No `onRequestVerification` is wired: that handler must POST to
             /api/bank-verifications, which requires a signed-in treasurer with a
-            bound account. Until it exists the submit control stays disabled and
-            says why — better than a local success that fabricates a verified
-            balance. See board task #14. */}
-        <VoiceModal isOpen={isVoiceModalOpen} onClose={() => setIsVoiceModalOpen(false)} />
+            bound account. Without it the primary action is a local provisional
+            record — honest, and what a treasurer during a meeting actually has.
+            See board task #14. */}
+        <VoiceModal
+          isOpen={isVoiceModalOpen}
+          onClose={() => setIsVoiceModalOpen(false)}
+          onRecordLocally={recordVoiceNoteLocally}
+        />
 
         {/* Spoken Audio Balance Sheet Modal (Voxide TTS Digest) */}
         <AudioDigestModal

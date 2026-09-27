@@ -206,3 +206,102 @@ test.describe("the voice route", () => {
     expect(text).not.toMatch(/verified\s*[:=]\s*true/i);
   });
 });
+
+test.describe("the mic dock records a spoken contribution for real", () => {
+  // The end-to-end proof that `/` is no longer a dead end. Before this, the
+  // submit control in the shell was permanently disabled: a working Amharic
+  // parser led to a button that could never be pressed.
+  test("records a typed Amharic contribution locally and shows it as provisional", async ({
+    page
+  }) => {
+    await page.goto("/");
+
+    const before = await page.getByText("በመጠባበቅ ላይ").count();
+
+    // The mic dock opens the modal.
+    await page.getByRole("button", { name: /በድምጽ አስመዝግብ/ }).click();
+
+    // No microphone in CI, so the modal offers to type instead.
+    await page.getByRole("button", { name: "በጽሑፍ አለጥፍ" }).click();
+    await page
+      .getByLabel("የተሰማው")
+      .fill("ለመስከረም ወር እቁብ 5,000 ብር በቴሌብር አስገብቻለሁ፣ ቁጥሩ 9BF42 ነው");
+
+    const record = page.getByRole("button", { name: "በዚህ መሣሪያ ላይ አስቀምጥ" });
+    await expect(record).toBeEnabled();
+
+    // The label must not promise a receipt.
+    await expect(page.getByText(/በዚህ ስልክ ላይ ብቻ ይቀራል/)).toBeVisible();
+
+    await record.click();
+
+    // The new row is identified by the reference the parser extracted. Waiting on
+    // the row itself is what proves the state settled; the mic button in the nav
+    // is visible whether or not the modal is still open, so asserting on it
+    // would pass before React had re-rendered anything.
+    const recorded = page.getByText("ቁጥር: 9BF42");
+    await expect(recorded).toBeVisible();
+    await expect(page.getByText("የተናገረ ልይል")).toBeVisible();
+    await expect.poll(() => page.getByText("በመጠባበቅ ላይ").count()).toBe(before + 1);
+
+    // Opening it states the amount and, still, no verifier.
+    await recorded.click();
+    await expect(page.getByText("5,000 ብር")).toBeVisible();
+    await expect(page.getByText(/በመጠባበቅ ላይ — አልተረጋገጠም/)).toBeVisible();
+
+    const text = await bodyText(page);
+    expect(text).not.toContain("Links.et Core Trust Engine");
+    expect(text).not.toMatch(/Verified 0\.4s/);
+  });
+
+  test("the note is written to the device, not just to React state", async ({ page }) => {
+    // The CBE fixture from `test/voice.parser.test.ts`, which the parser's own
+    // benchmark suite asserts is a sound extraction. Inventing phrasing here
+    // would test my spelling of Amharic rather than the product.
+    const sentence =
+      "\u12a5\u1241\u1265 1,500 \u1265\u122d \u1232\u1262\u12a2 \u12a0\u1235\u1308\u1265\u127b\u1208\u1201 \u12a0\u12ed\u12f6 4KP11Z";
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /በድምጽ አስመዝግብ/ }).click();
+    await page.getByRole("button", { name: "በጽሑፍ አለጥፍ" }).click();
+    await page.getByLabel("የተሰማው").fill(sentence);
+
+    const record = page.getByRole("button", { name: "በዚህ መሣሪያ ላይ አስቀምጥ" });
+    await expect(record).toBeEnabled();
+    await record.click();
+    await expect(page.getByText("ቁጥር: 4KP11Z")).toBeVisible();
+
+    // The row disappearing on reload is expected — it is React state. What
+    // proves the write is the note in IndexedDB, which is where A4's sync queue
+    // will find it.
+    const stored = await page.evaluate(async () => {
+      const request = indexedDB.open("sened-offline");
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+        request.onupgradeneeded = () => {
+          const upgraded = request.result;
+          if (!upgraded.objectStoreNames.contains("spokenNotes")) {
+            upgraded.createObjectStore("spokenNotes", { keyPath: "id" });
+          }
+        };
+      });
+      const tx = db.transaction("spokenNotes", "readonly");
+      const rows = await new Promise<unknown[]>((resolve, reject) => {
+        const getAll = tx.objectStore("spokenNotes").getAll();
+        getAll.onsuccess = () => resolve(getAll.result as unknown[]);
+        getAll.onerror = () => reject(getAll.error);
+      });
+      db.close();
+      return rows as { transcript: string; transcriptSource: string; amountEtb: string; contentHash: string }[];
+    });
+
+    const note = stored.find((row) => row.transcript.includes("4KP11Z"));
+    expect(note, "the note should be in the device store").toBeDefined();
+    expect(note?.transcriptSource).toBe("human-typed");
+    expect(note?.amountEtb).toBe("1500.00");
+    // Content-hashed by A4's own code, so a note cannot be edited in place
+    // without detection.
+    expect(note?.contentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+});

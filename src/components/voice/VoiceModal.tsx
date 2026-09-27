@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
   CheckCircle2,
+  HardDriveDownload,
   Info,
   Loader2,
   Mic,
@@ -65,6 +66,25 @@ export interface VoiceModalProps {
    * the verifier's response, not through a second, unchecked door.
    */
   onRequestVerification?: (draft: ProvisionalContribution) => Promise<BankVerificationOutcome>;
+  /**
+   * Records the extraction **on this device** as a provisional note.
+   *
+   * This is the path a treasurer actually has. `/api/bank-verifications` needs a
+   * signed-in treasurer with a bound bank account, and on a Sunday meeting with
+   * no connection there is no such session — so before this prop existed the
+   * submit control in the mobile shell was permanently disabled and a fully
+   * working parser led to a dead end.
+   *
+   * What it does is exactly what §12.4 requires and no more: the note is stored
+   * locally, labelled provisional, and left for the sync queue. It is not a
+   * verification, not a ledger entry, and not presented as either. A caller that
+   * has a verifier wired should use `onRequestVerification` and keep this
+   * absent, so the primary button stays the real one.
+   */
+  onRecordLocally?: (
+    draft: ProvisionalContribution,
+    origin: { readonly transcriptSource: "human-typed" | "asr" }
+  ) => void | Promise<void>;
   /** Defaults to `am` so the M1 shell's existing Amharic copy is unchanged. */
   locale?: Locale;
   language?: VoiceLanguage;
@@ -83,6 +103,7 @@ export function VoiceModal({
   isOpen,
   onClose,
   onRequestVerification,
+  onRecordLocally,
   locale = "am",
   language = "am"
 }: VoiceModalProps) {
@@ -254,6 +275,35 @@ export function VoiceModal({
     setTranscript(text);
     setStage("review");
   }, [language, t]);
+
+  const recordLocally = useCallback(async () => {
+    if (!draft || !onRecordLocally) {
+      return;
+    }
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      // Only this component knows whether the text came from the recognizer or
+      // from a keyboard, and the offline store records that distinction rather
+      // than guessing it. A note labelled `asr` that was actually typed is a
+      // false claim about how a treasurer worked.
+      await onRecordLocally(draft, {
+        transcriptSource: mode === "voice" ? "asr" : "human-typed"
+      });
+      reset();
+      onClose();
+    } catch {
+      setSubmitError(t("voice.recordLocallyFailed"));
+    } finally {
+      setSubmitting(false);
+    }
+  }, [draft, mode, onClose, onRecordLocally, reset, t]);
+
+  // With a verifier the primary action is verification. Without one, the
+  // primary action is a local provisional record — and it is labelled as
+  // exactly that, never as a submission.
+  const canVerify = Boolean(onRequestVerification) && Boolean(draft) && !draft?.blocking;
+  const canRecordLocally = Boolean(onRecordLocally) && Boolean(draft) && !draft?.blocking;
 
   const submitForVerification = useCallback(async () => {
     if (!draft || !onRequestVerification) {
@@ -474,21 +524,53 @@ export function VoiceModal({
 
         {/* ── Hand-off ────────────────────────────────────────────────────── */}
         <div className="space-y-2">
-          <button
-            type="button"
-            disabled={!draft || draft.blocking || !onRequestVerification || submitting}
-            onClick={() => void submitForVerification()}
-            className={`w-full py-3.5 rounded-2xl font-bold font-ethiopic flex items-center justify-center gap-2 transition-all ${
-              draft && !draft.blocking && onRequestVerification && !submitting
-                ? "bg-gradient-to-r from-terracotta-500 to-gold-500 text-coffee-950 active:scale-95"
-                : "bg-coffee-800 text-parchment-400 cursor-not-allowed opacity-60"
-            }`}
-          >
-            {submitting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-5 h-5" />}
-            {t("voice.submit")}
-          </button>
+          {onRequestVerification ? (
+            <button
+              type="button"
+              disabled={!canVerify || submitting}
+              onClick={() => void submitForVerification()}
+              className={`w-full py-3.5 rounded-2xl font-bold font-ethiopic flex items-center justify-center gap-2 transition-all ${
+                canVerify && !submitting
+                  ? "bg-gradient-to-r from-terracotta-500 to-gold-500 text-coffee-950 active:scale-95"
+                  : "bg-coffee-800 text-parchment-400 cursor-not-allowed opacity-60"
+              }`}
+            >
+              {submitting ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <CheckCircle2 className="w-5 h-5" />
+              )}
+              {t("voice.submit")}
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                disabled={!canRecordLocally || submitting}
+                onClick={() => void recordLocally()}
+                className={`w-full py-3.5 rounded-2xl font-bold font-ethiopic flex items-center justify-center gap-2 transition-all ${
+                  canRecordLocally && !submitting
+                    ? "bg-gradient-to-r from-terracotta-500 to-gold-500 text-coffee-950 active:scale-95"
+                    : "bg-coffee-800 text-parchment-400 cursor-not-allowed opacity-60"
+                }`}
+              >
+                {submitting ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <HardDriveDownload className="w-5 h-5" />
+                )}
+                {t("voice.recordLocally")}
+              </button>
 
-          {!onRequestVerification && (
+              {onRecordLocally && (
+                <p className="text-[10px] text-center text-parchment-400 leading-relaxed">
+                  {t("voice.recordLocallyBody")}
+                </p>
+              )}
+            </>
+          )}
+
+          {!onRequestVerification && !onRecordLocally && (
             <div className="sened-voice-issue sened-voice-issue--warning">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
               <span>
@@ -497,8 +579,7 @@ export function VoiceModal({
               </span>
             </div>
           )}
-          {onRequestVerification && draft?.blocking && (
-            <div className="sened-voice-issue sened-voice-issue--blocking">
+          {onRequestVerification && draft?.blocking && (            <div className="sened-voice-issue sened-voice-issue--blocking">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
               <span>{t("voice.submitUnverifiedReason")}</span>
             </div>

@@ -350,6 +350,13 @@ export const en = {
   "voice.page.configured": "Configured",
   "voice.page.notConfigured": "Not configured",
   "voice.page.noFakesNotice": "Nothing on this page is simulated. An unconfigured provider is reported as unconfigured.",
+  // The local-recording path. A treasurer during a Sunday meeting has no
+  // signed-in session and often no connection, so a voice note that can only be
+  // sent to a bank would be a note that cannot be taken. These strings are the
+  // difference between an honest dead end and an honest draft.
+  "voice.recordLocally": "Record on this device",
+  "voice.recordLocallyBody": "Kept on this phone only. It is not a receipt and it does not enter the ledger until a bank confirms it.",
+  "voice.recordLocallyFailed": "The note could not be saved on this device. Nothing was recorded.",
   // ── A3 · /draw route ─────────────────────────────────────────────────────
   // ── A4 · /offline route ──────────────────────────────────────────────────
   // Folded in from the two lane-local tables at integration (A3 R-3, A4 R3).
@@ -800,6 +807,9 @@ const am: Record<MessageKey, string> = {
   "voice.page.configured": "ተዋቅሯል",
   "voice.page.notConfigured": "አልተዋቀረም",
   "voice.page.noFakesNotice": "\u12a0\u12da \u1308\u133d \u120b\u12ed \u121d\u1295\u121d \u12a0\u12ed\u1233\u1235\u1218\u122d\u1362\u12eb\u12ed\u1233\u1235\u12a8\u1228\u12a8\u12ec\u120d\u120f\u1308\u1228\u1301\u1296\u12e8\u12a5\u1295\u1290\u1248\u1272\u12eb\u12a0\u12ed\u1235\u12ac\u1208\u12eb\u1295\u1265\u1295\u12e9\u12a0\u12ed\u12ac\u1208\u122d\u12eb\u12a4\u12ed\u12cb\u12fc\u122a",
+  "voice.recordLocally": "\u1260\u12da\u1205 \u1218\u1223\u122a\u12eb \u120b\u12ed \u12a0\u1235\u1240\u121d\u1325",
+  "voice.recordLocallyBody": "\u1260\u12da\u1205 \u1235\u120d\u12ad \u120b\u12ed \u1265\u127b \u12ed\u1240\u122b\u120d\u1362 \u12e8\u1270\u12a8\u1348\u1208 \u12f0\u1228\u1230\u129d \u12a0\u12ed\u12f0\u1208\u121d\u1364 \u1263\u1295\u12a9 \u12ab\u1228\u130b\u1308\u1320 \u12c8\u12f0 \u1212\u1233\u1265 \u12a0\u12eb\u1208\u1308\u1263\u121d\u1362",
+  "voice.recordLocallyFailed": "\u12ed\u1205\u1295 \u121b\u1235\u1273\u12c8\u123b \u1260\u12da\u1205 \u1218\u1223\u122a\u12eb \u120b\u12ed \u1218\u1235\u1240\u1218\u1325 \u12a0\u120d\u1270\u127b\u1208\u121d\u1362 \u121d\u1295\u121d \u12a0\u120d\u1270\u1218\u12d8\u1308\u1260\u121d\u1362",
   // ── A3 · /draw route ─────────────────────────────────────────────────────
   // ── A4 · /offline route ──────────────────────────────────────────────────
   "offline.title": "የመስመር መዝገብ ጠረጴዛ",

@@ -223,7 +223,12 @@ function collectNumeralRuns(tokens: readonly UtteranceToken[]): NumeralRun[] {
         cursor = lastToken + 1;
         continue;
       }
-      cursor += 1;
+      // The whole run is unusable, typically because it exceeds the accepted
+      // maximum. The run is consumed rather than re-parsed from its second
+      // group: `1 234 567 890` used to yield 234,567,890, silently dropping the
+      // leading `1` and inventing a plausible-looking amount. A treasurer
+      // acting on a misread figure is worse off than one told to re-speak.
+      cursor = lastToken + 1;
       continue;
     }
 

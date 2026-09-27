@@ -383,6 +383,62 @@ describe("outbox drain — a queued draft only becomes synced on a real acceptan
     expect(allowed.synced).toBe(1);
   });
 
+  it("re-arms a fork that recurs after a person already resolved it", async () => {
+    // Regression guard. recordDivergence deduped on forkSequence + kind without
+    // checking `resolution`, so the same fork recurring after a human had
+    // accepted the server returned the RESOLVED record. blocksPush then went
+    // back to false and pushes resumed onto a contested head, with no banner
+    // left to explain why. That is a fail-open on the one guard the whole
+    // append-only design rests on.
+    const draft = await saveDraft(db, { request: contributionRequest("refork"), updatedBy: actorId });
+    await queueDraft(db, draft.id, { now: clockAt });
+    const transport = scriptedTransport({ push: acceptAll() });
+    const sync = engine(transport);
+
+    await storeMirrorEntries(db, {
+      groupId,
+      pulledAt: clockAt,
+      entries: [entry(1, "a".repeat(64), "0".repeat(64))]
+    });
+
+    const fork = {
+      kind: "hash-mismatch" as const,
+      detectedAt: clockAt.toISOString(),
+      groupId,
+      commonPrefixLength: 0,
+      forkSequence: "1",
+      localLastSequence: "1",
+      serverLastSequence: "1",
+      localLastHash: "a".repeat(64),
+      serverLastHash: "b".repeat(64),
+      detail: "the group recorded two different contributions for the same slot"
+    };
+
+    const service = await import("@/lib/db/meta");
+    await service.recordDivergence(db, { ...fork, resolution: null, resolvedAt: null });
+    await resolveDivergence(db, groupId, "accept-server-as-truth", clockAt);
+
+    // A person has decided, so pushing is permitted.
+    expect((await sync.drain(token, { groupId })).attempted).toBe(1);
+
+    // The same disagreement shows up again. It must return as UNRESOLVED.
+    const rearmed = await service.recordDivergence(db, {
+      ...fork,
+      detectedAt: new Date(clockAt.getTime() + 60_000).toISOString(),
+      resolution: null,
+      resolvedAt: null
+    });
+
+    expect(rearmed.divergence?.resolution).toBeNull();
+    expect(rearmed.divergence?.resolvedAt).toBeNull();
+
+    // And pushing must be refused again, rather than quietly resuming.
+    await queueDraft(db, draft.id, { now: clockAt });
+    const blocked = await sync.drain(token, { groupId });
+    expect(blocked.attempted).toBe(0);
+    expect(transport.pushCalls).toHaveLength(1);
+  });
+
   it("lets a person requeue a settled mutation with a written reason", async () => {
     const draft = await saveDraft(db, { request: contributionRequest("requeue"), updatedBy: actorId });
     const { outbox } = await queueDraft(db, draft.id, { now: clockAt });

@@ -130,6 +130,28 @@ const COMPOSITES: Readonly<Record<string, NumeralWord>> = {
   "saga mootuma": { kind: "tens", value: 90n }
 };
 
+/**
+ * The words that can stand in for "ten" in the prefix form.
+ *
+ * In Amharic a round ten is always unit + አስራ (`ስምንት አስራ` = 80). In Oromo,
+ * ዲግዳማ (`digdama`) does double duty: it means twenty on its own — `digdama
+ * tokkee` = 27 — but it is the tens *noun* in `sadde digdama` = 80.
+ *
+ * Only these words license reading a leading unit as "N tens". A different tens
+ * word is not that construction: `አምስት ሃምሳ` is Amharic for fifty-five, so
+ * folding it into the prefix form would hand a treasurer 50 and silently drop
+ * the 50 they spoke.
+ */
+const TENS_NOUNS: ReadonlySet<string> = new Set([
+  "\u12a0\u1235\u122b", // አስራ
+  "dha", // dha
+  "daa", // daa
+  "digdama", // digdama
+  "diggama", // diggama
+  "digama", // digama
+  "digdamee" // digdamee
+]);
+
 /** Refuse to compose anything no Ethiopian treasury could plausibly mean. */
 export const MAX_NUMERAL_VALUE = 1_000_000_000n;
 
@@ -213,8 +235,16 @@ export function composeNumeralWords(words: readonly string[]): bigint | null {
         // `አሽት ሁለት` must not become 1,002.
         return null;
       }
-      if (next?.kind === "tens") {
-        // Prefix form: `አምስት አስራ` = 50.
+      if (next?.kind === "tens" && TENS_NOUNS.has(words[cursor + 1])) {
+        // Prefix form: a unit in front of a *tens noun* means "N tens".
+        //
+        // The multiplier is 10, not the tens word's own value. A one-wave fix
+        // here multiplied by `next.value` instead, which is right only for አስራ
+        // and made every other pair worse: Oromo `shan digdama` became 100
+        // (it means 50 — `digdama` is the tens noun there) and `afur digdama`
+        // became 80, colliding with the compound `sadde digdama`. Two different
+        // sentences for one number is exactly the failure this module exists to
+        // prevent.
         parts.push(part(entry.value * 10n, true));
         cursor += 2;
         continue;
@@ -305,6 +335,15 @@ export function parseNumericToken(token: string): bigint | null {
   }
 
   if (digits.length === 0 || digits.length > 18 || fraction.length > 2) {
+    return null;
+  }
+  // A money figure never carries a leading zero. The ledger's own wire form,
+  // WIRE_ETB_DECIMAL_PATTERN, forbids it, so accepting one here would produce
+  // a request the bank schema rejects. It also rules out the commonest
+  // misparse in this domain: an Ethiopic phone number is 9-10 digits with a
+  // leading zero, and `0912345678` was being adopted as 912,345,678 birr.
+  // A genuine sub-birr-leading value such as `0.50` has a single digit.
+  if (digits.length > 1 && digits.startsWith("0")) {
     return null;
   }
   // A separator may only sit between groups of three digits.

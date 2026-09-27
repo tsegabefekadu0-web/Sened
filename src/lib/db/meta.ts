@@ -81,6 +81,13 @@ export async function recordSyncActivity(
  *
  * Recording is idempotent on `forkSequence` so a flapping network does not
  * produce a wall of duplicate warnings for one real disagreement.
+ *
+ * A fork that a human has already resolved is deliberately NOT deduplicated
+ * against: the same disagreement recurring is new information, and returning
+ * the resolved record would fail open. `blocksPush` would flip back to false
+ * and pushes would resume onto a head the community has already judged
+ * contested, with no banner left to explain why. So a recurring fork always
+ * re-arms as unresolved and puts a person back in front of it.
  */
 export async function recordDivergence(
   db: SenedDatabase,
@@ -89,6 +96,7 @@ export async function recordDivergence(
   const current = await readSyncMeta(db, divergence.groupId);
   if (
     current.divergence &&
+    current.divergence.resolution === null &&
     current.divergence.forkSequence === divergence.forkSequence &&
     current.divergence.kind === divergence.kind
   ) {

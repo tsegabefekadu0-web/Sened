@@ -314,4 +314,104 @@ begin
 end;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Group provisioning and the standard chart of accounts
+--
+-- The sink that turns a VERIFIED bank result into a ledger entry resolves a
+-- counter-account by code. Before this migration no function ever wrote a row to
+-- ledger_accounts, so that lookup could only ever come back empty and the sink
+-- could only fail closed. These checks execute the provisioning path and confirm
+-- the codes the TypeScript resolver asks for are the codes that get created.
+-- ---------------------------------------------------------------------------
+do $provision$
+declare
+  provisioned jsonb;
+  provisioned_group uuid;
+  account_codes text[];
+  income_id uuid;
+  cash_id uuid;
+begin
+  -- The treasurer provisions their own group.
+  provisioned := public.sened_ledger_provision_group_v1('Mesfin Equb (provisioned)');
+  provisioned_group := (provisioned->>'groupId')::uuid;
+
+  if provisioned_group is null then
+    raise exception 'PROVISION 1 FAILED: no groupId was returned';
+  end if;
+
+  -- All four standard accounts, and only those.
+  select coalesce(array_agg(account.code order by account.code), '{}')
+  into account_codes
+  from public.ledger_accounts account
+  where account.group_id = provisioned_group;
+
+  if account_codes <> array['CONTRIBUTION_INCOME', 'EQUITY_OPENING', 'PAYOUT_EXPENSE', 'POT_CASH'] then
+    raise exception 'PROVISION 2 FAILED: unexpected chart of accounts: %', account_codes;
+  end if;
+
+  -- The group head row is created by the baseline trigger, so a group is usable
+  -- the moment it is provisioned.
+  perform 1 from public.ledger_group_heads head
+  where head.group_id = provisioned_group;
+  if not found then
+    raise exception 'PROVISION 3 FAILED: the group head was not initialised';
+  end if;
+
+  -- The creator is an owner, or every tenant check downstream fails.
+  perform 1 from public.ledger_group_memberships membership
+  where membership.group_id = provisioned_group
+    and membership.user_id = auth.uid()
+    and membership.role = 'owner';
+  if not found then
+    raise exception 'PROVISION 4 FAILED: the creator is not an owner of the new group';
+  end if;
+
+  select id into cash_id from public.ledger_accounts
+  where group_id = provisioned_group and code = 'POT_CASH';
+  select id into income_id from public.ledger_accounts
+  where group_id = provisioned_group and code = 'CONTRIBUTION_INCOME';
+
+  -- The exact shape the ledger sink posts for an inbound movement, so the
+  -- codes the resolver returns are proven to be accepted by the ledger.
+  perform public.post_ledger_entry_v1(
+    provisioned_group,
+    'provision-check-1',
+    now(),
+    'contribution',
+    null,
+    null,
+    jsonb_build_array(
+      jsonb_build_object('accountId', cash_id, 'direction', 'debit', 'amount', 5000.00),
+      jsonb_build_object('accountId', income_id, 'direction', 'credit', 'amount', 5000.00)
+    )
+  );
+
+  -- An unauthenticated caller must not be able to provision a group.
+  perform set_config('request.jwt.claim.sub', '', false);
+  begin
+    perform public.sened_ledger_provision_group_v1('Should not exist');
+    raise exception 'PROVISION 5 FAILED: an unauthenticated caller created a group';
+  exception when others then
+    if sqlerrm not like '%ledger_provision_unauthorized%' then
+      raise exception 'PROVISION 5 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+  perform set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+  -- A blank name is refused rather than creating an unnamed group.
+  begin
+    perform public.sened_ledger_provision_group_v1('   ');
+    raise exception 'PROVISION 6 FAILED: a blank group name was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%ledger_invalid_request%' then
+      raise exception 'PROVISION 6 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- Provisioning again is additive, not destructive: codes are unique per
+  -- group, so a second group of the same name coexists and nothing is mutated.
+  perform public.sened_ledger_provision_group_v1('Mesfin Equb (provisioned)');
+end;
+$provision$;
+
 select 'ALL DRAW BINDING CHECKS PASSED' as result;

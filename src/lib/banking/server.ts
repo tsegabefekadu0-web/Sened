@@ -1,7 +1,10 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { SupabaseLedgerAccountResolver } from "@/lib/ledger/accountResolver";
+import { LedgerService, SupabaseLedgerRepository } from "@/lib/ledger";
 import { createProductionBankProviderAdapter } from "./adapter";
 import { BankVerificationError } from "./errors";
+import { LedgerBankVerificationSink } from "./ledgerSink";
 import {
   bankAccountBindingResponseSchema,
   createBankIntentResponseSchema,
@@ -282,14 +285,36 @@ function createLazyEnvironmentVault(): BankReferenceVault {
   };
 }
 
+/**
+ * The production wiring.
+ *
+ * The ledger sink is built here and nowhere else, which is the point: a bank
+ * result is only money once a balanced entry exists, and there must be exactly
+ * one place that decides that. Before this, `BankVerificationService` accepted a
+ * `ledgerSink` option and nothing ever passed one, so the production path could
+ * verify a contribution and post nothing.
+ *
+ * The sink fails closed on its own — an unprovisioned group writes no entry and
+ * the verification keeps a `null` `ledgerEntryId` — so a group that has not been
+ * through `sened_ledger_provision_group_v1` degrades to "verified but not
+ * posted", which is visible, rather than to a wrong posting.
+ */
 export function createProductionBankVerificationService(
   client: SupabaseClient
 ): BankVerificationService {
   const repository = new SupabaseBankVerificationRepository(client);
+  const ledgerSink = new LedgerBankVerificationSink({
+    ledger: new LedgerService(new SupabaseLedgerRepository(client)),
+    accounts: async (intent) => {
+      const resolver = new SupabaseLedgerAccountResolver(client);
+      return resolver.resolve(intent.groupId, intent.ledgerAccountId, intent.direction);
+    }
+  });
   return new BankVerificationService({
     repository,
     jobStore: repository,
     referenceVault: createLazyEnvironmentVault(),
-    adapterResolver: createProductionBankProviderAdapter
+    adapterResolver: createProductionBankProviderAdapter,
+    ledgerSink
   });
 }

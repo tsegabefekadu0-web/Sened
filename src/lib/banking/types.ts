@@ -216,8 +216,34 @@ export interface BankVerificationResult {
   readonly replayed: boolean;
 }
 
+/**
+ * A binding, as shown to the treasurer who owns it.
+ *
+ * Deliberately narrower than {@link BankAccountBinding}: no account
+ * fingerprints and no sealed reference. The fingerprints are HMACs over masked
+ * account numbers, and they exist to be compared server-side. A treasurer only
+ * needs to recognise *which* account they bound, which is the provider, the
+ * currency and the label they gave it.
+ */
+export interface BankAccountBindingSummary {
+  readonly id: string;
+  readonly groupId: string;
+  readonly provider: BankProvider;
+  readonly currency: string;
+  readonly accountLabel: string;
+  readonly active: boolean;
+}
+
 export interface BankVerificationRepository {
   getBinding(bindingId: string, context: BankVerificationContext): Promise<BankAccountBinding | null>;
+  /**
+   * Every binding the calling user owns.
+   *
+   * Required, not optional, because a client cannot derive a binding id and a
+   * verification request is unusable without one. An implementation that returns
+   * nothing is worse than one that fails loudly, so this has no default.
+   */
+  listBindings(context: BankVerificationContext): Promise<readonly BankAccountBindingSummary[]>;
   createIntent(
     input: CreateBankIntentInput,
     context: BankVerificationContext

@@ -4,6 +4,7 @@ import { isUuid } from "@/lib/ledger/rules";
 import { formatEtbAmount, toEtbMinorUnits } from "@/lib/ledger/money";
 import type {
   BankAccountBinding,
+  BankAccountBindingSummary,
   BankVerificationContext,
   BankVerificationEvent,
   BankVerificationIntent,
@@ -130,6 +131,24 @@ export class InMemoryBankVerificationRepository implements BankVerificationRepos
       return null;
     }
     return copyBinding(binding);
+  }
+
+  async listBindings(
+    context: BankVerificationContext
+  ): Promise<readonly BankAccountBindingSummary[]> {
+    const userId = context.userId.toLowerCase();
+    return Array.from(this.bindings.values())
+      // Inactive bindings are listed, not hidden: a treasurer needs to see that
+      // an account exists and is switched off, rather than find it missing.
+      .filter((binding) => binding.userId === userId)
+      .map((binding) => ({
+        id: binding.id,
+        groupId: binding.groupId,
+        provider: binding.provider,
+        currency: binding.currency,
+        accountLabel: binding.accountLabel,
+        active: binding.active
+      }));
   }
 
   async createIntent(

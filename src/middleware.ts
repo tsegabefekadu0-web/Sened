@@ -26,7 +26,12 @@ export const RATE_LIMITED = new Set([
   "/api/draw/rounds/[roundId]",
   // A4: Wave 2's sync route. The branch in `resolveRateLimit` already existed
   // and was unreachable until this entry existed.
-  "/api/sync"
+  "/api/sync",
+  // A1: the two client reads the voice -> bank hand-off needs. A treasurer
+  // cannot name a binding without one, so these are on the path to verifying
+  // anything at all, and they return account metadata.
+  "/api/bank-account-bindings",
+  "/api/my-groups"
 ]);
 
 const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
@@ -55,6 +60,11 @@ export function resolveRateLimit(pathname: string): RateLimitRule {
     return WRITE_RULE;
   }
   if (isBankVerificationReadPath(pathname)) {
+    return READ_RULE;
+  }
+  // A client read: the treasurer's own bindings and groups. Read-sized traffic
+  // at worst, but it is account metadata, so it is metered rather than free.
+  if (pathname === "/api/bank-account-bindings" || pathname === "/api/my-groups") {
     return READ_RULE;
   }
   // A3: a commitment, a reveal and a payout all change money or the record

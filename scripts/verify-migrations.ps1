@@ -36,21 +36,41 @@ function Invoke-Db {
 }
 
 Write-Host 'Starting Postgres...' -ForegroundColor Cyan
-docker rm -f $container 2>&1 | Out-Null
-docker run -d --name $container `
+
+# A unique name per run.
+#
+# Reusing one name meant every run raced the previous container's teardown:
+# `docker rm -f` returns before the container has actually gone, so the
+# readiness loop could succeed against a database that was already shutting
+# down, and the next statement failed with "the database system is shutting
+# down". Waiting for the old container to disappear mostly fixed it and
+# sometimes did not, because the removal is not observable from outside in a
+# reliable order.
+#
+# A distinct name per run removes the race instead of timing around it. Stale
+# containers from earlier runs are removed by label, which is a different
+# container and cannot be mistaken for this one.
+$label = 'sened.verify.run'
+docker ps -a --filter "label=$label" --format '{{.Names}}' 2>&1 | ForEach-Object {
+    docker rm -f $_ 2>&1 | Out-Null
+}
+$container = "sened-pg-verify-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+
+docker run -d --name $container --label $label `
     -e POSTGRES_PASSWORD=$password -e POSTGRES_DB=sened `
     postgres:16-alpine | Out-Null
 
-# Wait for Postgres to actually answer a query.
+# Wait for Postgres to actually answer a query, against the database the harness
+# uses.
 #
-# `pg_isready` alone is not enough: it can report ready while the postmaster is
-# still coming up, and the first real connection then fails with
-# "connection to server on socket ... No such file or directory". That is exactly
-# what happened once this script was run repeatedly, so readiness is now proven
-# with the same connection path every migration will use.
+# Two mistakes are corrected here, both of which looked like flaky Postgres:
+# `pg_isready` alone reports ready while the postmaster is still coming up; and
+# probing the built-in `postgres` database is ready *before* the image's
+# initialisation has created `POSTGRES_DB`, so the probe passed and the next
+# statement failed. The harness runs against `sened`, so that is what is probed.
 $ready = $false
 for ($i = 0; $i -lt 60; $i++) {
-    docker exec $container psql -U postgres -d postgres -c 'select 1' 2>&1 | Out-Null
+    docker exec $container psql -U postgres -d sened -c 'select 1' 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { $ready = $true; break }
     Start-Sleep -Seconds 1
 }

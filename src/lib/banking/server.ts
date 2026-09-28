@@ -5,6 +5,7 @@ import { LedgerService, SupabaseLedgerRepository } from "@/lib/ledger";
 import { createProductionBankProviderAdapter } from "./adapter";
 import { BankVerificationError } from "./errors";
 import { LedgerBankVerificationSink } from "./ledgerSink";
+import { BANK_PROVIDERS } from "./types";
 import {
   bankAccountBindingResponseSchema,
   createBankIntentResponseSchema,
@@ -15,6 +16,8 @@ import {
 } from "./schemas";
 import type {
   BankAccountBinding,
+  BankAccountBindingSummary,
+  BankProvider,
   BankReferenceVault,
   BankVerificationContext,
   BankVerificationEvent,
@@ -77,6 +80,43 @@ function parseBinding(value: unknown): BankAccountBinding {
   return parseOrThrow((input) => bankAccountBindingResponseSchema.parse(input) as BankAccountBinding, value);
 }
 
+/**
+ * Parse one row of `list_bank_account_bindings_v1()`.
+ *
+ * Checked field by field rather than trusted, because this response goes
+ * straight to a browser. A row that does not match the shape is dropped by the
+ * caller's `filter` below rather than surfacing a half-populated account.
+ */
+function parseBindingSummary(value: unknown): BankAccountBindingSummary | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.id !== "string" ||
+    !UUID_PATTERN.test(row.id) ||
+    typeof row.groupId !== "string" ||
+    !UUID_PATTERN.test(row.groupId) ||
+    typeof row.provider !== "string" ||
+    !BANK_PROVIDERS.includes(row.provider as BankProvider) ||
+    typeof row.currency !== "string" ||
+    typeof row.accountLabel !== "string" ||
+    typeof row.active !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    id: row.id,
+    groupId: row.groupId,
+    provider: row.provider as BankProvider,
+    currency: row.currency,
+    accountLabel: row.accountLabel,
+    active: row.active
+  };
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export class SupabaseBankVerificationRepository implements BankVerificationRepository, ReconciliationJobStore {
   constructor(private readonly client: SupabaseClient) {}
 
@@ -91,6 +131,34 @@ export class SupabaseBankVerificationRepository implements BankVerificationRepos
       throw mapSupabaseError(error);
     }
     return data ? parseBinding(data) : null;
+  }
+
+  /**
+   * Every binding the calling user owns.
+   *
+   * A client cannot derive a binding id — it is minted when an account is bound
+   * — and a verification request is unusable without one, so this read is what
+   * stands between a treasurer and being able to verify anything at all.
+   *
+   * The RPC is scoped to `auth.uid()` and returns no account fingerprints and no
+   * sealed reference, so the result is safe to hand to a browser.
+   */
+  async listBindings(
+    _context: BankVerificationContext
+  ): Promise<readonly BankAccountBindingSummary[]> {
+    const { data, error } = await this.client.rpc("list_bank_account_bindings_v1");
+    if (error) {
+      throw mapSupabaseError(error);
+    }
+    if (!Array.isArray(data)) {
+      throw new BankVerificationError(
+        "INTEGRITY_FAILURE",
+        "Binding list storage returned an invalid response"
+      );
+    }
+    return data
+      .map((entry) => parseBindingSummary(entry))
+      .filter((entry): entry is BankAccountBindingSummary => entry !== null);
   }
 
   async createIntent(

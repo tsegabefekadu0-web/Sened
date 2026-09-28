@@ -2,6 +2,21 @@ const nextConfig = {
   reactStrictMode: true,
 
   /*
+   * Standalone output — A1, added with the Dockerfile (ROADMAP M6.3).
+   *
+   * `next build` normally emits the whole `node_modules` tree alongside the app
+   * and expects it to be present at runtime. That works on a laptop and makes a
+   * container image enormous, because the dependency tree for a Next app is
+   * several hundred megabytes of build tooling the server never loads.
+   *
+   * `standalone` emits a self-contained server plus only the modules actually
+   * imported, so the image can ship `node .next/standalone/server.js` and
+   * nothing else. It changes the *output layout*, not the app: the same
+   * `next build` and the same tests.
+   */
+  output: "standalone",
+
+  /*
    * PWA / offline shell headers — AGENT-4 (M6.1).
    *
    * Two things matter here and both are easy to get wrong by omission:

@@ -737,4 +737,116 @@ begin
 end;
 $rpc$;
 
+-- ---------------------------------------------------------------------------
+-- The read paths a client needs
+--
+-- `get_bank_account_binding_v1` takes a binding id and a client cannot know its
+-- own, which is what blocked the voice -> bank hand-off. These checks prove the
+-- new list functions answer for the caller, stay scoped to the caller, and leak
+-- no account material.
+-- ---------------------------------------------------------------------------
+do $reads$
+declare
+  payload jsonb;
+begin
+  -- A binding for the calling user, so the list has something to return.
+  insert into public.bank_account_bindings (
+    id, user_id, group_id, tenant_id, ledger_account_id, provider, currency,
+    account_label, account_fingerprint_hmac, sender_fingerprint_hmac,
+    receiver_fingerprint_hmac, active
+  ) values (
+    'abababab-0000-4000-8000-000000000001'::uuid,
+    '11111111-1111-4111-8111-111111111111'::uuid,
+    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
+    'bbbbbbbb-0000-4000-8000-000000000001'::uuid,
+    'aaaaaaaa-0000-4000-8000-0000000000a1'::uuid,
+    'telebirr', 'ETB', 'Treasury mobile money',
+    repeat('a', 64), repeat('b', 64), repeat('c', 64), true
+  );
+
+  -- Another member's binding, which the caller's list must not contain.
+  insert into public.bank_account_bindings (
+    id, user_id, group_id, tenant_id, ledger_account_id, provider, currency,
+    account_label, account_fingerprint_hmac, sender_fingerprint_hmac,
+    receiver_fingerprint_hmac, active
+  ) values (
+    'abababab-0000-4000-8000-000000000002'::uuid,
+    '44444444-4444-4444-8444-444444444444'::uuid,
+    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
+    'bbbbbbbb-0000-4000-8000-000000000001'::uuid,
+    'aaaaaaaa-0000-4000-8000-0000000000a1'::uuid,
+    'cbe', 'ETB', 'Someone else''s account',
+    repeat('d', 64), repeat('e', 64), repeat('f', 64), true
+  );
+
+  payload := public.list_bank_account_bindings_v1();
+  if jsonb_array_length(payload) <> 1 then
+    raise exception 'READ 1 FAILED: the caller should see exactly their one binding, saw %',
+      jsonb_array_length(payload);
+  end if;
+  if payload -> 0 ->> 'id' <> 'abababab-0000-4000-8000-000000000001' then
+    raise exception 'READ 2 FAILED: the wrong binding was returned';
+  end if;
+
+  -- The list carries a label and a provider so a treasurer can recognise the
+  -- account, and must not carry the fingerprints or any sealed reference. Those
+  -- are HMACs over masked numbers, and shipping them to a browser would move
+  -- material that is meant to stay server-side.
+  if payload::text like '%accountFingerprintHmac%'
+     or payload::text like '%senderFingerprintHmac%'
+     or payload::text like '%receiverFingerprintHmac%'
+     or payload::text like '%sealedProviderReference%' then
+    raise exception 'READ 3 FAILED: the binding list leaked key material';
+  end if;
+  if payload -> 0 ->> 'accountLabel' is null
+     or payload -> 0 ->> 'provider' is null then
+    raise exception 'READ 4 FAILED: the list is not recognisable to a treasurer';
+  end if;
+
+  -- Group membership, with the chart of accounts the resolver needs. The harness
+  -- fixture may already have made the treasurer an owner of this group, so this
+  -- is written to be re-runnable.
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status)
+  values (
+    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
+    'bbbbbbbb-0000-4000-8000-000000000001'::uuid,
+    '11111111-1111-4111-8111-111111111111'::uuid,
+    'owner', 'active'
+  )
+  on conflict (group_id, user_id) do nothing;
+
+  payload := public.list_my_groups_v1();
+  if jsonb_array_length(payload) = 0 then
+    raise exception 'READ 5 FAILED: the caller belongs to a group and should see it';
+  end if;
+  if payload -> 0 ->> 'groupId' <> 'aaaaaaaa-0000-4000-8000-000000000001' then
+    raise exception 'READ 6 FAILED: the wrong group was returned';
+  end if;
+  if payload -> 0 ->> 'role' <> 'owner' then
+    raise exception 'READ 7 FAILED: the caller''s role was not returned';
+  end if;
+
+  -- The accounts are what the ledger account resolver looks up by code, so they
+  -- have to be there. This is the check that would notice a group that exists
+  -- with no chart of accounts - the state that made the sink fail closed.
+  if not exists (
+    select 1
+    from jsonb_array_elements(payload -> 0 -> 'accounts') account
+    where account ->> 'code' in ('POT', 'PAYABLE')
+  ) then
+    raise exception 'READ 8 FAILED: the group''s chart of accounts was not returned';
+  end if;
+
+  -- A non-member sees nothing. Switch the JWT subject and re-read.
+  perform set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
+  if jsonb_array_length(public.list_bank_account_bindings_v1()) <> 1 then
+    raise exception 'READ 9 FAILED: the other member should see only their own binding';
+  end if;
+  if jsonb_array_length(public.list_my_groups_v1()) <> 0 then
+    raise exception 'READ 10 FAILED: a non-member was shown a group';
+  end if;
+  perform set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+end;
+$reads$;
+
 select 'ALL DRAW BINDING CHECKS PASSED' as result;

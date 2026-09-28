@@ -1,0 +1,41 @@
+# Everything the image does not need. Kept deliberately explicit rather than
+# broad, because a `.dockerignore` that is too generous produces an image that
+# builds and then fails at runtime, and one that is too tight ships the whole
+# development toolchain to production.
+
+# Build output and dependencies: the image gets these from the build stage, not
+# from the host, and copying a host `node_modules` is how Windows and Linux
+# binaries end up mixed.
+.next
+node_modules
+
+# VCS and CI
+.git
+.github
+
+# Tests and their tooling. Not in the runtime, and `test/e2e` pulls Playwright.
+test
+coverage
+playwright.config.ts
+playwright-report
+test-results
+
+# Local environment. A `.env.local` on a developer machine is the single most
+# dangerous thing to bake into an image, and the build stage must not read it.
+.env
+.env.local
+.env.*.local
+
+# Developer scratch
+test-results
+.vscode
+.idea
+AGENTWORK.md
+
+# Docs and the agent coordination files: none of it is served.
+docs
+README.md
+ROADMAP.md
+*.md
+Dockerfile
+.dockerignore

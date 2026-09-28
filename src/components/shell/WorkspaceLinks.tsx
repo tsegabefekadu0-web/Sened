@@ -30,26 +30,26 @@ const DESTINATIONS = [
   {
     href: "/voice",
     icon: Mic,
-    label: "የድምጽ ስራ ጣሪያ",
-    sub: "Voice pipeline"
+    label: "ድምጽ",
+    sub: "Voice"
   },
   {
     href: "/draw",
     icon: Dices,
-    label: "ፍትሃዊ እጣ",
-    sub: "Commit-reveal draw"
+    label: "እጣ",
+    sub: "Draw"
   },
   {
     href: "/ledger",
     icon: BookOpenText,
-    label: "ደብተር ንጉጥብ",
-    sub: "Ledger review"
+    label: "ደብተር",
+    sub: "Ledger"
   },
   {
     href: "/offline",
     icon: WifiOff,
-    label: "የመስመር ጽሕፈት",
-    sub: "Offline console"
+    label: "ኦፍላይን",
+    sub: "Offline"
   }
 ] as const;
 
@@ -57,20 +57,24 @@ export function WorkspaceLinks() {
   return (
     <nav
       aria-label="Built tools"
-      className="w-full max-w-md mx-auto px-4 pt-4 select-none"
+      className="w-full max-w-md mx-auto px-4 pt-5 select-none"
     >
-      <ul className="flex gap-2">
+      <ul className="flex gap-2.5">
         {DESTINATIONS.map(({ href, icon: Icon, label, sub }) => (
           <li key={href} className="flex-1 min-w-0">
             <Link
               href={href}
-              className="group flex flex-col items-center gap-1 rounded-2xl border border-[#DECDBB] bg-[#F3ECE2] px-1.5 py-2.5 text-center hover:bg-[#EDE3D6] hover:border-[#C9B49C] active:scale-[0.98] transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
+              className="group relative flex flex-col items-center gap-1.5 rounded-2xl border border-[#E0D2C4] bg-gradient-to-b from-[#F8F2E9] to-[#F0E8DC] px-2 py-3 text-center hover:from-[#F2E9DC] hover:to-[#E8DDD0] hover:border-[#C9B49C] hover:shadow-[0_4px_12px_rgba(139,109,82,0.12)] active:scale-[0.96] transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
             >
-              <Icon className="w-4 h-4 stroke-[2.2] text-[#C6532B] group-hover:text-[#A3441F] transition-colors" />
-              <span className="text-[11px] font-bold text-[#3A2C22] font-ethiopic leading-tight truncate w-full">
+              {/* Subtle top accent line */}
+              <div className="absolute top-0 left-3 right-3 h-[2px] rounded-b-full bg-gradient-to-r from-transparent via-[#C6532B]/30 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+              <div className="w-9 h-9 rounded-xl bg-[#C6532B]/10 group-hover:bg-[#C6532B]/20 flex items-center justify-center transition-colors">
+                <Icon className="w-5 h-5 stroke-[2] text-[#C6532B] group-hover:text-[#A3441F] transition-colors" />
+              </div>
+              <span className="text-[12px] font-bold text-[#3A2C22] font-ethiopic leading-tight">
                 {label}
               </span>
-              <span className="text-[9px] font-medium uppercase tracking-wide text-[#9A8877] leading-tight truncate w-full">
+              <span className="text-[9px] font-semibold uppercase tracking-[0.05em] text-[#9A8877] leading-tight">
                 {sub}
               </span>
             </Link>

@@ -1,8 +1,10 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import Image from "next/image";
 import { Check, Clock, ShieldCheck, X } from "lucide-react";
+
+import { createTranslator, type Locale } from "@/lib/i18n";
 
 /**
  * A contribution's trust state.
@@ -11,11 +13,14 @@ import { Check, Clock, ShieldCheck, X } from "lucide-react";
  * AGENTWORK.md §12.3: a "Verified" badge must correspond to a real verification
  * result. So a row carries the state explicitly, and `VERIFIED` additionally
  * requires `verifiedBy` — the provider that actually answered. A row that says
- * `VERIFIED` with no provenance renders as provisional anyway; see
- * `isVerified` below.
+ * `VERIFIED` with no provenance renders as provisional anyway; see `isVerified`.
  *
  * `channel` and `transactionId` are what a member *said*. They are never
  * evidence. Deriving a badge from them is what this component used to do.
+ *
+ * Every string comes from the shared dictionary in both languages. This file
+ * used to hard-code Amharic and never call `t()`, which is a standing §12.6
+ * violation on the first surface a reviewer sees.
  */
 export type ContributionStatus = "PROVISIONAL" | "VERIFIED";
 
@@ -36,11 +41,11 @@ export interface MemberContribution {
   verifiedAt?: string;
 }
 
-const CHANNEL_LABEL: Readonly<Record<NonNullable<MemberContribution["channel"]>, string>> = {
-  telebirr: "ቴሌብር",
-  cbe: "ሲቢኤ ብር",
-  awash: "አዋሽ ባንክ",
-  cash: "ጥሬ ገንዘብ"
+const CHANNEL_KEY: Readonly<Record<NonNullable<MemberContribution["channel"]>, string>> = {
+  telebirr: "shell.feed.channelTelebirr",
+  cbe: "shell.feed.channelCbe",
+  awash: "shell.feed.channelAwash",
+  cash: "shell.feed.channelCash"
 };
 
 /**
@@ -61,10 +66,13 @@ function isVerified(contribution: MemberContribution): boolean {
 export function ContributionFeed({
   contributions = [],
   onSelectMember,
+  locale = "am"
 }: {
   contributions?: MemberContribution[];
   onSelectMember?: (c: MemberContribution) => void;
+  locale?: Locale;
 }) {
+  const t = useMemo(() => createTranslator(locale), [locale]);
   const [selected, setSelected] = useState<MemberContribution | null>(null);
 
   const openReceipt = (contribution: MemberContribution) => {
@@ -72,20 +80,23 @@ export function ContributionFeed({
     setSelected(contribution);
   };
 
+  const channelLabel = (contribution: MemberContribution): string =>
+    contribution.channel ? t(CHANNEL_KEY[contribution.channel] as never) : t("shell.feed.channelNone");
+
   return (
     <section className="w-full max-w-md mx-auto px-4 pt-4 pb-20 select-none">
       {/* Section Title */}
       <h3 className="text-[17px] font-bold text-[#140E0A] tracking-tight mb-3.5 px-0.5 font-sans">
-        የአባላት ልይሎች
+        {t("shell.feed.title")}
       </h3>
 
       {contributions.length === 0 ? (
         // §12.7: an honest empty state. This used to fall back to two fixture
         // rows carrying bank badges nobody verified.
         <div className="rounded-2xl border border-dashed border-[#D9C8B5] bg-[#F3ECE2] px-4 py-8 text-center">
-          <p className="text-sm font-semibold text-[#5C4A3D]">እስካሁል ምንም ልይል የለም</p>
+          <p className="text-sm font-semibold text-[#5C4A3D]">{t("shell.feed.empty")}</p>
           <p className="mt-1 text-xs leading-relaxed text-[#8A7A6D]">
-            በዝርዝር ውርይት የተመዘገበ ልይል እዚህኛ ይታያል።
+            {t("shell.feed.emptyBody")}
           </p>
         </div>
       ) : (
@@ -115,12 +126,12 @@ export function ContributionFeed({
                   {verified ? (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#138A4B] text-white text-[11px] font-semibold shadow-xs">
                       <Check className="w-3 h-3 stroke-[3]" />
-                      {c.channel ? CHANNEL_LABEL[c.channel] : "የተረጋገጠ"}
+                      {channelLabel(c)}
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-[11px] font-semibold">
                       <Clock className="w-3 h-3 stroke-[3]" />
-                      በመጠባበቅ ላይ
+                      {t("shell.feed.pending")}
                     </span>
                   )}
 
@@ -128,15 +139,11 @@ export function ContributionFeed({
                     {c.name}
                   </h4>
 
-                  {c.transactionId ? (
-                    <p className="text-[12px] font-normal text-[#7D6F66] mt-0.5 truncate font-sans">
-                      ቁጥር: {c.transactionId}
-                    </p>
-                  ) : (
-                    <p className="text-[12px] font-normal text-[#A2938A] mt-0.5 truncate font-sans">
-                      የግብይት ቁጥር አልተመዘገበም
-                    </p>
-                  )}
+                  <p className="text-[12px] font-normal text-[#7D6F66] mt-0.5 truncate font-sans">
+                    {c.transactionId
+                      ? `${t("shell.feed.reference")}: ${c.transactionId}`
+                      : t("shell.feed.noReference")}
+                  </p>
                 </div>
 
                 {/* Right: Secondary Avatar (as featured in Row 1 of reference) */}
@@ -144,7 +151,7 @@ export function ContributionFeed({
                   <div className="relative w-[70px] h-[76px] rounded-[16px] overflow-hidden shrink-0 shadow-sm border border-[#DECDBB] bg-[#EFE6D9]">
                     <Image
                       src={c.secondaryAvatar}
-                      alt={`${c.name} — ሌላ አባል`}
+                      alt={`${c.name} — ${t("shell.feed.secondaryAvatarAlt")}`}
                       fill
                       sizes="70px"
                       className="object-cover"
@@ -169,7 +176,7 @@ export function ContributionFeed({
             <button
               onClick={() => setSelected(null)}
               className="absolute top-4 right-4 p-1.5 rounded-full bg-[#EAE0D3] text-[#4A3B32] hover:bg-[#DDCFBF] transition-all"
-              aria-label="Close"
+              aria-label={t("shell.feed.close")}
             >
               <X className="w-4 h-4" />
             </button>
@@ -184,27 +191,27 @@ export function ContributionFeed({
               )}
               <span className="text-xs font-bold uppercase tracking-wider">
                 {isVerified(selected)
-                  ? "የተረጋገጠ የባንክ ክፍያ"
-                  : "በመጠባበቅ ላይ — አልተረጋገጠም"}
+                  ? t("shell.feed.verifiedTitle")
+                  : t("shell.feed.unverifiedTitle")}
               </span>
             </div>
 
             <h3 className="text-lg font-bold text-[#1F1714]">{selected.name}</h3>
             <p className="text-2xl font-extrabold text-[#1F1714] mt-1 font-sans">
               {typeof selected.amount === "number"
-                ? `${selected.amount.toLocaleString("en-US")} ብር`
+                ? `${selected.amount.toLocaleString(locale === "am" ? "am-ET" : "en-US")} ብር`
                 : "—"}
             </p>
 
             <div className="mt-4 pt-3 border-t border-[#E5DACD] space-y-2 text-xs">
               <div className="flex justify-between gap-4">
-                <span className="text-[#7A6B60]">የክፍያ መስመር:</span>
+                <span className="text-[#7A6B60]">{t("shell.feed.channel")}:</span>
                 <span className="font-semibold text-[#1F1714] text-right">
-                  {selected.channel ? CHANNEL_LABEL[selected.channel] : "አልተለበረም"}
+                  {channelLabel(selected)}
                 </span>
               </div>
               <div className="flex justify-between gap-4">
-                <span className="text-[#7A6B60]">የግብይት ቁጥር (Ref):</span>
+                <span className="text-[#7A6B60]">{t("shell.feed.reference")}:</span>
                 <span className="font-mono font-semibold text-[#1F1714] text-right break-all">
                   {selected.transactionId ?? "—"}
                 </span>
@@ -212,13 +219,13 @@ export function ContributionFeed({
               {isVerified(selected) ? (
                 <>
                   <div className="flex justify-between gap-4">
-                    <span className="text-[#7A6B60]">ያረጋገጠው:</span>
+                    <span className="text-[#7A6B60]">{t("shell.feed.verifiedBy")}:</span>
                     <span className="font-semibold text-[#138A4B] text-right break-all">
                       {selected.verifiedBy}
                     </span>
                   </div>
                   <div className="flex justify-between gap-4">
-                    <span className="text-[#7A6B60]">የተመለሰበት ሰዓት:</span>
+                    <span className="text-[#7A6B60]">{t("shell.feed.verifiedAt")}:</span>
                     <span className="font-semibold text-[#1F1714] text-right">
                       {selected.verifiedAt ?? "—"}
                     </span>
@@ -226,7 +233,7 @@ export function ContributionFeed({
                 </>
               ) : (
                 <p className="pt-1 leading-relaxed text-[#6B5433]">
-                  ይህ ልይል ከተናገረ ስለሆነ ነው። በባንክ ማረጋገጫ ካልፈጸም ወደ ሒሳብ አይገባም።
+                  {t("shell.feed.notAContribution")}
                 </p>
               )}
             </div>
@@ -235,7 +242,7 @@ export function ContributionFeed({
               onClick={() => setSelected(null)}
               className="w-full mt-5 py-2.5 rounded-xl bg-[#2A1F1A] text-[#FAF7F2] font-semibold text-sm hover:bg-[#3D2E27] active:scale-[0.98] transition-all"
             >
-              ተመለስ
+              {t("shell.feed.close")}
             </button>
           </div>
         </div>

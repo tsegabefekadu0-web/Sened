@@ -149,13 +149,16 @@ test.describe("the mobile shell", () => {
     // is not built.
     await page.goto("/");
 
-    await page.getByRole("button", { name: /አባላት/ }).click();
-    const members = page.getByRole("region", { name: /አባላት/ });
+    // By role and exact name. The microphone button is also a `button` in that
+    // nav, so counting by position is fragile, and a loose text match for
+    // "ደብተር" also catches the Debter card and the workspace link.
+    await page.getByRole("button", { name: "አባላት", exact: true }).click();
+    const members = page.getByRole("region", { name: "አባላት", exact: true });
     await expect(members).toBeVisible();
     await expect(members).toHaveText(/ገና አልተገነበም/);
 
-    await page.getByRole("button", { name: /መለያ/ }).click();
-    const profile = page.getByRole("region", { name: /መለያ/ });
+    await page.getByRole("button", { name: "መለያ", exact: true }).click();
+    const profile = page.getByRole("region", { name: "መለያ", exact: true });
     await expect(profile).toBeVisible();
     await expect(profile).toHaveText(/ገና አልተገነበም/);
   });
@@ -163,10 +166,8 @@ test.describe("the mobile shell", () => {
   test("the ledger slot links to the real dashboard rather than an empty panel", async ({ page }) => {
     await page.goto("/");
 
-    // The bottom-nav slot's own label. A loose /ደብተር/ also matches the Debter
-    // card, which navigates somewhere else entirely.
-    await page.getByRole("button", { name: "ደብተር (Debter Ledger)" }).click();
-    const panel = page.getByRole("region", { name: /ደብተር/ });
+    await page.getByRole("button", { name: "ደብተር", exact: true }).click();
+    const panel = page.getByRole("region", { name: "ደብተር", exact: true });
     await expect(panel).toBeVisible();
     await panel.locator("a[href='/ledger']").click();
 

@@ -1,19 +1,25 @@
 "use client";
 
-import React from "react";
+import React, { useMemo } from "react";
 import { Home, BookOpen, Users, User, Mic } from "lucide-react";
+
+import { createTranslator, type Locale } from "@/lib/i18n";
 
 interface BottomVoiceNavProps {
   activeTab: "home" | "ledger" | "members" | "profile";
   onTabChange: (tab: "home" | "ledger" | "members" | "profile") => void;
   onVoiceClick: () => void;
+  /** Ge'ez-primary, so `am` by default — see `DebterCard`. */
+  locale?: Locale;
 }
 
 export function BottomVoiceNav({
   activeTab = "home",
   onTabChange,
   onVoiceClick,
+  locale = "am"
 }: BottomVoiceNavProps) {
+  const t = useMemo(() => createTranslator(locale), [locale]);
   return (
     <nav className="relative z-30 select-none w-full shrink-0 pointer-events-auto">
       {/* SVG Background with Smooth Arched Cutout and Gold Top Rim */}
@@ -63,9 +69,9 @@ export function BottomVoiceNav({
           <button
             type="button"
             onClick={onVoiceClick}
-            aria-label="በድምጽ አስመዝግብ (Spoken Voice Contribution Logging)"
+            aria-label={t("shell.nav.voiceAria")}
             className="w-[64px] h-[64px] rounded-full p-1 bg-[#1A1412] shadow-2xl hover:scale-105 active:scale-90 transition-all focus:outline-none group cursor-pointer"
-            title="በድምጽ አስመዝግብ"
+            title={t("shell.nav.voiceAria")}
           >
             {/* Outer Gold Ring + Terracotta Center */}
             <div className="w-full h-full rounded-full p-[2.5px] bg-gradient-to-b from-[#F7DF94] via-[#D4A244] to-[#9E6E1E] shadow-inner flex items-center justify-center">
@@ -83,7 +89,7 @@ export function BottomVoiceNav({
             type="button"
             onClick={() => onTabChange("home")}
             className="flex flex-col items-center justify-center w-12 py-1 text-[#D4A244] active:scale-90 transition-transform focus:outline-none cursor-pointer"
-            aria-label="መነሻ (Home)"
+            aria-label={t("shell.nav.home")}
           >
             <Home className="w-5 h-5 stroke-[2.2]" />
             {activeTab === "home" && (
@@ -96,7 +102,7 @@ export function BottomVoiceNav({
             type="button"
             onClick={() => onTabChange("ledger")}
             className="flex flex-col items-center justify-center w-12 py-1 text-[#9E8E80] hover:text-[#D4A244] active:scale-90 transition-transform focus:outline-none cursor-pointer"
-            aria-label="ደብተር (Debter Ledger)"
+            aria-label={t("shell.nav.ledger")}
           >
             <BookOpen className="w-5 h-5 stroke-[2]" />
             {activeTab === "ledger" && (
@@ -112,7 +118,7 @@ export function BottomVoiceNav({
             type="button"
             onClick={() => onTabChange("members")}
             className="flex flex-col items-center justify-center w-12 py-1 text-[#9E8E80] hover:text-[#D4A244] active:scale-90 transition-transform focus:outline-none cursor-pointer"
-            aria-label="አባላት (Community Members)"
+            aria-label={t("shell.nav.members")}
           >
             <Users className="w-5 h-5 stroke-[2]" />
             {activeTab === "members" && (
@@ -125,7 +131,7 @@ export function BottomVoiceNav({
             type="button"
             onClick={() => onTabChange("profile")}
             className="flex flex-col items-center justify-center w-12 py-1 text-[#9E8E80] hover:text-[#D4A244] active:scale-90 transition-transform focus:outline-none cursor-pointer"
-            aria-label="መለያ (Profile)"
+            aria-label={t("shell.nav.profile")}
           >
             <User className="w-5 h-5 stroke-[2]" />
             {activeTab === "profile" && (

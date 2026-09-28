@@ -466,6 +466,47 @@ export const en = {
   "draw.participants": "Participants",
   "draw.currency": "ETB",
   "draw.localNote": "This demonstration runs entirely on your device using WebCrypto for SHA-256. Verifying the draw does not depend on the server.",
+  // ── A1 · Gen A shell (M1) ──────────────────────────────────────────────────
+  // The mobile shell used to hard-code Ge'ez and never call t(), which is a
+  // standing §12.6 violation on the first surface a reviewer sees. These are the
+  // strings for `DebterCard`, `Header`, `BottomVoiceNav` and
+  // `ContributionFeed`; the components default to "am" so the shell looks
+  // exactly as it did, and every string now exists in both languages.
+  "shell.debter.label": "Debter card",
+  "shell.debter.ariaLabel": "Debter card: pot balance and next draw",
+  "shell.debter.potBalance": "Pot balance",
+  "shell.debter.currency": "ETB",
+  "shell.debter.nextDraw": "Next draw",
+  "shell.debter.mesobAlt": "The mesob for the next draw",
+  "shell.header.listen": "Listen",
+  "shell.header.listenAria": "Listen (play the spoken balance summary)",
+  "shell.header.groupName": "Bole Equb",
+  "shell.header.subtitle": "Community Treasury",
+  "shell.nav.voiceAria": "Record by voice (spoken contribution)",
+  "shell.nav.home": "Home",
+  "shell.nav.ledger": "Debter ledger",
+  "shell.nav.members": "Community members",
+  "shell.nav.profile": "Profile",
+  "shell.feed.title": "Member contributions",
+  "shell.feed.pending": "Awaiting verification",
+  "shell.feed.reference": "Reference",
+  "shell.feed.noReference": "No reference given",
+  "shell.feed.verifiedTitle": "Verified bank settlement",
+  "shell.feed.unverifiedTitle": "Awaiting verification — not verified",
+  "shell.feed.channel": "Payment channel",
+  "shell.feed.channelNone": "Not stated",
+  "shell.feed.channelTelebirr": "Telebirr",
+  "shell.feed.channelCbe": "CBE Birr",
+  "shell.feed.channelAwash": "Awash Bank",
+  "shell.feed.channelCash": "Cash",
+  "shell.feed.verifiedBy": "Verified by",
+  "shell.feed.verifiedAt": "Verified at",
+  "shell.feed.spokenNote": "Spoken note",
+  "shell.feed.notAContribution": "This contribution came from a spoken note. It does not enter the ledger until a bank verifies it.",
+  "shell.feed.empty": "No contributions yet",
+  "shell.feed.emptyBody": "Contributions recorded during the weekly meeting appear here.",
+  "shell.feed.close": "Close",
+  "shell.feed.secondaryAvatarAlt": "Another member",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -923,6 +964,47 @@ const am: Record<MessageKey, string> = {
   "draw.participants": "ተሳታፊዎች",
   "draw.currency": "ብር",
   "draw.localNote": "ይህ ማሳያ በስልክህ ላይ ብቻ ይሠራል — SHA-256 በስልክህ WebCrypto እንደሚሰራ ነው። ለማስተካከል አገልግሎቱ ላይ አይተማርንም።",
+  // ── A1 · Gen A shell (M1) ──────────────────────────────────────────────────
+  // The mobile shell used to hard-code Ge'ez and never call t(), which is a
+  // standing §12.6 violation on the first surface a reviewer sees. These are the
+  // strings for `DebterCard`, `Header`, `BottomVoiceNav` and
+  // `ContributionFeed`; the components default to "am" so the shell looks
+  // exactly as it did, and every string now exists in both languages.
+  "shell.debter.label": "\u12f0\u1265\u1270\u122d",
+  "shell.debter.ariaLabel": "\u12f0\u1265\u1270\u122d \u12e8\u1308\u1295\u12d8\u1265 \u1218\u1320\u1295 \u12a5\u1293 \u1240\u1323\u12ed \u12a5\u1323",
+  "shell.debter.potBalance": "\u12e8\u1260\u122d \u1240\u122a \u1212\u1233\u1265",
+  "shell.debter.currency": "\u1265\u122d",
+  "shell.debter.nextDraw": "\u1240\u1323\u12ed \u12a5\u1323",
+  "shell.debter.mesobAlt": "\u1240\u1323\u12ed \u12a5\u1323 \u1218\u1236\u1265",
+  "shell.header.listen": "\u12a0\u12f5\u121d\u1325",
+  "shell.header.listenAria": "\u12a0\u12f5\u121d\u1325 (\u12e8\u12f5\u121d\u133d \u121b\u1320\u1243\u1208\u12eb \u12a0\u121b\u121d\u1325)",
+  "shell.header.groupName": "\u12e8\u1266\u120c \u1218\u12f5\u1283\u1294\u12d3\u1208\u121d \u12a5\u1241\u1265",
+  "shell.header.subtitle": "\u12e8\u1225\u126d\u1228\u1270\u1230\u1265 \u12ad\u12dd\u130d",
+  "shell.nav.voiceAria": "\u1260\u12f5\u121d\u133d \u12a0\u1235\u1218\u12dd\u130d\u1265 (\u1260\u12f5\u121d\u133d \u12e8\u120d\u12ed\u120d \u1218\u12dd\u130d\u1265)",
+  "shell.nav.home": "\u1218\u1290\u123b",
+  "shell.nav.ledger": "\u12f0\u1265\u1270\u122d",
+  "shell.nav.members": "\u12a0\u1263\u120b\u1275",
+  "shell.nav.profile": "\u1218\u1208\u12eb",
+  "shell.feed.title": "\u12e8\u12a0\u1263\u120b\u1275 \u120d\u12ed\u120e\u127d",
+  "shell.feed.pending": "\u1260\u1218\u1320\u1263\u1260\u1245 \u120b\u12ed",
+  "shell.feed.reference": "\u1241\u1325\u122d",
+  "shell.feed.noReference": "\u12e8\u130d\u1265\u12ed\u1275 \u1241\u1325\u122d \u12a0\u120d\u1270\u1218\u12dd\u130d\u1260\u121d",
+  "shell.feed.verifiedTitle": "\u12e8\u1270\u1228\u130b\u1308\u1320 \u12e8\u1263\u1295\u12ad \u12ad\u134d\u12eb",
+  "shell.feed.unverifiedTitle": "\u1260\u1218\u1320\u1263\u1260\u1245 \u120b\u12ed \u2014 \u12a0\u120d\u1270\u1228\u130b\u1308\u1320\u121d",
+  "shell.feed.channel": "\u12e8\u12ad\u134d\u12eb \u1218\u1235\u1218\u122d",
+  "shell.feed.channelNone": "\u12a0\u120d\u1270\u1208\u1260\u1228\u121d",
+  "shell.feed.channelTelebirr": "\u1274\u120c\u1265\u122d",
+  "shell.feed.channelCbe": "\u1232\u1262\u12a4 \u1265\u122d",
+  "shell.feed.channelAwash": "\u12a0\u12cb\u123d \u1263\u1295\u12ad",
+  "shell.feed.channelCash": "\u1325\u122c \u1308\u1295\u12d8\u1265",
+  "shell.feed.verifiedBy": "\u12eb\u1228\u130b\u1308\u1320\u12cd",
+  "shell.feed.verifiedAt": "\u12e8\u1270\u1218\u12d8\u1308\u1260\u1260\u1275 \u1230\u12d3\u1275",
+  "shell.feed.spokenNote": "\u12e8\u1270\u1293\u1308\u1228 \u120d\u12ed\u120d",
+  "shell.feed.notAContribution": "\u12ed\u1205 \u120d\u12ed\u120d \u12a8\u1270\u1293\u1308\u1228 \u1235\u1208\u1206\u1290 \u1290\u12cd\u1362 \u1260\u1261\u1295\u12ad \u121b\u1228\u130b\u1308\u132b \u12ab\u120d\u1348\u1338\u121d \u12c8\u12f0 \u1212\u1233\u1265 \u12a0\u12ed\u1308\u1263\u121d\u1362",
+  "shell.feed.empty": "\u12a5\u1235\u12ab\u1201\u120d \u121d\u1295\u121d \u120d\u12ed\u120d \u12e8\u1208\u121d",
+  "shell.feed.emptyBody": "\u1260\u12dd\u122d\u12dd\u122d \u12cd\u122d\u12ed\u1275 \u12e8\u1270\u1218\u12d8\u1308\u1260 \u120d\u12ed\u120d \u12a5\u12da\u1205\u129b \u12ed\u1273\u12eb\u120d\u1362",
+  "shell.feed.close": "\u1270\u1218\u1208\u1235",
+  "shell.feed.secondaryAvatarAlt": "\u120c\u120b \u12a0\u1263\u120d",
 
 };
 

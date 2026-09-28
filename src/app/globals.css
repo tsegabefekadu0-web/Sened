@@ -20,15 +20,18 @@ body {
 ::-webkit-scrollbar {
   width: 4px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
   background: rgba(198, 83, 43, 0.3);
   border-radius: 9999px;
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   *,
   *::before,
   *::after {
@@ -95,11 +98,13 @@ body {
 }
 
 @keyframes offlineDot {
+
   0%,
   100% {
     opacity: 1;
     transform: scale(1);
   }
+
   50% {
     opacity: 0.45;
     transform: scale(0.82);
@@ -119,15 +124,79 @@ body {
 .offline-fork-banner {
   border: 1px solid rgba(198, 83, 43, 0.6);
   background:
-    repeating-linear-gradient(
-      135deg,
+    repeating-linear-gradient(135deg,
       rgba(198, 83, 43, 0.16) 0 10px,
-      rgba(198, 83, 43, 0.06) 10px 20px
-    );
+      rgba(198, 83, 43, 0.06) 10px 20px);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .offline-dot-pending {
     animation: none;
   }
+
+  .debter-enter,
+  .section-enter {
+    animation: none !important;
+  }
+}
+
+/* ─── Entrance & micro-interaction animations ─────────────────────────── */
+
+@keyframes debterEnter {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes sectionEnter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeUpStagger {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Stagger utility for feed items */
+.feed-item-enter {
+  animation: fadeUpStagger 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Tibeb-inspired section divider */
+.tibeb-divider {
+  width: 100%;
+  height: 6px;
+  background: repeating-linear-gradient(90deg,
+      #C6532B 0px,
+      #C6532B 4px,
+      transparent 4px,
+      transparent 6px,
+      #D4A244 6px,
+      #D4A244 10px,
+      transparent 10px,
+      transparent 12px);
+  opacity: 0.3;
+  border-radius: 2px;
+  margin: 0 auto;
 }

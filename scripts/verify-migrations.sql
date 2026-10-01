@@ -27,7 +27,7 @@ on conflict (id) do nothing;
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
 select set_config('request.jwt.claim.role', 'authenticated', false);
 select set_config('request.jwt.claims',
-  '{"sub":"11111111-1111-4111-8111-111111111111","app_metadata":{"role":"owner"}}', false);
+  '{"sub":"11111111-1111-4111-8111-111111111111"}', false);
 
 insert into public.ledger_groups (id, tenant_id, name, currency, created_by)
 values ('aaaaaaaa-0000-4000-8000-000000000001',
@@ -996,7 +996,7 @@ $ledgerread$;
 -- POST /api/ledger/entries calls one function, public.post_ledger_entry_v1, as the
 -- signed-in user. A correction is an ordinary entry with entry_type 'correction',
 -- corrects_entry_id and a rationale. The function itself checks identity, the
--- global role claim, group management rights, the idempotency key and shape; the
+-- caller's role in the group (owner or treasurer, from ledger_group_memberships), the idempotency key and shape; the
 -- compensating-entry rules (exact reversal, not before the original, one
 -- correction per original) live in a DEFERRED constraint trigger, so they fire at
 -- commit rather than inside the call. A DO block is a single transaction, so each
@@ -1011,7 +1011,7 @@ declare
   tre_uid constant text := '11111111-1111-4111-8111-111111111111';  -- owner of group C
   oth_uid constant text := '22222222-2222-4222-8222-222222222222';  -- owns group B, not a member of C
   mem_uid constant text := '33333333-3333-4333-8333-333333333333';  -- plain member of group C
-  claims_owner constant text := '{"sub":"11111111-1111-4111-8111-111111111111","app_metadata":{"role":"owner"}}';
+  claims_owner constant text := '{"sub":"11111111-1111-4111-8111-111111111111"}';
   group_c   uuid;
   group_b   uuid;
   cash_c    uuid;
@@ -1292,11 +1292,12 @@ begin
   set constraints all deferred;
 
   -- ---- 7. Authorization --------------------------------------------------------
-  -- 7a. A plain member of the group. The JWT carries a global write role, so only
-  -- the group-membership check can refuse this.
+  -- 7a. A plain member of the group. No JWT in this file carries an app_metadata
+  -- role (roles live in ledger_group_memberships), so the member's own role in
+  -- the group is the only thing that can refuse this.
   perform set_config('request.jwt.claim.sub', mem_uid, false);
   perform set_config('request.jwt.claims',
-    '{"sub":"33333333-3333-4333-8333-333333333333","app_metadata":{"role":"owner"}}', false);
+    '{"sub":"33333333-3333-4333-8333-333333333333"}', false);
   begin
     perform public.post_ledger_entry_v1(group_c, 'corr-member', now(), 'contribution', null, null, fwd);
     raise exception 'LEDGER CORRECT 7 FAILED: a plain member posted an entry';
@@ -1306,35 +1307,22 @@ begin
       raise exception 'LEDGER CORRECT 7 FAILED: member refused for the wrong reason: %', sqlerrm;
     end if;
   end;
-  -- 7b. A plain member with no global role either.
+  -- 7b. The same member again, with an explicitly empty app_metadata.
   perform set_config('request.jwt.claims',
-    '{"sub":"33333333-3333-4333-8333-333333333333","app_metadata":{"role":"member"}}', false);
+    '{"sub":"33333333-3333-4333-8333-333333333333","app_metadata":{}}', false);
   begin
     perform public.post_ledger_entry_v1(group_c, 'corr-member-2', now(), 'contribution', null, null, fwd);
-    raise exception 'LEDGER CORRECT 7 FAILED: a member without the write role posted an entry';
+    raise exception 'LEDGER CORRECT 7 FAILED: a plain member posted an entry (empty app_metadata)';
   exception when others then
     if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
     if sqlerrm not like '%ledger_forbidden%' then
       raise exception 'LEDGER CORRECT 7 FAILED: role-less member refused for the wrong reason: %', sqlerrm;
     end if;
   end;
-  -- 7c. The group's own owner, but a JWT without any write role: the global claim gates it.
-  perform set_config('request.jwt.claim.sub', tre_uid, false);
-  perform set_config('request.jwt.claims',
-    '{"sub":"11111111-1111-4111-8111-111111111111","app_metadata":{}}', false);
-  begin
-    perform public.post_ledger_entry_v1(group_c, 'corr-norole', now(), 'contribution', null, null, fwd);
-    raise exception 'LEDGER CORRECT 7 FAILED: an owner whose JWT has no write role posted an entry';
-  exception when others then
-    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
-    if sqlerrm not like '%ledger_forbidden%' then
-      raise exception 'LEDGER CORRECT 7 FAILED: no-role JWT refused for the wrong reason: %', sqlerrm;
-    end if;
-  end;
   -- 7d. A treasurer of another tenant (owner of group B, no membership in C).
   perform set_config('request.jwt.claim.sub', oth_uid, false);
   perform set_config('request.jwt.claims',
-    '{"sub":"22222222-2222-4222-8222-222222222222","app_metadata":{"role":"owner"}}', false);
+    '{"sub":"22222222-2222-4222-8222-222222222222"}', false);
   begin
     perform public.post_ledger_entry_v1(group_c, 'corr-outsider', now(), 'contribution', null, null, fwd);
     raise exception 'LEDGER CORRECT 7 FAILED: a non-member of another tenant posted into group C';
@@ -1421,5 +1409,299 @@ begin
   raise notice 'LEDGER CORRECT: all 9 correction checks passed';
 end;
 $ledgercorrect$;
+
+-- ---------------------------------------------------------------------------
+-- Per-group roles, with NO app_metadata on any JWT
+--
+-- Write authorization is the caller's role in the group, read from
+-- ledger_group_memberships inside the security-definer functions. Whoever
+-- provisions a group is its owner; the owner grants and clears the treasurer role
+-- with sened_ledger_set_member_role_v1. Every claim set below omits
+-- app_metadata.role (one case sets it to "owner" on a plain member to prove it is
+-- ignored). All calls run as `authenticated`, as PostgREST does.
+--
+--   owner  1111  provisions the group
+--   member 3333  added as a plain member
+--   other  4444  never a member
+--   other  2222  never a member (owns another group)
+-- ---------------------------------------------------------------------------
+do $roles$
+declare
+  own_uid constant text := '11111111-1111-4111-8111-111111111111';
+  mem_uid constant text := '33333333-3333-4333-8333-333333333333';
+  out_uid constant text := '44444444-4444-4444-8444-444444444444';
+  oth_uid constant text := '22222222-2222-4222-8222-222222222222';
+  group_r  uuid;
+  cash_r   uuid;
+  income_r uuid;
+  fwd      jsonb;
+  res      jsonb;
+  n        bigint;
+  bind_id  constant uuid := 'abababab-0000-4000-8000-0000000000f1';
+  member_role text;
+begin
+  -- Fixture (owner provisions; superuser for setup).
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  group_r := (public.sened_ledger_provision_group_v1('Roles test equb') ->> 'groupId')::uuid;
+  reset role;
+  select id into cash_r from public.ledger_accounts where group_id = group_r and code = 'POT_CASH';
+  select id into income_r from public.ledger_accounts where group_id = group_r and code = 'CONTRIBUTION_INCOME';
+  fwd := jsonb_build_array(
+    jsonb_build_object('accountId', cash_r, 'direction', 'debit', 'amount', '10.00'),
+    jsonb_build_object('accountId', income_r, 'direction', 'credit', 'amount', '10.00'));
+
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status)
+  values (group_r, own_uid::uuid, mem_uid::uuid, 'member', 'active');
+  insert into public.bank_account_bindings (
+    id, user_id, group_id, tenant_id, ledger_account_id, provider, currency,
+    account_label, account_fingerprint_hmac, sender_fingerprint_hmac,
+    receiver_fingerprint_hmac, active
+  ) values (
+    bind_id, mem_uid::uuid, group_r, own_uid::uuid, cash_r, 'telebirr', 'ETB',
+    'Roles test binding', repeat('1', 64), repeat('2', 64), repeat('3', 64), true);
+
+  -- ROLES 1. The provisioner is the owner, and can post.
+  select role into member_role from public.ledger_group_memberships
+    where group_id = group_r and user_id = own_uid::uuid;
+  if member_role is distinct from 'owner' then
+    raise exception 'ROLES 1 FAILED: the provisioner is % not owner', member_role;
+  end if;
+  set local role authenticated;
+  res := public.post_ledger_entry_v1(group_r, 'roles-owner-1', now(), 'contribution', null, null, fwd);
+  reset role;
+  if res -> 'entry' ->> 'sequence' is null then
+    raise exception 'ROLES 1 FAILED: the owner could not post';
+  end if;
+
+  -- ROLES 2. A plain member is refused (ledger and bank), even with a JWT that
+  -- claims role "owner" - the claim is not consulted.
+  perform set_config('request.jwt.claim.sub', mem_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || mem_uid || '","app_metadata":{"role":"owner"}}', false);
+  set local role authenticated;
+  begin
+    perform public.post_ledger_entry_v1(group_r, 'roles-member-1', now(), 'contribution', null, null, fwd);
+    raise exception 'ROLES 2 FAILED: a plain member posted';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'ROLES 2 FAILED: member refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.create_bank_verification_intent_v1(
+      bind_id, 'telebirr', repeat('a', 64), repeat('c', 24), 'v1', 100.00, 'ETB',
+      'inbound', now(), 'roles-bank-member');
+    raise exception 'ROLES 2 FAILED: a plain member created a bank verification intent';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%bank_forbidden%' then
+      raise exception 'ROLES 2 FAILED: member refused for the wrong reason (bank): %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  -- ROLES 3. A non-owner cannot promote: the plain member (self), and an outsider.
+  set local role authenticated;
+  begin
+    perform public.sened_ledger_set_member_role_v1(group_r, mem_uid::uuid, 'treasurer');
+    raise exception 'ROLES 3 FAILED: a member promoted themselves';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'ROLES 3 FAILED: self-promotion refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claim.sub', oth_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || oth_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.sened_ledger_set_member_role_v1(group_r, mem_uid::uuid, 'treasurer');
+    raise exception 'ROLES 3 FAILED: an outsider promoted a member';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'ROLES 3 FAILED: outsider refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+  select role into member_role from public.ledger_group_memberships
+    where group_id = group_r and user_id = mem_uid::uuid;
+  if member_role <> 'member' then
+    raise exception 'ROLES 3 FAILED: the member''s role moved to % after refused promotions', member_role;
+  end if;
+
+  -- ROLES 4. The owner promotes the member; the member can now post and create a
+  -- bank intent. Promoting again is a no-op.
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  res := public.sened_ledger_set_member_role_v1(group_r, mem_uid::uuid, 'treasurer');
+  if res ->> 'role' <> 'treasurer' or (res ->> 'changed')::boolean is not true then
+    raise exception 'ROLES 4 FAILED: unexpected promotion result %', res;
+  end if;
+  res := public.sened_ledger_set_member_role_v1(group_r, mem_uid::uuid, 'treasurer');
+  if (res ->> 'changed')::boolean is not false then
+    raise exception 'ROLES 4 FAILED: a repeated promotion reported a change: %', res;
+  end if;
+  reset role;
+  perform set_config('request.jwt.claim.sub', mem_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || mem_uid || '"}', false);
+  set local role authenticated;
+  res := public.post_ledger_entry_v1(group_r, 'roles-treasurer-1', now(), 'contribution', null, null, fwd);
+  if res -> 'entry' ->> 'sequence' is null then
+    raise exception 'ROLES 4 FAILED: the promoted treasurer could not post';
+  end if;
+  res := public.create_bank_verification_intent_v1(
+    bind_id, 'telebirr', repeat('a', 64), repeat('c', 24), 'v1', 100.00, 'ETB',
+    'inbound', now(), 'roles-bank-treasurer');
+  if res is null then
+    raise exception 'ROLES 4 FAILED: the promoted treasurer could not create a bank intent';
+  end if;
+  if not exists (
+    select 1 from jsonb_array_elements(public.list_my_groups_v1()) g
+    where g ->> 'groupId' = group_r::text and g ->> 'role' = 'treasurer'
+  ) then
+    raise exception 'ROLES 4 FAILED: list_my_groups_v1 does not report the treasurer role';
+  end if;
+  -- A treasurer is not an owner: cannot hand out roles.
+  begin
+    perform public.sened_ledger_set_member_role_v1(group_r, own_uid::uuid, 'member');
+    raise exception 'ROLES 4 FAILED: a treasurer changed the owner''s role';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'ROLES 4 FAILED: treasurer role change refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  -- ROLES 5. The owner demotes; the former treasurer is refused again.
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  res := public.sened_ledger_set_member_role_v1(group_r, mem_uid::uuid, 'member');
+  if res ->> 'role' <> 'member' or (res ->> 'changed')::boolean is not true then
+    raise exception 'ROLES 5 FAILED: unexpected demotion result %', res;
+  end if;
+  res := public.sened_ledger_set_member_role_v1(group_r, mem_uid::uuid, 'member');
+  if (res ->> 'changed')::boolean is not false then
+    raise exception 'ROLES 5 FAILED: a repeated demotion reported a change: %', res;
+  end if;
+  reset role;
+  perform set_config('request.jwt.claim.sub', mem_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || mem_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.post_ledger_entry_v1(group_r, 'roles-demoted-1', now(), 'contribution', null, null, fwd);
+    raise exception 'ROLES 5 FAILED: a demoted treasurer posted';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'ROLES 5 FAILED: demoted treasurer refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.create_bank_verification_intent_v1(
+      bind_id, 'telebirr', repeat('b', 64), repeat('c', 24), 'v1', 100.00, 'ETB',
+      'inbound', now(), 'roles-bank-demoted');
+    raise exception 'ROLES 5 FAILED: a demoted treasurer created a bank intent';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%bank_forbidden%' then
+      raise exception 'ROLES 5 FAILED: demoted treasurer refused for the wrong reason (bank): %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  -- ROLES 6. An outsider cannot be promoted: no membership is created. The owner
+  -- also cannot demote themselves, or assign ownership.
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.sened_ledger_set_member_role_v1(group_r, out_uid::uuid, 'treasurer');
+    raise exception 'ROLES 6 FAILED: an outsider was promoted';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_member_not_found%' then
+      raise exception 'ROLES 6 FAILED: outsider promotion refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.sened_ledger_set_member_role_v1(group_r, own_uid::uuid, 'member');
+    raise exception 'ROLES 6 FAILED: the owner demoted themselves';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_invalid_request%' then
+      raise exception 'ROLES 6 FAILED: self-demotion refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.sened_ledger_set_member_role_v1(group_r, mem_uid::uuid, 'owner');
+    raise exception 'ROLES 6 FAILED: ownership was assigned through the role function';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_invalid_request%' then
+      raise exception 'ROLES 6 FAILED: owner assignment refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.sened_ledger_set_member_role_v1(gen_random_uuid(), mem_uid::uuid, 'treasurer');
+    raise exception 'ROLES 6 FAILED: a role was set in a group that does not exist';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_group_not_found%' then
+      raise exception 'ROLES 6 FAILED: missing group refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+  select count(*) into n from public.ledger_group_memberships
+    where group_id = group_r and user_id = out_uid::uuid;
+  if n <> 0 then raise exception 'ROLES 6 FAILED: a membership was created for the outsider'; end if;
+  select role into member_role from public.ledger_group_memberships
+    where group_id = group_r and user_id = own_uid::uuid;
+  if member_role <> 'owner' then
+    raise exception 'ROLES 6 FAILED: the owner''s role is now %', member_role;
+  end if;
+
+  -- ROLES 7. No session, and anon, cannot change roles.
+  perform set_config('request.jwt.claim.sub', '', false);
+  perform set_config('request.jwt.claims', '{"role":"authenticated"}', false);
+  set local role authenticated;
+  begin
+    perform public.sened_ledger_set_member_role_v1(group_r, mem_uid::uuid, 'treasurer');
+    raise exception 'ROLES 7 FAILED: a request with no subject changed a role';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'ROLES 7 FAILED: subject-less request refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claim.role', 'anon', false);
+  perform set_config('request.jwt.claims', '{"role":"anon"}', false);
+  set local role anon;
+  begin
+    perform public.sened_ledger_set_member_role_v1(group_r, mem_uid::uuid, 'treasurer');
+    raise exception 'ROLES 7 FAILED: anon changed a role';
+  exception when others then
+    if sqlerrm like 'ROLES%' then raise; end if;
+    if sqlerrm not like '%permission denied%' then
+      raise exception 'ROLES 7 FAILED: anon refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  -- Restore the session identity the rest of the file expects.
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  raise notice 'ROLES: all 7 per-group role checks passed';
+end;
+$roles$;
 
 select 'ALL DRAW BINDING CHECKS PASSED' as result;

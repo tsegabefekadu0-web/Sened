@@ -17,6 +17,7 @@ vi.mock("@supabase/supabase-js", () => ({
 import { GET } from "@/app/api/bank-verifications/[verificationId]/route";
 import { POST } from "@/app/api/bank-verifications/route";
 import { createGetHandler, createPostHandler } from "@/lib/banking/routeHandlers";
+import { BankVerificationError } from "@/lib/banking/errors";
 import type { BankVerificationService } from "@/lib/banking/service";
 
 const userId = "11111111-1111-4111-8111-111111111111";
@@ -69,7 +70,7 @@ beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://demo.supabase.co");
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon-key");
   mocks.getUser.mockReset().mockResolvedValue({
-    data: { user: { id: userId, app_metadata: { role: "treasurer" } } },
+    data: { user: { id: userId } },
     error: null
   });
   mocks.rpc.mockReset().mockResolvedValue({ data: null, error: null });
@@ -120,18 +121,18 @@ describe("POST /api/bank-verifications", () => {
     expect(service.create).not.toHaveBeenCalled();
   });
 
-  it("403s an authenticated member without a verified ledger role", async () => {
-    mocks.getUser.mockResolvedValue({
-      data: { user: { id: userId, app_metadata: { role: "member" } } },
-      error: null
-    });
+  it("403s when the database refuses the caller's role in the binding's group", async () => {
+    // The role is read in SQL from the caller's membership; the JWT has none.
     const service = fakeService();
+    (service.create as unknown as { mockRejectedValue: (e: unknown) => void }).mockRejectedValue(
+      new BankVerificationError("FORBIDDEN", "bank_forbidden")
+    );
     const handler = createPostHandler(() => service);
 
     const response = await handler(request(requestBody));
 
     expect(response.status).toBe(403);
-    expect(service.create).not.toHaveBeenCalled();
+    expect(service.create).toHaveBeenCalledTimes(1);
   });
 
   it("returns only the safe public DTO and no-store headers", async () => {

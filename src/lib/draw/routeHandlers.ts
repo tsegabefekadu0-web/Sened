@@ -1,7 +1,6 @@
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { canWriteLedger } from "@/lib/roles";
 import { bearerToken, getUserScopedClient } from "@/lib/supabaseServer";
 import { parse } from "@/lib/validation";
 
@@ -51,10 +50,7 @@ type AuthOutcome =
  * configured" signal and maps to 503 rather than 401, matching the ledger and
  * banking lanes.
  */
-async function authenticate(
-  request: Request,
-  options: { readonly requireWriteRole: boolean }
-): Promise<AuthOutcome> {
+async function authenticate(request: Request): Promise<AuthOutcome> {
   const token = bearerToken(request);
   if (!token) {
     return { ok: false, response: jsonError("unauthorized", 401) };
@@ -69,9 +65,6 @@ async function authenticate(
   }
   if (authResult.error || !authResult.data.user) {
     return { ok: false, response: jsonError("unauthorized", 401) };
-  }
-  if (options.requireWriteRole && !canWriteLedger(authResult.data.user)) {
-    return { ok: false, response: jsonError("forbidden", 403) };
   }
   return { ok: true, context: { userId: authResult.data.user.id } };
 }
@@ -161,7 +154,7 @@ export function createCommitHandler(
   serviceFactory: DrawServiceFactory = productionFactory
 ): (request: Request) => Promise<Response> {
   return async function post(request: Request): Promise<Response> {
-    const auth = await authenticate(request, { requireWriteRole: true });
+    const auth = await authenticate(request);
     if (!auth.ok) return auth.response;
 
     const payload = await readJsonBody(request);
@@ -213,7 +206,7 @@ export function createRevealHandler(
   serviceFactory: DrawServiceFactory = productionFactory
 ): (request: Request) => Promise<Response> {
   return async function post(request: Request): Promise<Response> {
-    const auth = await authenticate(request, { requireWriteRole: true });
+    const auth = await authenticate(request);
     if (!auth.ok) return auth.response;
 
     const payload = await readJsonBody(request);
@@ -265,7 +258,7 @@ export function createVerifyHandler(
   serviceFactory: DrawServiceFactory = productionFactory
 ): (request: Request) => Promise<Response> {
   return async function post(request: Request): Promise<Response> {
-    const auth = await authenticate(request, { requireWriteRole: false });
+    const auth = await authenticate(request);
     if (!auth.ok) return auth.response;
 
     const payload = await readJsonBody(request);
@@ -303,7 +296,7 @@ export function createRoundHandler(
   serviceFactory: DrawServiceFactory = productionFactory
 ): (request: Request, context: DrawRouteContext) => Promise<Response> {
   return async function get(request: Request, context: DrawRouteContext): Promise<Response> {
-    const auth = await authenticate(request, { requireWriteRole: false });
+    const auth = await authenticate(request);
     if (!auth.ok) return auth.response;
 
     const parsed = parse(drawIdSchema, context.params.roundId);
@@ -338,7 +331,7 @@ export function createPayoutHandler(
   serviceFactory: DrawServiceFactory = productionFactory
 ): (request: Request) => Promise<Response> {
   return async function post(request: Request): Promise<Response> {
-    const auth = await authenticate(request, { requireWriteRole: true });
+    const auth = await authenticate(request);
     if (!auth.ok) return auth.response;
 
     const payload = await readJsonBody(request);

@@ -70,6 +70,7 @@ describe("M2 correction form, signed in", () => {
       "multiple-groups",
       "You belong to more than one ledger group. Choosing between groups is not supported here yet, so no live entries are shown."
     ],
+    ["read-only", "Only the group owner or treasurer can record corrections. Ask them to make this correction."],
     ["error", "We could not load your ledger entries. Try again in a moment."]
   ])("shows the %s state", async (status, message) => {
     hoisted.load.mockResolvedValue({ status });

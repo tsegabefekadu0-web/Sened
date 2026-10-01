@@ -218,6 +218,7 @@ const liveStatusMessageKeys: Record<Exclude<LiveLedgerResult["status"], "ready">
   unauthorized: "m2.correction.live.unauthorized",
   "no-group": "m2.correction.live.noGroup",
   "multiple-groups": "m2.correction.live.multipleGroups",
+  "read-only": "m2.correction.live.readOnly",
   error: "m2.correction.live.error"
 };
 

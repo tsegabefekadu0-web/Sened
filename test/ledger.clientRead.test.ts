@@ -94,6 +94,19 @@ describe("loadCorrectionTargets", () => {
     expect(d.fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("returns read-only for a plain member without reading entries", async () => {
+    const d = deps([json({ groups: [{ groupId: GROUP, role: "member" }] })]);
+    expect(await loadCorrectionTargets(d)).toEqual({ status: "read-only" });
+    expect(d.fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads entries for an owner or a treasurer", async () => {
+    for (const role of ["owner", "treasurer"]) {
+      const d = deps([json({ groups: [{ groupId: GROUP, role }] }), json({ entries: [entry("e1", "1", "contribution")] })]);
+      expect((await loadCorrectionTargets(d)).status).toBe("ready");
+    }
+  });
+
   it("maps a 401 from either read to unauthorized", async () => {
     expect(await loadCorrectionTargets(deps([json({ error: "unauthorized" }, 401)]))).toEqual({ status: "unauthorized" });
     expect(

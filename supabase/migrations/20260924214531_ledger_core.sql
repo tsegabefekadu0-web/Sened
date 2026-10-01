@@ -419,8 +419,6 @@ as $$
 declare
   actor uuid := auth.uid();
   tenant uuid;
-  global_role text;
-  global_roles jsonb;
   head public.ledger_group_heads%rowtype;
   existing_entry public.ledger_entries%rowtype;
   posting jsonb;
@@ -443,14 +441,10 @@ begin
     raise exception using errcode = '42501', message = 'ledger_forbidden';
   end if;
 
-  global_role := coalesce(auth.jwt() -> 'app_metadata' ->> 'role', '');
-  global_roles := coalesce(auth.jwt() -> 'app_metadata' -> 'roles', '[]'::jsonb);
-  if global_role not in ('owner', 'treasurer', 'admin')
-    and not (global_roles ? 'owner')
-    and not (global_roles ? 'treasurer')
-    and not (global_roles ? 'admin') then
-    raise exception using errcode = '42501', message = 'ledger_forbidden';
-  end if;
+  -- Authorization is the caller's role in THIS group, read from
+  -- ledger_group_memberships by sened_ledger_can_manage_group below. The JWT's
+  -- app_metadata is deliberately not consulted: nothing sets it, and a global
+  -- claim cannot express "treasurer of group A, member of group B".
 
   select group_row.tenant_id
   into tenant

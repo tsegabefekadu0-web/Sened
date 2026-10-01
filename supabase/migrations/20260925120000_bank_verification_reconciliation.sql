@@ -425,6 +425,13 @@ begin
     raise exception using errcode = 'P0002', message = 'bank_binding_not_found';
   end if;
 
+  -- Only the group's owner or treasurer may record a verification. A plain
+  -- member can see the group but not write to it; the role is read from
+  -- ledger_group_memberships, never from the JWT.
+  if not public.sened_ledger_can_manage_group(binding_row.group_id, binding_row.tenant_id) then
+    raise exception using errcode = '42501', message = 'bank_forbidden';
+  end if;
+
   request_fingerprint := encode(sha256(convert_to(
     'sened-bank-verification-request-v1' || chr(31) ||
     p_provider || chr(31) ||

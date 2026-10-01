@@ -1,6 +1,5 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { canWriteLedger } from "@/lib/roles";
 import { bearerToken, getUserScopedClient } from "@/lib/supabaseServer";
 import { createProductionBankVerificationService } from "@/lib/banking/server";
 import { BankVerificationError, isBankVerificationError } from "@/lib/banking/errors";
@@ -71,9 +70,8 @@ export function createPostHandler(
     if (authResult.error || !authResult.data.user) {
       return jsonError("unauthorized", 401);
     }
-    if (!canWriteLedger(authResult.data.user)) {
-      return jsonError("forbidden", 403);
-    }
+    // The caller's role in the binding's group is checked inside
+    // create_bank_verification_intent_v1; a refusal surfaces as FORBIDDEN.
     const contentType = request.headers.get("content-type")?.toLowerCase();
     if (
       !contentType ||

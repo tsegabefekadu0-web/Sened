@@ -139,7 +139,7 @@ beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://demo.supabase.co");
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon-key");
   mocks.getUser.mockReset().mockResolvedValue({
-    data: { user: { id: actorId, app_metadata: { role: "treasurer" } } },
+    data: { user: { id: actorId } },
     error: null
   });
 });
@@ -177,17 +177,18 @@ describe("POST /api/draw/commits", () => {
     expect(response.status).toBe(503);
   });
 
-  it("403s an authenticated member without a treasurer role", async () => {
-    mocks.getUser.mockResolvedValue({
-      data: { user: { id: actorId, app_metadata: { role: "member" } } },
-      error: null
-    });
+  it("403s when the database refuses the caller's role in the group", async () => {
+    // Authorization is the caller's role in the group, enforced in SQL; the JWT
+    // carries no role, so the route cannot and does not decide this itself.
     const service = fakeService();
+    (service.commit as unknown as { mockRejectedValue: (e: unknown) => void }).mockRejectedValue(
+      new DrawError("FORBIDDEN", "draw_forbidden")
+    );
 
     const response = await createCommitHandler(() => service)(request(commitBody));
 
     expect(response.status).toBe(403);
-    expect(service.commit).not.toHaveBeenCalled();
+    expect(service.commit).toHaveBeenCalledTimes(1);
   });
 
   it("REJECTS (400) a non-JSON content type before touching the service", async () => {
@@ -305,17 +306,16 @@ describe("POST /api/draw/reveals", () => {
     idempotencyKey: "draw-reveal-1"
   };
 
-  it("403s a member", async () => {
-    mocks.getUser.mockResolvedValue({
-      data: { user: { id: actorId, app_metadata: { role: "member" } } },
-      error: null
-    });
+  it("403s when the database refuses the caller's role in the group", async () => {
     const service = fakeService();
+    (service.reveal as unknown as { mockRejectedValue: (e: unknown) => void }).mockRejectedValue(
+      new DrawError("FORBIDDEN", "draw_forbidden")
+    );
 
     const response = await createRevealHandler(() => service)(request(revealBody));
 
     expect(response.status).toBe(403);
-    expect(service.reveal).not.toHaveBeenCalled();
+    expect(service.reveal).toHaveBeenCalledTimes(1);
   });
 
   it("returns the winner, the risk assessment, and the transcript", async () => {
@@ -353,7 +353,7 @@ describe("POST /api/draw/reveals", () => {
 describe("POST /api/draw/verify", () => {
   it("lets an ordinary member verify the draw", async () => {
     mocks.getUser.mockResolvedValue({
-      data: { user: { id: actorId, app_metadata: { role: "member" } } },
+      data: { user: { id: actorId } },
       error: null
     });
     const service = fakeService();
@@ -385,7 +385,7 @@ describe("POST /api/draw/verify", () => {
 describe("GET /api/draw/rounds/[roundId]", () => {
   it("returns the published round to any authenticated member", async () => {
     mocks.getUser.mockResolvedValue({
-      data: { user: { id: actorId, app_metadata: { role: "member" } } },
+      data: { user: { id: actorId } },
       error: null
     });
     const service = fakeService();
@@ -413,17 +413,16 @@ describe("GET /api/draw/rounds/[roundId]", () => {
 describe("POST /api/draw/payouts", () => {
   const payoutBody = { drawId, cashAccountId: cashAccount, payoutAccountId: payoutAccount };
 
-  it("403s a member", async () => {
-    mocks.getUser.mockResolvedValue({
-      data: { user: { id: actorId, app_metadata: { role: "member" } } },
-      error: null
-    });
+  it("403s when the database refuses the caller's role in the group", async () => {
     const service = fakeService();
+    (service.postPayout as unknown as { mockRejectedValue: (e: unknown) => void }).mockRejectedValue(
+      new DrawError("FORBIDDEN", "draw_forbidden")
+    );
 
     const response = await createPayoutHandler(() => service)(request(payoutBody));
 
     expect(response.status).toBe(403);
-    expect(service.postPayout).not.toHaveBeenCalled();
+    expect(service.postPayout).toHaveBeenCalledTimes(1);
   });
 
   it("REJECTS (400) a payout between the same account twice", async () => {

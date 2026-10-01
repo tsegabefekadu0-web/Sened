@@ -25,10 +25,13 @@ export type LiveLedgerResult =
   | { readonly status: "unauthorized" }
   | { readonly status: "no-group" }
   | { readonly status: "multiple-groups" }
+  /** The caller is a plain member: they may read but not record entries. */
+  | { readonly status: "read-only" }
   | { readonly status: "error" };
 
 interface WireGroup {
   readonly groupId?: unknown;
+  readonly role?: unknown;
 }
 interface WirePosting {
   readonly accountId?: unknown;
@@ -119,6 +122,11 @@ export async function loadCorrectionTargets(deps: AuthedFetchDeps = {}): Promise
     const groupId = groups[0].groupId;
     if (typeof groupId !== "string") {
       return { status: "error" };
+    }
+    // Only the owner and treasurer may record entries (the database enforces
+    // it). Say so up front rather than letting a submit fail with a 403.
+    if (groups[0].role === "member") {
+      return { status: "read-only" };
     }
 
     const entriesResponse = await authedFetch(

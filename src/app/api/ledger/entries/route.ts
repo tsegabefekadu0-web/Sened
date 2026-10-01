@@ -6,7 +6,6 @@ import {
   listGroupLedgerEntries,
   type LedgerEntry
 } from "@/lib/ledger";
-import { canWriteLedger } from "@/lib/roles";
 import { bearerToken, getUserScopedClient } from "@/lib/supabaseServer";
 import { ledgerEntriesQuerySchema, ledgerEntryRequestSchema, parse } from "@/lib/validation";
 
@@ -58,9 +57,9 @@ export async function POST(request: Request): Promise<Response> {
   if (error || !data.user) {
     return jsonError("unauthorized", 401);
   }
-  if (!canWriteLedger(data.user)) {
-    return jsonError("forbidden", 403);
-  }
+  // Write authorization is the caller's role in the group, enforced by
+  // post_ledger_entry_v1 against ledger_group_memberships; a refusal comes back
+  // as FORBIDDEN below. The JWT carries no role and is not consulted.
 
   const contentType = request.headers.get("content-type")?.toLowerCase();
   const declaredLength = Number(request.headers.get("content-length") ?? "0");

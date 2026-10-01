@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { RATE_LIMITED, resolveRateLimit } from "@/middleware";
-import { consumeRateLimit, PROXY_RULE, resetRateLimits } from "@/lib/rateLimit";
+import { consumeRateLimit, PROXY_RULE, WRITE_RULE, resetRateLimits } from "@/lib/rateLimit";
 
 beforeEach(() => {
   resetRateLimits();
@@ -10,6 +10,11 @@ describe("ledger route rate limiting", () => {
   it("registers the exact write endpoint and resolves the proxy bucket", () => {
     expect(RATE_LIMITED.has("/api/ledger/entries")).toBe(true);
     expect(resolveRateLimit("/api/ledger/entries")).toEqual(PROXY_RULE);
+  });
+
+  it("meters the member-role route as a write", () => {
+    expect(RATE_LIMITED.has("/api/ledger/member-roles")).toBe(true);
+    expect(resolveRateLimit("/api/ledger/member-roles")).toEqual(WRITE_RULE);
   });
 
   it("returns 429 state after the bounded request count", () => {

@@ -12,6 +12,7 @@ import { consumeRateLimit, PROXY_RULE, READ_RULE, WRITE_RULE, type RateLimitRule
  */
 export const RATE_LIMITED = new Set([
   "/api/ledger/entries",
+  "/api/ledger/member-roles",
   "/api/bank-verifications",
   "/api/bank-verifications/[verificationId]",
   // A2: these two shell out to a third-party speech provider.
@@ -56,7 +57,7 @@ export function isRateLimitedPath(pathname: string): boolean {
 }
 
 export function resolveRateLimit(pathname: string): RateLimitRule {
-  if (pathname === "/api/bank-verifications") {
+  if (pathname === "/api/bank-verifications" || pathname === "/api/ledger/member-roles") {
     return WRITE_RULE;
   }
   if (isBankVerificationReadPath(pathname)) {

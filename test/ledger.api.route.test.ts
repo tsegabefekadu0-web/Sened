@@ -64,7 +64,7 @@ beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://demo.supabase.co");
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon-key");
   mocks.getUser.mockReset().mockResolvedValue({
-    data: { user: { id: actorId, app_metadata: { role: "treasurer" } } },
+    data: { user: { id: actorId } },
     error: null
   });
   mocks.rpc.mockReset().mockResolvedValue({
@@ -128,7 +128,21 @@ describe("POST /api/ledger/entries", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
-  it("403s an authenticated user without a verified ledger role", async () => {
+  it("403s when the database refuses the caller's role in the group", async () => {
+    // The JWT carries no role. post_ledger_entry_v1 reads the caller's role in
+    // the group from ledger_group_memberships and refuses a plain member.
+    mocks.rpc.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "ledger_forbidden" }
+    });
+
+    const response = await POST(post(requestBody));
+
+    expect(response.status).toBe(403);
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not consult the JWT's app_metadata: a claimed role neither grants nor blocks", async () => {
     mocks.getUser.mockResolvedValue({
       data: { user: { id: actorId, app_metadata: { role: "member" } } },
       error: null
@@ -136,8 +150,8 @@ describe("POST /api/ledger/entries", () => {
 
     const response = await POST(post(requestBody));
 
-    expect(response.status).toBe(403);
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(response.status).toBe(201);
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
   });
 
   it("creates an entry without accepting identity, hash, sequence, or tenant fields", async () => {

@@ -103,6 +103,19 @@ export const ledgerEntriesQuerySchema = z
     limit: value.limit ?? LEDGER_READ_DEFAULT_LIMIT
   }));
 
+/**
+ * `POST /api/ledger/member-roles` body. Strict: a smuggled `tenantId` or an
+ * `owner` role is a 400, not ignored. Only `treasurer` (grant) and `member`
+ * (clear) can be requested; ownership is never assigned through this route.
+ */
+export const ledgerMemberRoleRequestSchema = z
+  .object({
+    groupId: uuidSchema,
+    userId: uuidSchema,
+    role: z.enum(["treasurer", "member"])
+  })
+  .strict();
+
 export type LedgerEntryRequestInput = z.input<typeof ledgerEntryRequestSchema>;
 export type ValidatedLedgerEntryRequest = z.output<typeof ledgerEntryRequestSchema>;
 

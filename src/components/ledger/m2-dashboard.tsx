@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   AlertCircle,
   ArrowRight,
@@ -36,12 +36,21 @@ import type { BankVerificationReasonCode, BankVerificationState, ReconciliationJ
 import type { LedgerErrorCode } from "@/lib/ledger/errors";
 import type { LedgerEntryType } from "@/lib/ledger/types";
 import { useSession } from "@/lib/auth/useSession";
-import { loadCorrectionTargets, type CorrectionTarget, type LiveLedgerResult } from "@/lib/ledger/clientRead";
+import { loadCorrectionTargets, type CorrectionTarget, type LiveCorrectionTarget, type LiveLedgerResult } from "@/lib/ledger/clientRead";
+import { postCorrection, type PostCorrectionResult } from "@/lib/ledger/clientCorrect";
+import { buildCorrectionRequest, CorrectionBuildError, newCorrectionIdempotencyKey } from "@/lib/ledger/correction";
 import { TibebHeaderPattern } from "@/components/cultural/TibebPattern";
 
 type Translator = ReturnType<typeof createTranslator>;
 type StatusTone = "verified" | "pending" | "danger" | "warning" | "neutral" | "info";
 type CorrectionError = "required" | "length" | "target";
+type SubmitError = "unbuildable" | Exclude<PostCorrectionResult["status"], "created">;
+type LiveCorrectionSuccess = {
+  readonly originalReference: string;
+  readonly amount: string;
+  readonly sequence: string;
+  readonly replayed: boolean;
+};
 
 type DashboardEntry = {
   readonly id: string;
@@ -194,6 +203,16 @@ const bankErrorMessageKeys: Record<BankVerificationErrorCode, MessageKey> = {
   INVALID_BINDING: "m2.apiError.invalidBinding"
 };
 
+const submitErrorMessageKeys: Record<SubmitError, MessageKey> = {
+  unbuildable: "m2.correction.live.submitError.unbuildable",
+  invalid: "m2.correction.live.submitError.invalid",
+  unauthorized: "m2.correction.live.submitError.unauthorized",
+  forbidden: "m2.correction.live.submitError.forbidden",
+  conflict: "m2.correction.live.submitError.conflict",
+  "rate-limited": "m2.correction.live.submitError.rateLimited",
+  error: "m2.correction.live.submitError.error"
+};
+
 const liveStatusMessageKeys: Record<Exclude<LiveLedgerResult["status"], "ready">, MessageKey> = {
   empty: "m2.correction.live.empty",
   unauthorized: "m2.correction.live.unauthorized",
@@ -312,6 +331,14 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
   const session = useSession();
   const signedIn = session.status === "signed-in";
   const [live, setLive] = useState<LiveLedgerResult | "loading">("loading");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<SubmitError | null>(null);
+  const [liveSuccess, setLiveSuccess] = useState<LiveCorrectionSuccess | null>(null);
+  // One idempotency key per distinct (original, rationale) attempt. A retry or a
+  // double-click of the same attempt reuses the key and the timestamp, so the
+  // server sees the identical request and can only ever post it once.
+  const attempt = useRef<{ fingerprint: string; key: string; now: Date } | null>(null);
+  const inFlight = useRef(false);
 
   // Signed in, the form's choices come from the live ledger; otherwise the
   // fixture, exactly as before there was a sign-in surface.
@@ -332,7 +359,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
     };
   }, [signedIn, correctionOpen]);
 
-  const liveTargets: readonly CorrectionTarget[] = live !== "loading" && live.status === "ready" ? live.targets : [];
+  const liveTargets: readonly LiveCorrectionTarget[] = live !== "loading" && live.status === "ready" ? live.targets : [];
   const correctionTargets: readonly CorrectionTarget[] = signedIn
     ? liveTargets
     : entries.filter((entry) => entry.type !== "correction");
@@ -350,8 +377,65 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
   function closeCorrection() {
     setCorrectionOpen(false);
     setCorrectionError(null);
+    setSubmitError(null);
+    setLiveSuccess(null);
     setCorrectionReference(null);
     setRationale("");
+  }
+
+  async function submitLiveCorrection(target: LiveCorrectionTarget, normalizedRationale: string) {
+    if (inFlight.current) {
+      return;
+    }
+    const fingerprint = `${target.id}\n${normalizedRationale}`;
+    if (attempt.current?.fingerprint !== fingerprint) {
+      attempt.current = { fingerprint, key: newCorrectionIdempotencyKey(), now: new Date() };
+    }
+    let request;
+    try {
+      request = buildCorrectionRequest({
+        original: { ...target, entryType: target.type },
+        rationale: normalizedRationale,
+        idempotencyKey: attempt.current.key,
+        now: attempt.current.now
+      });
+    } catch (error) {
+      if (!(error instanceof CorrectionBuildError)) {
+        throw error;
+      }
+      setSubmitError("unbuildable");
+      return;
+    }
+
+    inFlight.current = true;
+    setSubmitting(true);
+    setSubmitError(null);
+    setLiveSuccess(null);
+    const result = await postCorrection(request);
+    inFlight.current = false;
+    setSubmitting(false);
+
+    if (result.status === "created") {
+      attempt.current = null;
+      setLiveSuccess({
+        originalReference: target.reference,
+        amount: target.amount,
+        sequence: result.sequence,
+        replayed: result.replayed
+      });
+      setRationale("");
+      setSelectedEntryId("");
+      void loadCorrectionTargets().then(setLive);
+      return;
+    }
+    setSubmitError(result.status);
+    if (result.status === "invalid" || result.status === "conflict") {
+      // A definite answer about this exact attempt: retire its key and show
+      // the ledger as it is now, since the original may already be corrected.
+      attempt.current = null;
+      setSelectedEntryId("");
+      void loadCorrectionTargets().then(setLive);
+    }
   }
 
   function handleCorrectionSubmit(event: FormEvent<HTMLFormElement>) {
@@ -367,6 +451,11 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
     }
     if (normalizedRationale.length < 10) {
       setCorrectionError("length");
+      return;
+    }
+
+    if (signedIn) {
+      void submitLiveCorrection(selectedEntry as LiveCorrectionTarget, normalizedRationale);
       return;
     }
 
@@ -793,6 +882,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                         onChange={(event) => {
                           setSelectedEntryId(event.target.value);
                           setCorrectionError(null);
+                          setSubmitError(null);
                         }}
                         aria-describedby="correction-entry-helper"
                         className="mt-2 block min-h-11 w-full rounded-xl border border-coffee-900/20 bg-white/75 px-3 text-sm text-coffee-900 focus:border-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
@@ -830,6 +920,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                         value={rationale}
                         onChange={(event) => {
                           setRationale(event.target.value);
+                          setSubmitError(null);
                           if (correctionError) {
                             setCorrectionError(null);
                           }
@@ -853,7 +944,9 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                     <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
                       <button
                         type="submit"
-                        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-terracotta-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-terracotta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
+                        disabled={submitting}
+                        aria-busy={submitting}
+                        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-terracotta-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-terracotta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         <Plus aria-hidden="true" className="h-4 w-4" />
                         {t("m2.correction.submit")}
@@ -867,6 +960,27 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                       </button>
                     </div>
                     <p className="mt-4 text-xs leading-5 text-inkMuted">{signedIn ? t("m2.correction.live.notice") : t("m2.correction.demoNotice")}</p>
+                    {submitting ? (
+                      <p role="status" className="mt-4 text-xs font-semibold leading-5 text-inkMuted">{t("m2.correction.live.submitting")}</p>
+                    ) : null}
+                    {submitError ? (
+                      <p role="alert" className="mt-4 flex items-start gap-2 text-xs font-semibold leading-5 text-terracotta-700">
+                        <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
+                        {t(submitErrorMessageKeys[submitError])}
+                      </p>
+                    ) : null}
+                    {liveSuccess ? (
+                      <div role="status" className="mt-5 flex items-start gap-3 rounded-xl border border-[#B7DFC1] bg-[#EFFAF1] p-4 text-sm leading-6 text-[#166534]">
+                        <BadgeCheck aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0" />
+                        <div>
+                          <p className="font-bold">{t("m2.correction.live.successTitle")}</p>
+                          <p>{liveSuccess.replayed ? t("m2.correction.live.replayed") : t("m2.correction.live.successDescription")}</p>
+                          <p className="mt-1 font-semibold">{t("m2.correction.originalPreserved", { reference: liveSuccess.originalReference })}</p>
+                          <p>{t("m2.correction.compensatingAmount", { amount: formatAmount(liveSuccess.amount, locale, t) })}</p>
+                          <p>{t("m2.correction.live.createdReference", { sequence: liveSuccess.sequence })}</p>
+                        </div>
+                      </div>
+                    ) : null}
                     {correctionReference && selectedEntry ? (
                       <div role="status" className="mt-5 flex items-start gap-3 rounded-xl border border-[#B7DFC1] bg-[#EFFAF1] p-4 text-sm leading-6 text-[#166534]">
                         <BadgeCheck aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0" />

@@ -6,20 +6,34 @@ function json(body: unknown, status = 200): Response {
 }
 
 const GROUP = "22222222-2222-4222-8222-222222222222";
+const ACCOUNT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const ACCOUNT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const OCCURRED = "2026-09-01T09:00:00.000Z";
 
 function entry(id: string, sequence: string, entryType: string, extra: Record<string, unknown> = {}) {
   return {
     id,
+    groupId: GROUP,
+    occurredAt: OCCURRED,
     sequence,
     entryType,
     correctsEntryId: null,
     postings: [
-      { direction: "debit", amount: "12000.50" },
-      { direction: "credit", amount: "12000.50" }
+      { accountId: ACCOUNT_A, direction: "debit", amount: "12000.50" },
+      { accountId: ACCOUNT_B, direction: "credit", amount: "12000.50" }
     ],
     ...extra
   };
 }
+
+const carried = {
+  groupId: GROUP,
+  occurredAt: OCCURRED,
+  postings: [
+    { accountId: ACCOUNT_A, direction: "debit", amount: "12000.50" },
+    { accountId: ACCOUNT_B, direction: "credit", amount: "12000.50" }
+  ]
+};
 
 function deps(responses: Response[]) {
   const fetchImpl = vi.fn();
@@ -39,8 +53,8 @@ describe("loadCorrectionTargets", () => {
     expect(result).toEqual({
       status: "ready",
       targets: [
-        { id: "e1", type: "contribution", sequence: "7", amount: "12000.50", direction: "inbound", reference: "#7" },
-        { id: "e2", type: "disbursement", sequence: "6", amount: "12000.50", direction: "outbound", reference: "#6" }
+        { id: "e1", type: "contribution", sequence: "7", amount: "12000.50", direction: "inbound", reference: "#7", ...carried },
+        { id: "e2", type: "disbursement", sequence: "6", amount: "12000.50", direction: "outbound", reference: "#6", ...carried }
       ]
     });
     expect(d.fetchImpl.mock.calls[0][0]).toBe("/api/my-groups");
@@ -100,6 +114,14 @@ describe("loadCorrectionTargets", () => {
     ).toEqual({ status: "error" });
     const fetchImpl = vi.fn().mockRejectedValue(new Error("offline"));
     expect(await loadCorrectionTargets({ getToken: async () => "tok", fetchImpl })).toEqual({ status: "error" });
+  });
+
+  it("reports error when a posting has no account id, so a reversal is never guessed", async () => {
+    const d = deps([
+      json({ groups: [{ groupId: GROUP }] }),
+      json({ entries: [entry("e1", "1", "contribution", { postings: [{ direction: "debit", amount: "1.00" }] })] })
+    ]);
+    expect(await loadCorrectionTargets(d)).toEqual({ status: "error" });
   });
 
   it("reports error rather than guessing at a malformed entry", async () => {

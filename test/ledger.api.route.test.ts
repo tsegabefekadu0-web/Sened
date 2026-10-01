@@ -151,13 +151,13 @@ describe("POST /api/ledger/entries", () => {
     expect(payload.entry).not.toHaveProperty("idempotencyKey");
     const rpcArguments = mocks.rpc.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(rpcArguments).toEqual({
-      p_group_id: groupId,
-      p_idempotency_key: "contribution-001",
-      p_occurred_at: "2026-09-25T10:30:00.000Z",
-      p_entry_type: "contribution",
-      p_corrects_entry_id: null,
-      p_rationale: null,
-      p_postings: requestBody.postings
+      requested_group_id: groupId,
+      requested_idempotency_key: "contribution-001",
+      requested_occurred_at: "2026-09-25T10:30:00.000Z",
+      requested_entry_type: "contribution",
+      requested_corrects_entry_id: null,
+      requested_rationale: null,
+      requested_postings: requestBody.postings
     });
   });
 

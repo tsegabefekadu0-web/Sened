@@ -1,5 +1,5 @@
 import { authedFetch, NotSignedInError, type AuthedFetchDeps } from "@/lib/auth/authedFetch";
-import type { LedgerEntryType } from "./types";
+import type { LedgerEntryType, LedgerPostingInput } from "./types";
 
 /** One entry the correction form can offer as the original to correct. */
 export interface CorrectionTarget {
@@ -12,8 +12,15 @@ export interface CorrectionTarget {
   readonly reference: string;
 }
 
+/** A target read from the live ledger: carries what a reversal is built from. */
+export interface LiveCorrectionTarget extends CorrectionTarget {
+  readonly groupId: string;
+  readonly occurredAt: string;
+  readonly postings: readonly LedgerPostingInput[];
+}
+
 export type LiveLedgerResult =
-  | { readonly status: "ready"; readonly targets: readonly CorrectionTarget[] }
+  | { readonly status: "ready"; readonly targets: readonly LiveCorrectionTarget[] }
   | { readonly status: "empty" }
   | { readonly status: "unauthorized" }
   | { readonly status: "no-group" }
@@ -24,11 +31,14 @@ interface WireGroup {
   readonly groupId?: unknown;
 }
 interface WirePosting {
+  readonly accountId?: unknown;
   readonly direction?: unknown;
   readonly amount?: unknown;
 }
 interface WireEntry {
   readonly id?: unknown;
+  readonly groupId?: unknown;
+  readonly occurredAt?: unknown;
   readonly sequence?: unknown;
   readonly entryType?: unknown;
   readonly correctsEntryId?: unknown;
@@ -40,9 +50,11 @@ function minorUnits(amount: string): bigint | null {
   return match ? BigInt(match[1]) * 100n + BigInt(match[2]) : null;
 }
 
-function toTarget(entry: WireEntry): CorrectionTarget | null {
+function toTarget(entry: WireEntry): LiveCorrectionTarget | null {
   if (
     typeof entry.id !== "string" ||
+    typeof entry.groupId !== "string" ||
+    typeof entry.occurredAt !== "string" ||
     typeof entry.sequence !== "string" ||
     typeof entry.entryType !== "string" ||
     !Array.isArray(entry.postings)
@@ -50,19 +62,27 @@ function toTarget(entry: WireEntry): CorrectionTarget | null {
     return null;
   }
   let total = 0n;
+  const postings: LedgerPostingInput[] = [];
   for (const posting of entry.postings as WirePosting[]) {
-    if (posting.direction !== "debit") {
-      continue;
-    }
     const units = typeof posting.amount === "string" ? minorUnits(posting.amount) : null;
-    if (units === null) {
+    if (
+      units === null ||
+      typeof posting.accountId !== "string" ||
+      (posting.direction !== "debit" && posting.direction !== "credit")
+    ) {
       return null;
     }
-    total += units;
+    postings.push({ accountId: posting.accountId, direction: posting.direction, amount: posting.amount as string });
+    if (posting.direction === "debit") {
+      total += units;
+    }
   }
   const amount = `${total / 100n}.${(total % 100n).toString().padStart(2, "0")}`;
   return {
     id: entry.id,
+    groupId: entry.groupId,
+    occurredAt: entry.occurredAt,
+    postings,
     type: entry.entryType as LedgerEntryType,
     sequence: entry.sequence,
     amount,
@@ -125,7 +145,7 @@ export async function loadCorrectionTargets(deps: AuthedFetchDeps = {}): Promise
     }
     return targets.length === 0
       ? { status: "empty" }
-      : { status: "ready", targets: targets as CorrectionTarget[] };
+      : { status: "ready", targets: targets as LiveCorrectionTarget[] };
   } catch (error) {
     return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
   }

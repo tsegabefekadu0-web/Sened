@@ -990,4 +990,436 @@ begin
 end;
 $ledgerread$;
 
+-- ---------------------------------------------------------------------------
+-- Posting a correction (src/lib/ledger/repository.ts -> post_ledger_entry_v1)
+--
+-- POST /api/ledger/entries calls one function, public.post_ledger_entry_v1, as the
+-- signed-in user. A correction is an ordinary entry with entry_type 'correction',
+-- corrects_entry_id and a rationale. The function itself checks identity, the
+-- global role claim, group management rights, the idempotency key and shape; the
+-- compensating-entry rules (exact reversal, not before the original, one
+-- correction per original) live in a DEFERRED constraint trigger, so they fire at
+-- commit rather than inside the call. A DO block is a single transaction, so each
+-- refusal below calls `set constraints all immediate` after the call, which is
+-- exactly what COMMIT would do, and expects the trigger to raise.
+--
+-- All writes here go through the function as `authenticated`; counts are taken as
+-- the superuser, because RLS would otherwise hide the very rows being counted.
+-- ---------------------------------------------------------------------------
+do $ledgercorrect$
+declare
+  tre_uid constant text := '11111111-1111-4111-8111-111111111111';  -- owner of group C
+  oth_uid constant text := '22222222-2222-4222-8222-222222222222';  -- owns group B, not a member of C
+  mem_uid constant text := '33333333-3333-4333-8333-333333333333';  -- plain member of group C
+  claims_owner constant text := '{"sub":"11111111-1111-4111-8111-111111111111","app_metadata":{"role":"owner"}}';
+  group_c   uuid;
+  group_b   uuid;
+  cash_c    uuid;
+  income_c  uuid;
+  filler    jsonb;
+  orig      jsonb;
+  orig2     jsonb;
+  corr      jsonb;
+  replay    jsonb;
+  fwd       jsonb;
+  rev       jsonb;
+  rev_wrong_amount jsonb;
+  orig_id   uuid;
+  orig2_id  uuid;
+  names     text[];
+  n         bigint;
+  e0        bigint;
+  p0        bigint;
+  h0        bigint;
+  e1        bigint;
+  p1        bigint;
+  head_seq  bigint;
+  head_hash text;
+begin
+  -- ---- Fixture: a fresh group provisioned by the treasurer --------------------
+  perform set_config('request.jwt.claim.sub', tre_uid, false);
+  perform set_config('request.jwt.claims', claims_owner, false);
+  group_c := (public.sened_ledger_provision_group_v1('Correction test equb') ->> 'groupId')::uuid;
+  select id into cash_c from public.ledger_accounts where group_id = group_c and code = 'POT_CASH';
+  select id into income_c from public.ledger_accounts where group_id = group_c and code = 'CONTRIBUTION_INCOME';
+  select group_id into group_b from public.ledger_entries
+    where idempotency_key = 'ledger-read-other-tenant' limit 1;
+
+  fwd := jsonb_build_array(
+    jsonb_build_object('accountId', cash_c, 'direction', 'debit', 'amount', '500.25'),
+    jsonb_build_object('accountId', income_c, 'direction', 'credit', 'amount', '500.25'));
+  rev := jsonb_build_array(
+    jsonb_build_object('accountId', cash_c, 'direction', 'credit', 'amount', '500.25'),
+    jsonb_build_object('accountId', income_c, 'direction', 'debit', 'amount', '500.25'));
+  rev_wrong_amount := jsonb_build_array(
+    jsonb_build_object('accountId', cash_c, 'direction', 'credit', 'amount', '500.24'),
+    jsonb_build_object('accountId', income_c, 'direction', 'debit', 'amount', '500.24'));
+
+  -- ---- Sanity (superuser): the fixture is what the checks below assume --------
+  if group_c is null or cash_c is null or income_c is null then
+    raise exception 'LEDGER CORRECT 0 FAILED: fixture group or accounts missing';
+  end if;
+  if group_b is null then
+    raise exception 'LEDGER CORRECT 0 FAILED: the other tenant''s group from the read checks is missing';
+  end if;
+  select count(*) into n from public.ledger_entries where group_id = group_c;
+  if n <> 0 then raise exception 'LEDGER CORRECT 0 FAILED: group C should start empty, has % entries', n; end if;
+
+  -- The RPC's parameter names are what PostgREST binds a JSON body to. If the
+  -- application sends different names the call never reaches the function.
+  select proargnames into names from pg_proc
+    where proname = 'post_ledger_entry_v1' and pronamespace = 'public'::regnamespace;
+  raise notice 'post_ledger_entry_v1 argument names: %', names;
+  if names is distinct from array[
+       'requested_group_id', 'requested_idempotency_key', 'requested_occurred_at',
+       'requested_entry_type', 'requested_corrects_entry_id', 'requested_rationale',
+       'requested_postings'] then
+    raise exception 'LEDGER CORRECT 0 FAILED: unexpected argument names %', names;
+  end if;
+
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status)
+  values (group_c, tre_uid::uuid, mem_uid::uuid, 'member', 'active');
+
+  -- ---- Three plain entries as the treasurer (named notation, as PostgREST) ----
+  set local role authenticated;
+  filler := public.post_ledger_entry_v1(
+    requested_group_id => group_c, requested_idempotency_key => 'corr-filler',
+    requested_occurred_at => '2026-01-05T09:00:00Z', requested_entry_type => 'contribution',
+    requested_corrects_entry_id => null, requested_rationale => null, requested_postings => fwd);
+  orig := public.post_ledger_entry_v1(
+    group_c, 'corr-original', '2026-01-10T10:00:00Z', 'contribution', null, null, fwd);
+  orig2 := public.post_ledger_entry_v1(
+    group_c, 'corr-original-2', '2026-02-01T10:00:00Z', 'contribution', null, null, fwd);
+  reset role;
+  orig_id := (orig -> 'entry' ->> 'id')::uuid;
+  orig2_id := (orig2 -> 'entry' ->> 'id')::uuid;
+
+  select count(*) into n from public.ledger_entries where group_id = group_c;
+  if n <> 3 then raise exception 'LEDGER CORRECT 0 FAILED: expected 3 plain entries, found %', n; end if;
+  select count(*) into n from public.ledger_entry_postings where entry_id = orig_id;
+  if n <> 2 then raise exception 'LEDGER CORRECT 0 FAILED: the original should have 2 postings, has %', n; end if;
+  -- A deferred trigger that never fires would make every refusal below vacuous
+  -- in the other direction, so prove the trigger really is deferred and live.
+  if not exists (
+    select 1 from pg_trigger
+    where tgname = 'ledger_entries_validate_at_commit' and tgdeferrable and tginitdeferred
+  ) then
+    raise exception 'LEDGER CORRECT 0 FAILED: the correction validation trigger is not a deferred constraint trigger';
+  end if;
+
+  -- ---- Refusals against an UNCORRECTED original (E2) --------------------------
+  select count(*) into e0 from public.ledger_entries;
+  select count(*) into p0 from public.ledger_entry_postings;
+  select count(*) into h0 from public.ledger_group_heads where last_sequence > 0;
+  select last_sequence into head_seq from public.ledger_group_heads where group_id = group_c;
+  if head_seq <> 3 then raise exception 'LEDGER CORRECT 0 FAILED: head should be at sequence 3, is %', head_seq; end if;
+
+  set local role authenticated;
+
+  -- 5a. Wrong amount.
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-wrong-amount', '2026-03-02T10:00:00Z',
+      'correction', orig2_id, 'Amount typed wrong in error', rev_wrong_amount);
+    set constraints all immediate;
+    raise exception 'LEDGER CORRECT 5 FAILED: a correction with the wrong amount was ACCEPTED';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_invalid_correction_amounts%' then
+      raise exception 'LEDGER CORRECT 5 FAILED: wrong rejection reason for a wrong amount: %', sqlerrm;
+    end if;
+    raise notice 'CORRECT 5a: wrong amount refused (%)', sqlerrm;
+  end;
+  set constraints all deferred;
+
+  -- 5b. Wrong direction: same sides as the original, so balanced but not reversed.
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-wrong-direction', '2026-03-02T10:00:00Z',
+      'correction', orig2_id, 'Direction not flipped by mistake', fwd);
+    set constraints all immediate;
+    raise exception 'LEDGER CORRECT 5 FAILED: a correction that is not reversed was ACCEPTED';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_invalid_correction_amounts%' then
+      raise exception 'LEDGER CORRECT 5 FAILED: wrong rejection reason for a wrong direction: %', sqlerrm;
+    end if;
+    raise notice 'CORRECT 5b: wrong direction refused (%)', sqlerrm;
+  end;
+  set constraints all deferred;
+
+  -- 6. Dated before the original (E2 occurred 2026-02-01), otherwise an exact reversal.
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-predated', '2026-01-15T10:00:00Z',
+      'correction', orig2_id, 'Dated before the original entry', rev);
+    set constraints all immediate;
+    raise exception 'LEDGER CORRECT 6 FAILED: a correction dated before its original was ACCEPTED';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_invalid_correction_time%' then
+      raise exception 'LEDGER CORRECT 6 FAILED: wrong rejection reason for a predated correction: %', sqlerrm;
+    end if;
+    raise notice 'CORRECT 6: predated correction refused (%)', sqlerrm;
+  end;
+  set constraints all deferred;
+
+  -- A correction that targets nothing real (random id) is refused too.
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-ghost-target', '2026-03-02T10:00:00Z',
+      'correction', gen_random_uuid(), 'Targets an entry that is not there', rev);
+    set constraints all immediate;
+    raise exception 'LEDGER CORRECT 6 FAILED: a correction of a nonexistent entry was ACCEPTED';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    raise notice 'CORRECT 6b: nonexistent target refused (%)', sqlerrm;
+  end;
+  set constraints all deferred;
+
+  reset role;
+  select count(*) into e1 from public.ledger_entries;
+  select count(*) into p1 from public.ledger_entry_postings;
+  if e1 <> e0 or p1 <> p0 then
+    raise exception 'LEDGER CORRECT 5/6 FAILED: refusals changed row counts (entries % -> %, postings % -> %)', e0, e1, p0, p1;
+  end if;
+  select last_sequence into head_seq from public.ledger_group_heads where group_id = group_c;
+  if head_seq <> 3 then raise exception 'LEDGER CORRECT 5/6 FAILED: refusals advanced the head to %', head_seq; end if;
+
+  -- ---- 1. A correct correction: exact reversal of the original ----------------
+  set local role authenticated;
+  corr := public.post_ledger_entry_v1(group_c, 'corr-ok', '2026-03-01T10:00:00Z',
+    'correction', orig_id, 'Posted to the wrong account', rev);
+  set constraints all immediate;   -- what COMMIT does; raises if the reversal is wrong
+  set constraints all deferred;
+  reset role;
+
+  if corr ->> 'replayed' <> 'false' then
+    raise exception 'LEDGER CORRECT 1 FAILED: a first post reported replayed = %', corr ->> 'replayed';
+  end if;
+  if corr -> 'entry' ->> 'entryType' <> 'correction'
+     or (corr -> 'entry' ->> 'correctsEntryId')::uuid <> orig_id then
+    raise exception 'LEDGER CORRECT 1 FAILED: the stored entry is not a correction of the original: %', corr -> 'entry';
+  end if;
+  select count(*) into n
+  from public.ledger_entry_postings c
+  join public.ledger_entry_postings o
+    on o.account_id = c.account_id and o.amount = c.amount and o.direction <> c.direction
+  where c.entry_id = (corr -> 'entry' ->> 'id')::uuid and o.entry_id = orig_id;
+  if n <> 2 then
+    raise exception 'LEDGER CORRECT 1 FAILED: stored postings are not the exact reverse (% of 2 pairs matched)', n;
+  end if;
+  select count(*) into n from public.ledger_entry_postings where entry_id = (corr -> 'entry' ->> 'id')::uuid;
+  if n <> 2 then raise exception 'LEDGER CORRECT 1 FAILED: the correction has % postings, expected 2', n; end if;
+  raise notice 'CORRECT 1: correction % reverses % (sequence %)',
+    corr -> 'entry' ->> 'id', orig_id, corr -> 'entry' ->> 'sequence';
+
+  -- ---- 9. Hash chain and sequence ---------------------------------------------
+  -- The entry just before the correction is E2 (sequence 3).
+  if (corr -> 'entry' ->> 'sequence') <> '4' then
+    raise exception 'LEDGER CORRECT 9 FAILED: correction sequence is %, expected 4', corr -> 'entry' ->> 'sequence';
+  end if;
+  if corr -> 'entry' ->> 'previousHash' <> orig2 -> 'entry' ->> 'entryHash' then
+    raise exception 'LEDGER CORRECT 9 FAILED: previous_hash does not equal the prior entry''s entry_hash';
+  end if;
+  if corr -> 'entry' ->> 'entryHash' = orig2 -> 'entry' ->> 'entryHash' then
+    raise exception 'LEDGER CORRECT 9 FAILED: the correction reused the prior entry hash';
+  end if;
+  select last_sequence, last_hash into head_seq, head_hash
+    from public.ledger_group_heads where group_id = group_c;
+  if head_seq <> 4 or head_hash <> corr -> 'entry' ->> 'entryHash' then
+    raise exception 'LEDGER CORRECT 9 FAILED: head is (%, %), expected (4, correction hash)', head_seq, head_hash;
+  end if;
+  -- Whole chain: sequences are 1..4 with no gap, each previous_hash is the prior hash.
+  select count(*) into n from (
+    select sequence, previous_hash,
+           lag(entry_hash, 1, repeat('0', 64)) over (order by sequence) as expected_prev,
+           lag(sequence, 1, 0::bigint) over (order by sequence) as prev_seq
+    from public.ledger_entries where group_id = group_c
+  ) chain
+  where chain.previous_hash <> chain.expected_prev or chain.sequence <> chain.prev_seq + 1;
+  if n <> 0 then raise exception 'LEDGER CORRECT 9 FAILED: % entries break the hash chain or sequence', n; end if;
+
+  select count(*) into e0 from public.ledger_entries;
+  select count(*) into p0 from public.ledger_entry_postings;
+
+  set local role authenticated;
+
+  -- ---- 2. Replay: same key, same payload --------------------------------------
+  replay := public.post_ledger_entry_v1(group_c, 'corr-ok', '2026-03-01T10:00:00Z',
+    'correction', orig_id, 'Posted to the wrong account', rev);
+  if replay ->> 'replayed' <> 'true' then
+    raise exception 'LEDGER CORRECT 2 FAILED: a replay reported replayed = %', replay ->> 'replayed';
+  end if;
+  if replay -> 'entry' ->> 'id' <> corr -> 'entry' ->> 'id'
+     or replay -> 'entry' ->> 'entryHash' <> corr -> 'entry' ->> 'entryHash'
+     or replay -> 'entry' -> 'postings' is distinct from corr -> 'entry' -> 'postings' then
+    raise exception 'LEDGER CORRECT 2 FAILED: the replay did not return the original result';
+  end if;
+
+  -- ---- 3. Same key, different payload -----------------------------------------
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-ok', '2026-03-01T10:00:00Z',
+      'correction', orig_id, 'A different rationale entirely', rev);
+    raise exception 'LEDGER CORRECT 3 FAILED: a changed payload under the same key was ACCEPTED';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_idempotency_conflict%' then
+      raise exception 'LEDGER CORRECT 3 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-ok', '2026-03-01T10:00:00Z',
+      'correction', orig_id, 'Posted to the wrong account', rev_wrong_amount);
+    raise exception 'LEDGER CORRECT 3 FAILED: changed postings under the same key were ACCEPTED';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_idempotency_conflict%' then
+      raise exception 'LEDGER CORRECT 3 FAILED: wrong rejection reason (postings): %', sqlerrm;
+    end if;
+  end;
+
+  -- ---- 4. A second correction of the same original, new key -------------------
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-second', '2026-03-05T10:00:00Z',
+      'correction', orig_id, 'Trying to correct it twice', rev);
+    set constraints all immediate;
+    raise exception 'LEDGER CORRECT 4 FAILED: a second correction of the same original was ACCEPTED';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_entries_one_correction_per_original_idx%'
+       and sqlerrm not like '%ledger_invalid_correction_duplicate%' then
+      raise exception 'LEDGER CORRECT 4 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+    raise notice 'CORRECT 4: second correction refused (%)', sqlerrm;
+  end;
+  set constraints all deferred;
+
+  -- ---- 7. Authorization --------------------------------------------------------
+  -- 7a. A plain member of the group. The JWT carries a global write role, so only
+  -- the group-membership check can refuse this.
+  perform set_config('request.jwt.claim.sub', mem_uid, false);
+  perform set_config('request.jwt.claims',
+    '{"sub":"33333333-3333-4333-8333-333333333333","app_metadata":{"role":"owner"}}', false);
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-member', now(), 'contribution', null, null, fwd);
+    raise exception 'LEDGER CORRECT 7 FAILED: a plain member posted an entry';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'LEDGER CORRECT 7 FAILED: member refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  -- 7b. A plain member with no global role either.
+  perform set_config('request.jwt.claims',
+    '{"sub":"33333333-3333-4333-8333-333333333333","app_metadata":{"role":"member"}}', false);
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-member-2', now(), 'contribution', null, null, fwd);
+    raise exception 'LEDGER CORRECT 7 FAILED: a member without the write role posted an entry';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'LEDGER CORRECT 7 FAILED: role-less member refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  -- 7c. The group's own owner, but a JWT without any write role: the global claim gates it.
+  perform set_config('request.jwt.claim.sub', tre_uid, false);
+  perform set_config('request.jwt.claims',
+    '{"sub":"11111111-1111-4111-8111-111111111111","app_metadata":{}}', false);
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-norole', now(), 'contribution', null, null, fwd);
+    raise exception 'LEDGER CORRECT 7 FAILED: an owner whose JWT has no write role posted an entry';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'LEDGER CORRECT 7 FAILED: no-role JWT refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  -- 7d. A treasurer of another tenant (owner of group B, no membership in C).
+  perform set_config('request.jwt.claim.sub', oth_uid, false);
+  perform set_config('request.jwt.claims',
+    '{"sub":"22222222-2222-4222-8222-222222222222","app_metadata":{"role":"owner"}}', false);
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-outsider', now(), 'contribution', null, null, fwd);
+    raise exception 'LEDGER CORRECT 7 FAILED: a non-member of another tenant posted into group C';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'LEDGER CORRECT 7 FAILED: outsider refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  -- ...and cannot correct group C's entry either, even naming the right ids.
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-outsider-2', '2026-04-01T10:00:00Z',
+      'correction', orig2_id, 'Outsider tries to correct it', rev);
+    raise exception 'LEDGER CORRECT 7 FAILED: a non-member posted a correction into group C';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'LEDGER CORRECT 7 FAILED: outsider correction refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  -- 7e. The group C owner cannot write into the other tenant's group B.
+  perform set_config('request.jwt.claim.sub', tre_uid, false);
+  perform set_config('request.jwt.claims', claims_owner, false);
+  begin
+    perform public.post_ledger_entry_v1(group_b, 'corr-cross-tenant', now(), 'contribution', null, null, fwd);
+    raise exception 'LEDGER CORRECT 7 FAILED: the owner of group C wrote into group B';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'LEDGER CORRECT 7 FAILED: cross-tenant write refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  -- 7f. Authenticated role but no subject at all.
+  perform set_config('request.jwt.claim.sub', '', false);
+  perform set_config('request.jwt.claims', '{"role":"authenticated"}', false);
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-nosub', now(), 'contribution', null, null, fwd);
+    raise exception 'LEDGER CORRECT 7 FAILED: a request with no subject posted an entry';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'LEDGER CORRECT 7 FAILED: subject-less request refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  -- ---- 8. anon -------------------------------------------------------------------
+  perform set_config('request.jwt.claim.sub', '', false);
+  perform set_config('request.jwt.claim.role', 'anon', false);
+  perform set_config('request.jwt.claims', '{"role":"anon"}', false);
+  set local role anon;
+  begin
+    perform public.post_ledger_entry_v1(group_c, 'corr-anon', now(), 'contribution', null, null, fwd);
+    raise exception 'LEDGER CORRECT 8 FAILED: anon posted an entry';
+  exception when others then
+    if sqlerrm like 'LEDGER CORRECT%' then raise; end if;
+    if sqlerrm not like '%permission denied%' then
+      raise exception 'LEDGER CORRECT 8 FAILED: anon refused for the wrong reason: %', sqlerrm;
+    end if;
+    raise notice 'CORRECT 8: anon refused (%)', sqlerrm;
+  end;
+  reset role;
+
+  -- ---- Nothing written by any refusal after the correction ----------------------
+  select count(*) into e1 from public.ledger_entries;
+  select count(*) into p1 from public.ledger_entry_postings;
+  if e1 <> e0 or p1 <> p0 then
+    raise exception 'LEDGER CORRECT 2-8 FAILED: replay/refusals changed row counts (entries % -> %, postings % -> %)', e0, e1, p0, p1;
+  end if;
+  select last_sequence, last_hash into head_seq, head_hash
+    from public.ledger_group_heads where group_id = group_c;
+  if head_seq <> 4 or head_hash <> corr -> 'entry' ->> 'entryHash' then
+    raise exception 'LEDGER CORRECT 2-8 FAILED: a refusal or replay moved the chain head to (%, %)', head_seq, head_hash;
+  end if;
+  select count(*) into n from public.ledger_entries
+    where group_id in (group_c, group_b) and idempotency_key like 'corr-%' and idempotency_key not in
+      ('corr-filler', 'corr-original', 'corr-original-2', 'corr-ok');
+  if n <> 0 then raise exception 'LEDGER CORRECT 7 FAILED: % rows were written under a refused key', n; end if;
+
+  -- ---- Restore the session identity the rest of the file expects ----------------
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
+  perform set_config('request.jwt.claim.sub', tre_uid, false);
+  perform set_config('request.jwt.claims', claims_owner, false);
+  raise notice 'LEDGER CORRECT: all 9 correction checks passed';
+end;
+$ledgercorrect$;
+
 select 'ALL DRAW BINDING CHECKS PASSED' as result;

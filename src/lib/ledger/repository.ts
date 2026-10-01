@@ -421,13 +421,13 @@ export class SupabaseLedgerRepository implements LedgerRepository {
     const request = normalizeLedgerEntryRequest(requestInput);
     const actorId = assertContext(context);
     const { data, error } = await this.client.rpc("post_ledger_entry_v1", {
-      p_group_id: request.groupId,
-      p_idempotency_key: request.idempotencyKey,
-      p_occurred_at: request.occurredAt,
-      p_entry_type: request.entryType,
-      p_corrects_entry_id: request.correctsEntryId ?? null,
-      p_rationale: request.rationale ?? null,
-      p_postings: request.postings.map((posting) => ({ ...posting }))
+      requested_group_id: request.groupId,
+      requested_idempotency_key: request.idempotencyKey,
+      requested_occurred_at: request.occurredAt,
+      requested_entry_type: request.entryType,
+      requested_corrects_entry_id: request.correctsEntryId ?? null,
+      requested_rationale: request.rationale ?? null,
+      requested_postings: request.postings.map((posting) => ({ ...posting }))
     });
     if (error) {
       throw mapSupabaseError(error);

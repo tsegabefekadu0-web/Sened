@@ -11,13 +11,8 @@ export default function DrawPage() {
 
   return (
     <main className="min-h-screen w-full bg-[#120D0A] flex flex-col items-center justify-center sm:py-6 antialiased selection:bg-amber-500 selection:text-coffee-950">
-      <div className="w-full max-w-[396px] bg-[#FAF6F0] h-[100dvh] sm:h-[844px] flex flex-col relative overflow-hidden sm:rounded-[48px] sm:border-[8px] sm:border-[#261E1A] sm:shadow-[0_25px_80px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.08)]">
-        {/*
-          A1 owns `src/app/page.tsx` and links here during integration
-          (docs/requests/agent-3.md R-4). The frame classes above are copied
-          verbatim from `page.tsx:60-62` so this route is indistinguishable from
-          the M1 shell it will one day sit beside.
-        */}
+      {/* Responsive Shell Frame: Native 100% on phone, expansive premium dashboard canvas on desktop */}
+      <div className="w-full md:max-w-5xl lg:max-w-6xl bg-[#FAF6F0] h-[100dvh] md:h-[92vh] md:min-h-[820px] md:max-h-[960px] flex flex-col relative overflow-hidden md:rounded-3xl md:border md:border-[#382B24]/50 md:shadow-[0_25px_80px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.06)]">
         <header className="flex items-center justify-between gap-3 border-b border-[#322722] bg-[#1C1410] px-4 py-3 select-none">
           <div className="flex items-center gap-2.5">
             <MeskelCross className="h-7 w-7 drop-shadow-sm" />

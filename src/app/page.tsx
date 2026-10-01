@@ -151,26 +151,28 @@ export default function SenedHome() {
 
   return (
     <main className="min-h-screen w-full bg-[#120D0A] flex flex-col items-center justify-center sm:py-6 antialiased selection:bg-amber-500 selection:text-coffee-950">
-      {/* Mobile Shell Frame: Native 100% on phone, sleek mobile canvas on desktop */}
-      <div className="w-full max-w-[396px] bg-[#FAF6F0] h-[100dvh] sm:h-[844px] flex flex-col relative overflow-hidden sm:rounded-[48px] sm:border-[8px] sm:border-[#261E1A] sm:shadow-[0_25px_80px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.08)]">
+      {/* Responsive Shell Frame: Native 100% on phone, expansive premium dashboard canvas on desktop */}
+      <div className="w-full md:max-w-5xl lg:max-w-6xl bg-[#FAF6F0] h-[100dvh] md:h-[92vh] md:min-h-[820px] md:max-h-[960px] flex flex-col relative overflow-hidden md:rounded-3xl md:border md:border-[#382B24]/50 md:shadow-[0_25px_80px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.06)]">
         {/* Dark Ethiopian Coffee Header with Embroidery, Meskel Cross & Audio Plaque */}
         <Header
           onOpenDigest={() => setIsDigestModalOpen(true)}
           isPlayingAudio={isDigestModalOpen}
         />
 
-        {/* Scrollable Main Content Area */}
+        {/* Main Content Area: Native vertical stream on mobile, 2-column responsive dashboard on desktop */}
         <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden no-scrollbar">
-          {/* Floating Stitched Leather Debter Card with Mesob & Carousel Peek.
-              The card says "ቀጣይ እጣ" (next draw), so tapping it goes to the draw
-              engine. It used to open the audio digest, which is a placeholder
-              for a different feature — A3 R-4. */}
-          <DebterCard potBalance={potBalance} onDrawClick={() => router.push("/draw")} />
+          <div className="w-full md:grid md:grid-cols-12 md:gap-6 md:p-6 md:items-start max-w-5xl mx-auto">
+            {/* Left Column on Desktop: Debter Treasury Card & Built Tools */}
+            <div className="md:col-span-6 space-y-4">
+              <DebterCard potBalance={potBalance} onDrawClick={() => router.push("/draw")} />
+              <WorkspaceLinks />
+            </div>
 
-          <WorkspaceLinks />
-
-          {/* Member contributions on Parchment */}
-          <ContributionFeed contributions={contributions} />
+            {/* Right Column on Desktop: Member Contribution Feed */}
+            <div className="md:col-span-6">
+              <ContributionFeed contributions={contributions} />
+            </div>
+          </div>
         </div>
 
         {/* Curved Dark Espresso Voice Navigation Bar.

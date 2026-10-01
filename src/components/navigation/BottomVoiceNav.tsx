@@ -23,7 +23,7 @@ export function BottomVoiceNav({
   return (
     <nav className="relative z-30 select-none w-full shrink-0 pointer-events-auto">
       {/* SVG Background with Smooth Arched Cutout and Gold Top Rim */}
-      <div className="relative w-full h-[96px] flex flex-col justify-end bg-transparent">
+      <div className="relative w-full max-w-[420px] mx-auto h-[96px] flex flex-col justify-end bg-transparent">
         <svg
           viewBox="0 0 420 96"
           fill="none"

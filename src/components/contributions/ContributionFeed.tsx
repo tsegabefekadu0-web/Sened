@@ -84,7 +84,7 @@ export function ContributionFeed({
     contribution.channel ? t(CHANNEL_KEY[contribution.channel] as never) : t("shell.feed.channelNone");
 
   return (
-    <section className="w-full max-w-md mx-auto px-4 pt-4 pb-20 select-none">
+    <section className="w-full max-w-md md:max-w-none mx-auto px-4 md:px-0 pt-4 md:pt-2 pb-20 md:pb-8 select-none">
       {/* Section Title */}
       <h3 className="text-[17px] font-bold text-[#140E0A] tracking-tight mb-3.5 px-0.5 font-sans">
         {t("shell.feed.title")}

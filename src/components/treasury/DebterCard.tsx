@@ -26,7 +26,7 @@ export function DebterCard({
   const t = useMemo(() => createTranslator(locale), [locale]);
 
   return (
-    <div className="relative w-full max-w-md mx-auto pt-7 pb-2 px-4 select-none animate-[debterEnter_0.6s_cubic-bezier(0.22,1,0.36,1)_both]">
+    <div className="relative w-full max-w-md md:max-w-none mx-auto pt-7 md:pt-2 pb-2 px-4 md:px-0 select-none animate-[debterEnter_0.6s_cubic-bezier(0.22,1,0.36,1)_both]">
       {/* Horizontal Carousel Container: Main Debter Card + Peek Card */}
       <div className="relative flex items-stretch gap-2.5">
         {/* Main Saddle Leather Debter Card */}

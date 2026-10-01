@@ -57,7 +57,7 @@ export function WorkspaceLinks() {
   return (
     <nav
       aria-label="Built tools"
-      className="w-full max-w-md mx-auto px-4 pt-5 select-none"
+      className="w-full max-w-md md:max-w-none mx-auto px-4 md:px-0 pt-5 select-none"
     >
       <ul className="flex gap-2.5">
         {DESTINATIONS.map(({ href, icon: Icon, label, sub }) => (

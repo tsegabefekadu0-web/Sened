@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Header } from "@/components/shell/Header";
 import { WorkspaceLinks } from "@/components/shell/WorkspaceLinks";
@@ -10,7 +11,9 @@ import { BottomVoiceNav } from "@/components/navigation/BottomVoiceNav";
 import { VoiceModal } from "@/components/voice/VoiceModal";
 import { AudioDigestModal } from "@/components/voice/AudioDigestModal";
 import { TabPanel } from "@/components/shell/TabPanel";
-import type { Locale } from "@/lib/i18n";
+import { createTranslator, type Locale } from "@/lib/i18n";
+import { useSession } from "@/lib/auth/useSession";
+import { requestBankVerification } from "@/lib/voice/clientVerify";
 import { getSenedDatabase, isOfflineStorageAvailable } from "@/lib/db";
 import { saveSpokenNote } from "@/lib/db/notes";
 import type { PaymentChannel, SpokenNoteLocale } from "@/lib/db/types";
@@ -89,6 +92,11 @@ export default function SenedHome() {
   // surface to call `t()` rather than hard-coding literals, which the rest of
   // the Gen A tree still does.
   const [locale] = useState<Locale>("am");
+  const t = createTranslator(locale);
+  // Signed in -> the voice flow POSTs to /api/bank-verifications. Anything else
+  // (loading, unconfigured, signed out) keeps the on-device provisional path.
+  const session = useSession();
+  const signedIn = session.status === "signed-in";
   const [activeTab, setActiveTab] = useState<"home" | "ledger" | "members" | "profile">("home");
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isDigestModalOpen, setIsDigestModalOpen] = useState(false);
@@ -166,6 +174,14 @@ export default function SenedHome() {
             <div className="md:col-span-6 space-y-4">
               <DebterCard potBalance={potBalance} onDrawClick={() => router.push("/draw")} />
               <WorkspaceLinks />
+              <p className="px-4 md:px-0 text-center">
+                <Link
+                  href="/sign-in"
+                  className="inline-flex min-h-11 items-center text-xs font-semibold text-[#8A4B2A] underline underline-offset-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
+                >
+                  {signedIn ? t("auth.linkSignedIn") : t("auth.link")}
+                </Link>
+              </p>
             </div>
 
             {/* Right Column on Desktop: Member Contribution Feed */}
@@ -193,15 +209,16 @@ export default function SenedHome() {
         )}
 
         {/* Spoken Voice Logging Modal.
-            No `onRequestVerification` is wired: that handler must POST to
-            /api/bank-verifications, which requires a signed-in treasurer with a
-            bound account. Without it the primary action is a local provisional
-            record — honest, and what a treasurer during a meeting actually has.
-            See board task #14. */}
+            Signed in: the primary action POSTs to /api/bank-verifications with
+            the session's Bearer token (`requestBankVerification`), and only a
+            server VERIFIED counts. Signed out or unconfigured: the primary
+            action is a local provisional record — honest, and what a treasurer
+            during a meeting actually has. See board task #14 / O-1. */}
         <VoiceModal
           isOpen={isVoiceModalOpen}
           onClose={() => setIsVoiceModalOpen(false)}
-          onRecordLocally={recordVoiceNoteLocally}
+          onRequestVerification={signedIn ? requestBankVerification : undefined}
+          onRecordLocally={signedIn ? undefined : recordVoiceNoteLocally}
         />
 
         {/* Spoken Audio Balance Sheet Modal (Voxide TTS Digest) */}

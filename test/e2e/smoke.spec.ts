@@ -23,7 +23,8 @@ const PAGES = [
   { path: "/voice", name: "voice pipeline" },
   { path: "/draw", name: "fair draw" },
   { path: "/ledger", name: "ledger review" },
-  { path: "/offline", name: "offline console" }
+  { path: "/offline", name: "offline console" },
+  { path: "/sign-in", name: "sign-in (unconfigured)" }
 ] as const;
 
 /** Strings that must never appear in a rendered page. */

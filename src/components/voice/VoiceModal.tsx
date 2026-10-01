@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { authedFetch, NotSignedInError } from "@/lib/auth/authedFetch";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -48,6 +49,8 @@ export interface BankVerificationOutcome {
   /** Only a real `VERIFIED` state from AGENT-1's route may say `true`. */
   readonly verified: boolean;
   readonly verificationId?: string;
+  /** Why it was not verified, in the caller's words; defaults to the generic reason. */
+  readonly notice?: MessageKey;
 }
 
 export interface VoiceModalProps {
@@ -244,7 +247,7 @@ export function VoiceModal({
 
     setStage("transcribing");
     setTranscribeError(null);
-    const response = await fetch("/api/voice/transcribe", {
+    const transcribeInit: RequestInit = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -253,6 +256,14 @@ export function VoiceModal({
         language,
         durationMs: result.durationMs
       })
+    };
+    // The route requires a Bearer session. Send it when there is one; signed
+    // out, fall through to the plain request so the 401 degrades to type-in.
+    const response = await authedFetch("/api/voice/transcribe", transcribeInit).catch((error: unknown) => {
+      if (error instanceof NotSignedInError) {
+        return fetch("/api/voice/transcribe", transcribeInit);
+      }
+      throw error;
     });
 
     if (!response.ok) {
@@ -314,7 +325,7 @@ export function VoiceModal({
     try {
       const outcome = await onRequestVerification(draft);
       if (!outcome.verified) {
-        setSubmitError(t("voice.submitUnverifiedReason"));
+        setSubmitError(t(outcome.notice ?? "voice.submitUnverifiedReason"));
         return;
       }
       // A genuine bank VERIFIED. The result — not the transcript — is what the

@@ -296,7 +296,9 @@ export class BankVerificationService {
       : null;
     let ledgerEntryId: string | null = null;
     if (assessment.state === "VERIFIED" && this.ledgerSink) {
-      ledgerEntryId = await this.ledgerSink.postVerifiedContribution(created.intent);
+      // The stored intent is still PENDING_RECONCILIATION here (the result is recorded
+      // after this posts), but the sink refuses anything not VERIFIED.
+      ledgerEntryId = await this.ledgerSink.postVerifiedContribution({ ...created.intent, state: "VERIFIED" });
     }
     const nextAttemptAt =
       assessment.state === "PENDING_RECONCILIATION"
@@ -382,7 +384,7 @@ export class BankVerificationService {
       : null;
     let ledgerEntryId: string | null = null;
     if (assessment.state === "VERIFIED" && this.ledgerSink) {
-      ledgerEntryId = await this.ledgerSink.postVerifiedContribution(intent);
+      ledgerEntryId = await this.ledgerSink.postVerifiedContribution({ ...intent, state: "VERIFIED" });
     }
     return {
       state: assessment.state,

@@ -399,7 +399,12 @@ function mapSupabaseError(error: { readonly code?: string; readonly message: str
   if (message.includes("ledger_entry_unbalanced")) {
     return new LedgerError("UNBALANCED", "Entry debits and credits do not balance", error);
   }
-  if (message.includes("ledger_invalid_correction")) {
+  if (
+    message.includes("ledger_invalid_correction") ||
+    // The database's own backstop: a second correction of one entry trips this
+    // unique index (SQLSTATE 23505) before the trigger's friendlier message.
+    (error.code === "23505" && message.includes("ledger_entries_one_correction_per_original_idx"))
+  ) {
     return new LedgerError("INVALID_CORRECTION", "Ledger correction validation failed", error);
   }
   if (error.code === "22023" || message.includes("ledger_invalid_request") || message.includes("ledger_invalid_posting") || message.includes("ledger_entry_has_no_postings")) {

@@ -382,6 +382,7 @@ language plpgsql
 security definer
 set search_path = public, private, pg_temp
 as $$
+#variable_conflict use_column
 declare
   actor uuid := auth.uid();
   binding_row public.bank_account_bindings%rowtype;
@@ -425,14 +426,14 @@ begin
   end if;
 
   request_fingerprint := encode(sha256(convert_to(
-    'sened-bank-verification-request-v1' || chr(0) ||
-    p_provider || chr(0) ||
-    p_binding_id::text || chr(0) ||
-    p_provider_reference_hmac || chr(0) ||
-    p_amount::text || chr(0) ||
-    p_currency || chr(0) ||
-    p_direction || chr(0) ||
-    to_char(p_occurred_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') || chr(0) ||
+    'sened-bank-verification-request-v1' || chr(31) ||
+    p_provider || chr(31) ||
+    p_binding_id::text || chr(31) ||
+    p_provider_reference_hmac || chr(31) ||
+    p_amount::text || chr(31) ||
+    p_currency || chr(31) ||
+    p_direction || chr(31) ||
+    to_char(p_occurred_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') || chr(31) ||
     p_idempotency_key,
     'UTF8'
   )), 'hex');
@@ -573,6 +574,7 @@ language plpgsql
 security definer
 set search_path = public, private, pg_temp
 as $$
+#variable_conflict use_column
 declare
   actor uuid := auth.uid();
   intent_row public.bank_verification_intents%rowtype;
@@ -644,6 +646,7 @@ language plpgsql
 security definer
 set search_path = public, private, pg_temp
 as $$
+#variable_conflict use_column
 declare
   actor uuid := auth.uid();
   intent_row public.bank_verification_intents%rowtype;
@@ -773,6 +776,7 @@ language plpgsql
 security definer
 set search_path = public, private, pg_temp
 as $$
+#variable_conflict use_column
 declare
   actor uuid := auth.uid();
   intent_row public.bank_verification_intents%rowtype;
@@ -824,6 +828,7 @@ language plpgsql
 security definer
 set search_path = public, private, pg_temp
 as $$
+#variable_conflict use_column
 declare
   worker_id_value text := btrim(p_worker_id);
   lease_seconds_value integer := coalesce(p_lease_seconds, 60);
@@ -906,6 +911,7 @@ language plpgsql
 security definer
 set search_path = public, private, pg_temp
 as $$
+#variable_conflict use_column
 declare
   now_value timestamptz := clock_timestamp();
   job_row public.bank_reconciliation_jobs%rowtype;
@@ -976,6 +982,7 @@ language plpgsql
 security definer
 set search_path = public, private, pg_temp
 as $$
+#variable_conflict use_column
 declare
   now_value timestamptz := clock_timestamp();
   job_row public.bank_reconciliation_jobs%rowtype;
@@ -1045,6 +1052,7 @@ language plpgsql
 security definer
 set search_path = public, private, pg_temp
 as $$
+#variable_conflict use_column
 declare
   actor uuid := auth.uid();
   intent_row public.bank_verification_intents%rowtype;

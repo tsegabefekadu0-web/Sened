@@ -289,3 +289,28 @@ describe("in-memory bank verification", () => {
     expect(postVerifiedContribution).not.toHaveBeenCalled();
   });
 });
+
+describe("BankVerificationService - ledger sink contract", () => {
+  it("hands the ledger sink an intent already marked VERIFIED (the real sink refuses anything else)", async () => {
+    const { LedgerBankVerificationSink } = await import("@/lib/banking/ledgerSink");
+    const append = vi.fn(async () => ({ entry: { id: "55555555-5555-4555-8555-555555555555" } }));
+    const sink = new LedgerBankVerificationSink({
+      ledger: { append } as never,
+      accounts: () => ({
+        cashAccountId: ledgerAccountId,
+        counterAccountId: "66666666-6666-4666-8666-666666666666"
+      })
+    });
+    const service = createInMemoryBankVerificationService({
+      bindings: [binding],
+      adapters: { telebirr: createTestFixtureBankProviderAdapter("telebirr", settled) },
+      hmacKey: Buffer.alloc(32, 4),
+      ledgerSink: sink
+    });
+
+    const result = await service.create(request, { userId });
+
+    expect(result.verification.state).toBe("VERIFIED");
+    expect(append).toHaveBeenCalledTimes(1);
+  });
+});

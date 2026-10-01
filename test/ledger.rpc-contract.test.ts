@@ -57,3 +57,34 @@ describe("post_ledger_entry_v1 RPC contract", () => {
     expect(Object.keys(args).sort()).toEqual(migrationParameterNames().sort());
   });
 });
+
+describe("post_ledger_entry_v1 error mapping", () => {
+  it("maps the one-correction-per-entry unique index (23505) to INVALID_CORRECTION, not a storage failure", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "ledger_entries_one_correction_per_original_idx"'
+      }
+    });
+    const repository = new SupabaseLedgerRepository({ rpc } as unknown as SupabaseClient);
+    await expect(
+      repository.append(
+        {
+          groupId: "22222222-2222-4222-8222-222222222222",
+          idempotencyKey: "k-1",
+          occurredAt: "2026-09-25T10:30:00.000Z",
+          entryType: "correction",
+          correctsEntryId: "55555555-5555-4555-8555-555555555555",
+          rationale: "wrong amount entered",
+          postings: [
+            { accountId: "33333333-3333-4333-8333-333333333333", direction: "credit", amount: "25.00" },
+            { accountId: "44444444-4444-4444-8444-444444444444", direction: "debit", amount: "25.00" }
+          ]
+        },
+        { actorId: "11111111-1111-4111-8111-111111111111" } as never
+      )
+    ).rejects.toMatchObject({ code: "INVALID_CORRECTION" });
+  });
+});

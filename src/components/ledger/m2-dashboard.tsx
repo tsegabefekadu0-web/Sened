@@ -945,7 +945,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                     <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
                       <button
                         type="submit"
-                        disabled={submitting}
+                        disabled={submitting || (signedIn && live !== "loading" && live.status === "read-only")}
                         aria-busy={submitting}
                         className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-terracotta-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-terracotta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50 disabled:cursor-not-allowed disabled:opacity-60"
                       >

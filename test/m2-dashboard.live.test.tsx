@@ -78,6 +78,13 @@ describe("M2 correction form, signed in", () => {
     expect(await within(form).findByText(message)).toBeInTheDocument();
   });
 
+  it("disables the submit button for a plain member (read-only), so nothing can be sent", async () => {
+    hoisted.load.mockResolvedValue({ status: "read-only" });
+    const { form } = await openForm();
+    await within(form).findByText(/Only the group owner or treasurer/);
+    expect(within(form).getByRole("button", { name: "Create compensating entry" })).toBeDisabled();
+  });
+
   it("does not fetch while the form is closed", () => {
     render(<M2Dashboard />);
     expect(hoisted.load).not.toHaveBeenCalled();

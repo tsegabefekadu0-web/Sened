@@ -849,4 +849,145 @@ begin
 end;
 $reads$;
 
+-- ---------------------------------------------------------------------------
+-- The ledger read path (src/lib/ledger/reader.ts, GET /api/ledger/entries)
+--
+-- The route does plain selects on ledger_groups, ledger_entries and
+-- ledger_entry_postings under the caller's own JWT and relies entirely on RLS for
+-- tenant isolation. Everything above runs as the superuser, which bypasses RLS,
+-- so none of it could notice a policy that leaks or a grant that is missing.
+-- These checks switch to the `authenticated` and `anon` roles, as PostgREST does,
+-- and read the rows the route reads.
+-- ---------------------------------------------------------------------------
+do $ledgerread$
+declare
+  member_uid constant text := '11111111-1111-4111-8111-111111111111';
+  other_uid  constant text := '22222222-2222-4222-8222-222222222222';
+  group_a    constant uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  group_b    uuid;
+  cash_b     uuid;
+  income_b   uuid;
+  n          bigint;
+  seq_type   text;
+  amt_type   text;
+  seq_json   text;
+  amt_json   text;
+begin
+  -- A second tenant: a different user provisions their own group and posts an
+  -- entry with a non-round amount, so the numeric rendering below is not
+  -- trivially "x.00".
+  perform set_config('request.jwt.claim.sub', other_uid, false);
+  group_b := (public.sened_ledger_provision_group_v1('Other tenant equb') ->> 'groupId')::uuid;
+  select id into cash_b from public.ledger_accounts where group_id = group_b and code = 'POT_CASH';
+  select id into income_b from public.ledger_accounts where group_id = group_b and code = 'CONTRIBUTION_INCOME';
+  perform public.post_ledger_entry_v1(
+    group_b, 'ledger-read-other-tenant', now(), 'contribution', null, null,
+    jsonb_build_array(
+      jsonb_build_object('accountId', cash_b, 'direction', 'debit', 'amount', '1234.50'),
+      jsonb_build_object('accountId', income_b, 'direction', 'credit', 'amount', '1234.50')
+    )
+  );
+
+  -- Sanity, as the superuser: both groups really have entries and postings, so
+  -- the zero-row assertions below cannot pass vacuously.
+  select count(*) into n from public.ledger_entries where group_id = group_a;
+  if n = 0 then raise exception 'LEDGER READ 0 FAILED: fixture group A has no entries'; end if;
+  select count(*) into n from public.ledger_entry_postings where group_id = group_b;
+  if n = 0 then raise exception 'LEDGER READ 0 FAILED: fixture group B has no postings'; end if;
+
+  -- ---- A member reads their own group (the reader's three selects) ----------
+  perform set_config('request.jwt.claim.sub', member_uid, false);
+  set local role authenticated;
+
+  select count(*) into n from public.ledger_groups where id = group_a;
+  if n <> 1 then raise exception 'LEDGER READ 1 FAILED: a member could not select their group (saw %)', n; end if;
+
+  select count(*) into n from public.ledger_entries where group_id = group_a;
+  if n = 0 then raise exception 'LEDGER READ 2 FAILED: a member saw no entries in their own group'; end if;
+
+  select count(*) into n from public.ledger_entry_postings where group_id = group_a;
+  if n = 0 then raise exception 'LEDGER READ 3 FAILED: a member saw no postings in their own group'; end if;
+
+  -- ---- A non-member sees none of another tenant's rows ----------------------
+  select count(*) into n from public.ledger_groups where id = group_b;
+  if n <> 0 then raise exception 'LEDGER READ 4 FAILED: a non-member saw another tenant''s group (%)', n; end if;
+  select count(*) into n from public.ledger_entries where group_id = group_b;
+  if n <> 0 then raise exception 'LEDGER READ 5 FAILED: a non-member saw another tenant''s entries (%)', n; end if;
+  select count(*) into n from public.ledger_entry_postings where group_id = group_b;
+  if n <> 0 then raise exception 'LEDGER READ 6 FAILED: a non-member saw another tenant''s postings (%)', n; end if;
+
+  reset role;
+
+  -- ---- The other tenant, symmetrically --------------------------------------
+  perform set_config('request.jwt.claim.sub', other_uid, false);
+  set local role authenticated;
+  select count(*) into n from public.ledger_entries where group_id = group_b;
+  if n = 0 then raise exception 'LEDGER READ 7 FAILED: the other tenant cannot read their own entries'; end if;
+  select count(*) into n from public.ledger_entries where group_id = group_a;
+  if n <> 0 then raise exception 'LEDGER READ 8 FAILED: the other tenant saw group A entries (%)', n; end if;
+  select count(*) into n from public.ledger_entry_postings where group_id = group_a;
+  if n <> 0 then raise exception 'LEDGER READ 9 FAILED: the other tenant saw group A postings (%)', n; end if;
+  select count(*) into n from public.ledger_groups where id = group_a;
+  if n <> 0 then raise exception 'LEDGER READ 10 FAILED: the other tenant saw group A (%)', n; end if;
+
+  -- ---- JSON types as PostgREST renders them ---------------------------------
+  -- PostgREST serialises rows with to_json, so jsonb_typeof(to_jsonb(row)) gives
+  -- the same answer. reader.ts accepts a number or a string for both fields and
+  -- reformats the amount through formatEtbAmount.
+  select jsonb_typeof(to_jsonb(e) -> 'sequence'), (to_jsonb(e) -> 'sequence')::text
+    into seq_type, seq_json
+    from public.ledger_entries e where e.group_id = group_b limit 1;
+  select jsonb_typeof(to_jsonb(p) -> 'amount'), (to_jsonb(p) -> 'amount')::text
+    into amt_type, amt_json
+    from public.ledger_entry_postings p where p.group_id = group_b and p.direction = 'debit' limit 1;
+  reset role;
+
+  raise notice 'JSON TYPES: sequence (bigint) -> % (%), amount (numeric(20,2)) -> % (%)',
+    seq_type, seq_json, amt_type, amt_json;
+
+  if seq_type not in ('number', 'string') or amt_type not in ('number', 'string') then
+    raise exception 'LEDGER READ 11 FAILED: unexpected JSON types for sequence/amount: % / %', seq_type, amt_type;
+  end if;
+  -- Postgres renders 1234.50 as 1234.50; JavaScript parses it to 1234.5, which
+  -- formatEtbAmount re-pads to 1234.50. Either way it is a plain decimal with no
+  -- exponent, which is what the parser needs.
+  if amt_json !~ '^"?[0-9]+(\.[0-9]{1,2})?"?$' or seq_json !~ '^"?[0-9]+"?$' then
+    raise exception 'LEDGER READ 12 FAILED: sequence/amount JSON is not a plain decimal: % / %', seq_json, amt_json;
+  end if;
+
+  -- ---- anon sees nothing ----------------------------------------------------
+  -- Either zero rows or a permission error counts: no row may come back. Which of
+  -- the two it is gets reported, since the route would surface an error as a
+  -- storage failure rather than an empty list.
+  perform set_config('request.jwt.claim.sub', '', false);
+  perform set_config('request.jwt.claim.role', 'anon', false);
+  set local role anon;
+  begin
+    select count(*) into n from public.ledger_entries;
+    if n <> 0 then raise exception 'LEDGER READ 13 FAILED: anon read % entries', n; end if;
+    raise notice 'ANON: ledger_entries select returned zero rows';
+  exception when insufficient_privilege then
+    raise notice 'ANON: ledger_entries select refused (permission denied)';
+  end;
+  begin
+    select count(*) into n from public.ledger_entry_postings;
+    if n <> 0 then raise exception 'LEDGER READ 14 FAILED: anon read % postings', n; end if;
+    raise notice 'ANON: ledger_entry_postings select returned zero rows';
+  exception when insufficient_privilege then
+    raise notice 'ANON: ledger_entry_postings select refused (permission denied)';
+  end;
+  begin
+    select count(*) into n from public.ledger_groups;
+    if n <> 0 then raise exception 'LEDGER READ 15 FAILED: anon read % groups', n; end if;
+    raise notice 'ANON: ledger_groups select returned zero rows';
+  exception when insufficient_privilege then
+    raise notice 'ANON: ledger_groups select refused (permission denied)';
+  end;
+  reset role;
+
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
+  perform set_config('request.jwt.claim.sub', member_uid, false);
+end;
+$ledgerread$;
+
 select 'ALL DRAW BINDING CHECKS PASSED' as result;

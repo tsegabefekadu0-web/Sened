@@ -79,6 +79,30 @@ export const ledgerEntryRequestSchema = z
     }
   });
 
+export const LEDGER_READ_DEFAULT_LIMIT = 50;
+export const LEDGER_READ_MAX_LIMIT = 100;
+
+/**
+ * Query string of `GET /api/ledger/entries`. Strict: an unknown parameter is a
+ * 400, not ignored, so a client cannot believe it filtered by something the
+ * server never looked at. A repeated parameter arrives as an array and fails.
+ */
+export const ledgerEntriesQuerySchema = z
+  .object({
+    groupId: uuidSchema,
+    limit: z
+      .string()
+      .regex(/^[1-9]\d{0,2}$/)
+      .transform((value) => Number(value))
+      .refine((value) => value <= LEDGER_READ_MAX_LIMIT, "limit is too large")
+      .optional()
+  })
+  .strict()
+  .transform((value) => ({
+    groupId: value.groupId,
+    limit: value.limit ?? LEDGER_READ_DEFAULT_LIMIT
+  }));
+
 export type LedgerEntryRequestInput = z.input<typeof ledgerEntryRequestSchema>;
 export type ValidatedLedgerEntryRequest = z.output<typeof ledgerEntryRequestSchema>;
 
@@ -92,7 +116,7 @@ export type ParseResult<T> =
   | { readonly ok: true; readonly data: T }
   | { readonly ok: false; readonly message: string };
 
-export function parse<T>(schema: z.ZodType<T>, input: unknown): ParseResult<T> {
+export function parse<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input: unknown): ParseResult<T> {
   const result = schema.safeParse(input);
   if (result.success) {
     return { ok: true, data: result.data };

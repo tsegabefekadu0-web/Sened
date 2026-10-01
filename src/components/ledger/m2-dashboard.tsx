@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   AlertCircle,
   ArrowRight,
@@ -35,6 +35,8 @@ import type { BankVerificationErrorCode } from "@/lib/banking/errors";
 import type { BankVerificationReasonCode, BankVerificationState, ReconciliationJobState } from "@/lib/banking/types";
 import type { LedgerErrorCode } from "@/lib/ledger/errors";
 import type { LedgerEntryType } from "@/lib/ledger/types";
+import { useSession } from "@/lib/auth/useSession";
+import { loadCorrectionTargets, type CorrectionTarget, type LiveLedgerResult } from "@/lib/ledger/clientRead";
 import { TibebHeaderPattern } from "@/components/cultural/TibebPattern";
 
 type Translator = ReturnType<typeof createTranslator>;
@@ -192,6 +194,14 @@ const bankErrorMessageKeys: Record<BankVerificationErrorCode, MessageKey> = {
   INVALID_BINDING: "m2.apiError.invalidBinding"
 };
 
+const liveStatusMessageKeys: Record<Exclude<LiveLedgerResult["status"], "ready">, MessageKey> = {
+  empty: "m2.correction.live.empty",
+  unauthorized: "m2.correction.live.unauthorized",
+  "no-group": "m2.correction.live.noGroup",
+  "multiple-groups": "m2.correction.live.multipleGroups",
+  error: "m2.correction.live.error"
+};
+
 const entryTypeMessageKeys: Record<LedgerEntryType, MessageKey> = {
   journal: "m2.entryType.journal",
   contribution: "m2.entryType.contribution",
@@ -299,9 +309,34 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
   const [correctionError, setCorrectionError] = useState<CorrectionError | null>(null);
   const [correctionReference, setCorrectionReference] = useState<string | null>(null);
   const [correctionCount, setCorrectionCount] = useState(0);
+  const session = useSession();
+  const signedIn = session.status === "signed-in";
+  const [live, setLive] = useState<LiveLedgerResult | "loading">("loading");
 
-  const correctionTargets = entries.filter((entry) => entry.type !== "correction");
-  const selectedEntry = entries.find((entry) => entry.id === selectedEntryId);
+  // Signed in, the form's choices come from the live ledger; otherwise the
+  // fixture, exactly as before there was a sign-in surface.
+  useEffect(() => {
+    if (!signedIn || !correctionOpen) {
+      return;
+    }
+    let active = true;
+    setLive("loading");
+    setSelectedEntryId("");
+    void loadCorrectionTargets().then((result) => {
+      if (active) {
+        setLive(result);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [signedIn, correctionOpen]);
+
+  const liveTargets: readonly CorrectionTarget[] = live !== "loading" && live.status === "ready" ? live.targets : [];
+  const correctionTargets: readonly CorrectionTarget[] = signedIn
+    ? liveTargets
+    : entries.filter((entry) => entry.type !== "correction");
+  const selectedEntry = correctionTargets.find((entry) => entry.id === selectedEntryId);
   const unresolvedEntries = entries.filter((entry) => entry.status !== "VERIFIED" && !entry.isCorrection);
   const pendingAmount = formatAmount(PENDING_AMOUNT, locale, t);
   const reviewAmount = formatAmount(REVIEW_AMOUNT, locale, t);
@@ -764,10 +799,27 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                       >
                         <option value="">{t("m2.correction.chooseEntry")}</option>
                         {correctionTargets.map((entry) => (
-                          <option key={entry.id} value={entry.id}>{t(entryTypeMessageKeys[entry.type])} · {entry.reference}</option>
+                          <option key={entry.id} value={entry.id}>
+                            {signedIn
+                              ? t("m2.correction.live.entryOption", {
+                                  type: t(entryTypeMessageKeys[entry.type]),
+                                  sequence: entry.reference.replace("#", ""),
+                                  amount: formatAmount(entry.amount, locale, t)
+                                })
+                              : `${t(entryTypeMessageKeys[entry.type])} · ${entry.reference}`}
+                          </option>
                         ))}
                       </select>
-                      <p id="correction-entry-helper" className="mt-2 text-xs leading-5 text-inkMuted">{t("m2.correction.entryHelper")}</p>
+                      <p id="correction-entry-helper" className="mt-2 text-xs leading-5 text-inkMuted">{signedIn ? t("m2.correction.live.helper") : t("m2.correction.entryHelper")}</p>
+                      {signedIn && live === "loading" ? (
+                        <p role="status" className="mt-2 text-xs font-semibold leading-5 text-inkMuted">{t("m2.correction.live.loading")}</p>
+                      ) : null}
+                      {signedIn && live !== "loading" && live.status !== "ready" ? (
+                        <p role={live.status === "empty" ? "status" : "alert"} className="mt-2 flex items-start gap-2 text-xs font-semibold leading-5 text-terracotta-700">
+                          <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
+                          {t(liveStatusMessageKeys[live.status])}
+                        </p>
+                      ) : null}
                     </div>
                     <div className="mt-5">
                       <label htmlFor="correction-rationale" className="text-sm font-bold text-coffee-900">
@@ -814,7 +866,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                         {t("m2.correction.cancel")}
                       </button>
                     </div>
-                    <p className="mt-4 text-xs leading-5 text-inkMuted">{t("m2.correction.demoNotice")}</p>
+                    <p className="mt-4 text-xs leading-5 text-inkMuted">{signedIn ? t("m2.correction.live.notice") : t("m2.correction.demoNotice")}</p>
                     {correctionReference && selectedEntry ? (
                       <div role="status" className="mt-5 flex items-start gap-3 rounded-xl border border-[#B7DFC1] bg-[#EFFAF1] p-4 text-sm leading-6 text-[#166534]">
                         <BadgeCheck aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0" />

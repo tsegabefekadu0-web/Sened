@@ -1,7 +1,14 @@
-import { LedgerService, SupabaseLedgerRepository, isLedgerError, type LedgerEntry } from "@/lib/ledger";
+import { authenticateRead } from "@/lib/authRead";
+import {
+  LedgerService,
+  SupabaseLedgerRepository,
+  isLedgerError,
+  listGroupLedgerEntries,
+  type LedgerEntry
+} from "@/lib/ledger";
 import { canWriteLedger } from "@/lib/roles";
 import { bearerToken, getUserScopedClient } from "@/lib/supabaseServer";
-import { ledgerEntryRequestSchema, parse } from "@/lib/validation";
+import { ledgerEntriesQuerySchema, ledgerEntryRequestSchema, parse } from "@/lib/validation";
 
 export const runtime = "nodejs";
 
@@ -115,5 +122,42 @@ export async function POST(request: Request): Promise<Response> {
       case "INTEGRITY_FAILURE":
         return jsonError("ledger_write_failed", 502);
     }
+  }
+}
+
+/**
+ * `GET /api/ledger/entries?groupId=<uuid>[&limit=1..100]` — a group's entries,
+ * newest first, each with its postings. Read-only.
+ *
+ * What the O-3 correction form needs in order to name the entry it corrects.
+ * Authorization is the tables' own row-level security under the caller's JWT:
+ * any active member of the group may read it (the write route's treasurer role
+ * is a *write* gate and deliberately not applied here). A group the caller
+ * cannot see is 404, whether it is absent or merely not theirs.
+ */
+export async function GET(request: Request): Promise<Response> {
+  const auth = await authenticateRead(request);
+  if (!auth.ok) {
+    return jsonError(auth.error, auth.status);
+  }
+
+  const params: Record<string, string | string[]> = {};
+  for (const [key, value] of new URL(request.url).searchParams) {
+    const existing = params[key];
+    params[key] = existing === undefined ? value : [...(Array.isArray(existing) ? existing : [existing]), value];
+  }
+  const parsed = parse(ledgerEntriesQuerySchema, params);
+  if (!parsed.ok) {
+    return jsonError("invalid_request", 400, parsed.message);
+  }
+
+  try {
+    const entries = await listGroupLedgerEntries(auth.client, parsed.data.groupId, parsed.data.limit);
+    if (entries === null) {
+      return jsonError("not_found", 404);
+    }
+    return Response.json({ entries }, { headers: { "Cache-Control": "private, no-store" } });
+  } catch {
+    return jsonError("storage_failure", 502);
   }
 }

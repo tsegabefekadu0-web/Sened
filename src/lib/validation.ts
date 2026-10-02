@@ -116,6 +116,39 @@ export const ledgerMemberRoleRequestSchema = z
   })
   .strict();
 
+/**
+ * Invite links. All strict. Expiry is capped at 30 days and uses at 50, which
+ * the SQL enforces again; a wrong value is a 400 here rather than a database
+ * error. The token schema is a shape check only (the database decides whether
+ * it matches an invite) and the token must never be echoed back.
+ */
+export const INVITE_DEFAULT_EXPIRES_HOURS = 168;
+export const INVITE_MAX_EXPIRES_HOURS = 720;
+export const INVITE_DEFAULT_MAX_USES = 1;
+export const INVITE_MAX_USES = 50;
+
+export const ledgerInviteCreateRequestSchema = z
+  .object({
+    groupId: uuidSchema,
+    expiresInHours: z.number().int().min(1).max(INVITE_MAX_EXPIRES_HOURS).optional(),
+    maxUses: z.number().int().min(1).max(INVITE_MAX_USES).optional()
+  })
+  .strict()
+  .transform((value) => ({
+    groupId: value.groupId,
+    expiresInHours: value.expiresInHours ?? INVITE_DEFAULT_EXPIRES_HOURS,
+    maxUses: value.maxUses ?? INVITE_DEFAULT_MAX_USES
+  }));
+
+export const ledgerInviteRedeemRequestSchema = z
+  .object({ token: z.string().min(16).max(256).regex(/^[A-Za-z0-9_-]+$/) })
+  .strict();
+
+export const ledgerInviteRevokeRequestSchema = z.object({ inviteId: uuidSchema }).strict();
+
+/** Query of `GET /api/ledger/invites` and `GET /api/ledger/members`. */
+export const ledgerGroupQuerySchema = z.object({ groupId: uuidSchema }).strict();
+
 export type LedgerEntryRequestInput = z.input<typeof ledgerEntryRequestSchema>;
 export type ValidatedLedgerEntryRequest = z.output<typeof ledgerEntryRequestSchema>;
 

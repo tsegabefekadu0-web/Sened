@@ -1704,4 +1704,357 @@ begin
 end;
 $roles$;
 
+-- ---------------------------------------------------------------------------
+-- INVITES: invite links add members, safely.
+-- ---------------------------------------------------------------------------
+do $invites$
+declare
+  own_uid constant text := '11111111-1111-4111-8111-111111111111';
+  mem_uid constant text := '33333333-3333-4333-8333-333333333333';
+  out_uid constant text := '44444444-4444-4444-8444-444444444444';
+  group_i uuid;
+  res jsonb;
+  tok text;
+  tok2 text;
+  tok3 text;
+  revoked_tok text;
+  inv_id uuid;
+  inv_id2 uuid;
+  n bigint;
+  r text;
+begin
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  group_i := (public.sened_ledger_provision_group_v1('Invites test equb') ->> 'groupId')::uuid;
+
+  -- INVITES 1. Only the owner can create; the raw token comes back once.
+  res := public.create_group_invite_v1(group_i, 24, 1);
+  tok := res ->> 'token';
+  inv_id := (res ->> 'inviteId')::uuid;
+  if tok is null or char_length(tok) <> 64 then
+    raise exception 'INVITES 1 FAILED: no raw token returned: %', res;
+  end if;
+  reset role;
+  perform set_config('request.jwt.claim.sub', mem_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || mem_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.create_group_invite_v1(group_i, 24, 1);
+    raise exception 'INVITES 1 FAILED: a non-member created an invite';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'INVITES 1 FAILED: refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.create_group_invite_v1(group_i, 721, 1);
+    raise exception 'INVITES 1 FAILED: a 31 day invite was created';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_invalid_request%' then
+      raise exception 'INVITES 1 FAILED: expiry bound refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.create_group_invite_v1(group_i, 24, 51);
+    raise exception 'INVITES 1 FAILED: 51 uses allowed';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_invalid_request%' then
+      raise exception 'INVITES 1 FAILED: max_uses bound refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  -- INVITES 2. The raw token is not stored in the invites table.
+  select count(*) into n from public.ledger_group_invites i
+    where to_jsonb(i)::text like '%' || tok || '%';
+  if n <> 0 then raise exception 'INVITES 2 FAILED: the raw token is stored'; end if;
+  select count(*) into n from public.ledger_group_invites i
+    where i.id = inv_id and i.token_hash = encode(sha256(convert_to(tok, 'UTF8')), 'hex');
+  if n <> 1 then raise exception 'INVITES 2 FAILED: the stored value is not the SHA-256 of the token'; end if;
+
+  -- INVITES 3. Redeem adds a member.
+  perform set_config('request.jwt.claim.sub', mem_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || mem_uid || '"}', false);
+  set local role authenticated;
+  res := public.redeem_group_invite_v1(tok);
+  reset role;
+  if res ->> 'status' <> 'joined' then
+    raise exception 'INVITES 3 FAILED: unexpected result %', res;
+  end if;
+  select role into r from public.ledger_group_memberships
+    where group_id = group_i and user_id = mem_uid::uuid and status = 'active';
+  if r is distinct from 'member' then
+    raise exception 'INVITES 3 FAILED: joined role is %', r;
+  end if;
+
+  -- INVITES 4. A second redeem by the same user is already_member; count unchanged.
+  set local role authenticated;
+  res := public.redeem_group_invite_v1(tok);
+  reset role;
+  if res ->> 'status' <> 'already_member' then
+    raise exception 'INVITES 4 FAILED: second redeem gave %', res;
+  end if;
+  select use_count into n from public.ledger_group_invites where id = inv_id;
+  if n <> 1 then raise exception 'INVITES 4 FAILED: use_count is %', n; end if;
+
+  -- INVITES 5. max_uses is enforced (this invite had one use).
+  perform set_config('request.jwt.claim.sub', out_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || out_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.redeem_group_invite_v1(tok);
+    raise exception 'INVITES 5 FAILED: a used-up invite was redeemed';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_invite_exhausted%' then
+      raise exception 'INVITES 5 FAILED: refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+  select count(*) into n from public.ledger_group_memberships
+    where group_id = group_i and user_id = out_uid::uuid;
+  if n <> 0 then raise exception 'INVITES 5 FAILED: a membership was created'; end if;
+
+  -- INVITES 6. An expired invite is refused, and so is an unknown token.
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  res := public.create_group_invite_v1(group_i, 24, 5);
+  tok2 := res ->> 'token';
+  inv_id2 := (res ->> 'inviteId')::uuid;
+  res := public.create_group_invite_v1(group_i, 24, 5);
+  tok3 := res ->> 'token';
+  reset role;
+  update public.ledger_group_invites
+    set created_at = clock_timestamp() - interval '2 days',
+        expires_at = clock_timestamp() - interval '1 day'
+    where id = inv_id2;
+  perform set_config('request.jwt.claim.sub', out_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || out_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.redeem_group_invite_v1(tok2);
+    raise exception 'INVITES 6 FAILED: an expired invite was redeemed';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_invite_expired%' then
+      raise exception 'INVITES 6 FAILED: expired refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.redeem_group_invite_v1(repeat('z', 40));
+    raise exception 'INVITES 6 FAILED: an unknown token was redeemed';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_invite_invalid%' then
+      raise exception 'INVITES 6 FAILED: unknown token refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  -- INVITES 7. The owner lists (no token) and revokes; a revoked invite is refused.
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  res := public.list_group_invites_v1(group_i);
+  if jsonb_array_length(res) <> 3 or res::text like '%' || tok3 || '%' or res::text like '%token%' then
+    raise exception 'INVITES 7 FAILED: owner invite list wrong or leaks a token: %', res;
+  end if;
+  select (e ->> 'inviteId')::uuid into inv_id2
+    from jsonb_array_elements(res) e where e ->> 'status' = 'active' limit 1;
+  res := public.revoke_group_invite_v1(inv_id2);
+  if (res ->> 'changed')::boolean is not true then
+    raise exception 'INVITES 7 FAILED: revoke did not change: %', res;
+  end if;
+  res := public.revoke_group_invite_v1(inv_id2);
+  if (res ->> 'changed')::boolean is not false then
+    raise exception 'INVITES 7 FAILED: repeated revoke reported a change';
+  end if;
+  reset role;
+  -- Whichever active invite was revoked, redeeming tok3 or the other must now fail
+  -- for the revoked one; check by hash.
+  select count(*) into n from public.ledger_group_invites where id = inv_id2 and revoked_at is not null;
+  if n <> 1 then raise exception 'INVITES 7 FAILED: revoked_at not set'; end if;
+  -- Pick the revoked invite's token as superuser: token_hash is not readable by authenticated.
+  revoked_tok := case when exists (select 1 from public.ledger_group_invites
+                        where id = inv_id2 and token_hash = encode(sha256(convert_to(tok3, 'UTF8')), 'hex'))
+           then tok3 else tok end;
+  perform set_config('request.jwt.claim.sub', out_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || out_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.redeem_group_invite_v1(revoked_tok);
+    raise exception 'INVITES 7 FAILED: a revoked invite was redeemed';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_invite_revoked%' then
+      raise exception 'INVITES 7 FAILED: revoked refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  -- INVITES 8. A non-owner cannot list or revoke invites or read the table.
+  perform set_config('request.jwt.claim.sub', mem_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || mem_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.list_group_invites_v1(group_i);
+    raise exception 'INVITES 8 FAILED: a member listed invites';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'INVITES 8 FAILED: list refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.revoke_group_invite_v1(inv_id);
+    raise exception 'INVITES 8 FAILED: a member revoked an invite';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'INVITES 8 FAILED: revoke refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  select count(*) into n from public.ledger_group_invites;
+  if n <> 0 then raise exception 'INVITES 8 FAILED: a member can select invite rows (%)', n; end if;
+  begin
+    perform token_hash from public.ledger_group_invites limit 1;
+    raise exception 'INVITES 8 FAILED: token_hash is selectable';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%permission denied%' then
+      raise exception 'INVITES 8 FAILED: token_hash refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  select count(*) into n from public.ledger_group_invites;
+  if n <> 3 then raise exception 'INVITES 8 FAILED: owner sees % invite rows', n; end if;
+  reset role;
+
+  -- INVITES 9. Redeeming never demotes an owner or treasurer.
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  res := public.create_group_invite_v1(group_i, 24, 10);
+  tok := res ->> 'token';
+  perform public.sened_ledger_set_member_role_v1(group_i, mem_uid::uuid, 'treasurer');
+  res := public.redeem_group_invite_v1(tok);
+  if res ->> 'status' <> 'already_member' or res ->> 'role' <> 'owner' then
+    raise exception 'INVITES 9 FAILED: owner redeem gave %', res;
+  end if;
+  reset role;
+  perform set_config('request.jwt.claim.sub', mem_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || mem_uid || '"}', false);
+  set local role authenticated;
+  res := public.redeem_group_invite_v1(tok);
+  if res ->> 'status' <> 'already_member' or res ->> 'role' <> 'treasurer' then
+    raise exception 'INVITES 9 FAILED: treasurer redeem gave %', res;
+  end if;
+  reset role;
+  select role into r from public.ledger_group_memberships where group_id = group_i and user_id = own_uid::uuid;
+  if r <> 'owner' then raise exception 'INVITES 9 FAILED: owner role is now %', r; end if;
+  select role into r from public.ledger_group_memberships where group_id = group_i and user_id = mem_uid::uuid;
+  if r <> 'treasurer' then raise exception 'INVITES 9 FAILED: treasurer role is now %', r; end if;
+  select use_count into n from public.ledger_group_invites
+    where token_hash = encode(sha256(convert_to(tok, 'UTF8')), 'hex');
+  if n <> 0 then raise exception 'INVITES 9 FAILED: already-member redeems counted uses (%)', n; end if;
+
+  -- INVITES 10. Members list: any member may call; an outsider may not. Email is
+  -- visible to the owner only.
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  set local role authenticated;
+  res := public.list_group_members_v1(group_i);
+  if jsonb_array_length(res) <> 2 or not exists (
+    select 1 from jsonb_array_elements(res) e where e ->> 'email' = 'member-b@example.test') then
+    raise exception 'INVITES 10 FAILED: owner member list wrong: %', res;
+  end if;
+  reset role;
+  perform set_config('request.jwt.claim.sub', mem_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || mem_uid || '"}', false);
+  set local role authenticated;
+  res := public.list_group_members_v1(group_i);
+  if jsonb_array_length(res) <> 2 or res::text like '%@example.test%' then
+    raise exception 'INVITES 10 FAILED: member list wrong or leaks email: %', res;
+  end if;
+  reset role;
+  perform set_config('request.jwt.claim.sub', out_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || out_uid || '"}', false);
+  set local role authenticated;
+  begin
+    perform public.list_group_members_v1(group_i);
+    raise exception 'INVITES 10 FAILED: an outsider listed members';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'INVITES 10 FAILED: outsider refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  -- INVITES 11. No subject, and anon, are refused.
+  perform set_config('request.jwt.claim.sub', '', false);
+  perform set_config('request.jwt.claims', '{"role":"authenticated"}', false);
+  set local role authenticated;
+  begin
+    perform public.redeem_group_invite_v1(tok);
+    raise exception 'INVITES 11 FAILED: a request with no subject redeemed';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'INVITES 11 FAILED: subject-less redeem refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.create_group_invite_v1(group_i, 24, 1);
+    raise exception 'INVITES 11 FAILED: a request with no subject created an invite';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%ledger_forbidden%' then
+      raise exception 'INVITES 11 FAILED: subject-less create refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+  perform set_config('request.jwt.claim.role', 'anon', false);
+  perform set_config('request.jwt.claims', '{"role":"anon"}', false);
+  set local role anon;
+  begin
+    perform public.redeem_group_invite_v1(tok);
+    raise exception 'INVITES 11 FAILED: anon redeemed';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%permission denied%' then
+      raise exception 'INVITES 11 FAILED: anon redeem refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.list_group_members_v1(group_i);
+    raise exception 'INVITES 11 FAILED: anon listed members';
+  exception when others then
+    if sqlerrm like 'INVITES%' then raise; end if;
+    if sqlerrm not like '%permission denied%' then
+      raise exception 'INVITES 11 FAILED: anon list refused wrongly: %', sqlerrm;
+    end if;
+  end;
+  reset role;
+
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
+  perform set_config('request.jwt.claim.sub', own_uid, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own_uid || '"}', false);
+  raise notice 'INVITES: all 11 invite-link checks passed';
+end;
+$invites$;
+
 select 'ALL DRAW BINDING CHECKS PASSED' as result;

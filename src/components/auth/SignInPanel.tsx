@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useState, type FormEvent } from "react";
+import React, { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { ArrowLeft, LogOut, Mail, ShieldAlert } from "lucide-react";
 
 import { getBrowserSupabase } from "@/lib/auth/browserClient";
 import { useSession } from "@/lib/auth/useSession";
+import { peekPendingInvite } from "@/lib/ledger/clientInvites";
 import { createTranslator, type Locale } from "@/lib/i18n";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -26,6 +27,13 @@ export function SignInPanel({ initialLocale = "am" }: { readonly initialLocale?:
   const [email, setEmail] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [signOutFailed, setSignOutFailed] = useState(false);
+
+  // Signed in with an invite waiting (the person came here from /join): go back.
+  useEffect(() => {
+    if (session.status === "signed-in" && peekPendingInvite()) {
+      window.location.replace("/join");
+    }
+  }, [session.status]);
 
   async function sendLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

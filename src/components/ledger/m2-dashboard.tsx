@@ -40,6 +40,7 @@ import { loadCorrectionTargets, type CorrectionTarget, type LiveCorrectionTarget
 import { postCorrection, type PostCorrectionResult } from "@/lib/ledger/clientCorrect";
 import { buildCorrectionRequest, CorrectionBuildError, newCorrectionIdempotencyKey } from "@/lib/ledger/correction";
 import { TibebHeaderPattern } from "@/components/cultural/TibebPattern";
+import { GroupMembersPanel } from "@/components/ledger/GroupMembersPanel";
 
 type Translator = ReturnType<typeof createTranslator>;
 type StatusTone = "verified" | "pending" | "danger" | "warning" | "neutral" | "info";
@@ -999,6 +1000,8 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
               </div>
             </div>
           </section>
+
+          <GroupMembersPanel locale={locale} />
         </div>
       </main>
 

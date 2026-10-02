@@ -13,6 +13,12 @@ import { consumeRateLimit, PROXY_RULE, READ_RULE, WRITE_RULE, type RateLimitRule
 export const RATE_LIMITED = new Set([
   "/api/ledger/entries",
   "/api/ledger/member-roles",
+  // Invite links: create/list share one path (the method picks the rule),
+  // redeem and revoke are writes, the member list is a read.
+  "/api/ledger/invites",
+  "/api/ledger/invites/redeem",
+  "/api/ledger/invites/revoke",
+  "/api/ledger/members",
   "/api/bank-verifications",
   "/api/bank-verifications/[verificationId]",
   // A2: these two shell out to a third-party speech provider.
@@ -56,7 +62,16 @@ export function isRateLimitedPath(pathname: string): boolean {
   return RATE_LIMITED.has(pathname) || isBankVerificationReadPath(pathname) || isDrawRoundPath(pathname);
 }
 
-export function resolveRateLimit(pathname: string): RateLimitRule {
+export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRule {
+  if (pathname === "/api/ledger/invites") {
+    return method === "GET" ? READ_RULE : WRITE_RULE;
+  }
+  if (pathname === "/api/ledger/invites/redeem" || pathname === "/api/ledger/invites/revoke") {
+    return WRITE_RULE;
+  }
+  if (pathname === "/api/ledger/members") {
+    return READ_RULE;
+  }
   if (pathname === "/api/bank-verifications" || pathname === "/api/ledger/member-roles") {
     return WRITE_RULE;
   }
@@ -112,7 +127,7 @@ export function middleware(request: NextRequest): NextResponse {
   if (!isRateLimitedPath(request.nextUrl.pathname)) {
     return NextResponse.next();
   }
-  const rule = resolveRateLimit(request.nextUrl.pathname);
+  const rule = resolveRateLimit(request.nextUrl.pathname, request.method);
   const key = `${request.nextUrl.pathname}:${rule.limit}:${rateLimitIdentity(request)}`;
   const result = consumeRateLimit(key, rule);
   if (!result.allowed) {

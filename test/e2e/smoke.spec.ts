@@ -22,6 +22,7 @@ const PAGES = [
   { path: "/", name: "mobile shell" },
   { path: "/voice", name: "voice pipeline" },
   { path: "/draw", name: "fair draw" },
+  { path: "/governance", name: "governance copilot" },
   { path: "/ledger", name: "ledger review" },
   { path: "/offline", name: "offline console" },
   { path: "/sign-in", name: "sign-in (unconfigured)" }

@@ -204,6 +204,48 @@ export const syncPullRequestSchema = z
   })
   .strict();
 
+/**
+ * `POST /api/governance/recommendations` body (M5.2). Strict, like every other
+ * request schema here: an unknown field is a 400, so a client cannot believe it
+ * tuned something the engine never read. Iddir-only figures are rejected on an
+ * Equb for the same reason, and an Iddir must say what a claim costs, because
+ * the engine refuses to invent that number. Advisory only: no group id, nothing
+ * is persisted.
+ */
+const governanceMoneySchema = z.string().max(21).regex(WIRE_ETB_DECIMAL_PATTERN, "Invalid ETB amount");
+
+export const governanceRecommendationRequestSchema = z
+  .object({
+    groupType: z.enum(["equb", "iddir"]),
+    memberCount: z.number().int().min(2).max(500),
+    contributionAmount: amountSchema,
+    cycleLengthDays: z.number().int().min(1).max(366),
+    trust: z.enum(["close", "mixed", "new"]),
+    typicalClaimAmount: amountSchema.optional(),
+    currentFundBalance: governanceMoneySchema.optional()
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.groupType === "iddir" && value.typicalClaimAmount === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["typicalClaimAmount"],
+        message: "Required for an Iddir"
+      });
+    }
+    if (value.groupType === "equb") {
+      for (const field of ["typicalClaimAmount", "currentFundBalance"] as const) {
+        if (value[field] !== undefined) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [field],
+            message: "Applies to an Iddir only"
+          });
+        }
+      }
+    }
+  });
+
 export type LedgerEntryRequestInput = z.input<typeof ledgerEntryRequestSchema>;
 export type ValidatedLedgerEntryRequest = z.output<typeof ledgerEntryRequestSchema>;
 

@@ -124,3 +124,27 @@ describe("the limiter actually answers on these routes", () => {
     expect(last?.headers.get("Retry-After")).toBeTruthy();
   });
 });
+
+describe("the governance routes are metered", () => {
+  it("registers both routes", () => {
+    expect(RATE_LIMITED.has("/api/governance/recommendations")).toBe(true);
+    expect(RATE_LIMITED.has("/api/governance/citations")).toBe(true);
+    expect(isRateLimitedPath("/api/governance/recommendations")).toBe(true);
+    expect(isRateLimitedPath("/api/governance/citations")).toBe(true);
+  });
+
+  it("charges the pure engine the read rule and the ScholarXIV-backed route the write rule", () => {
+    expect(resolveRateLimit("/api/governance/recommendations", "POST")).toEqual(READ_RULE);
+    expect(resolveRateLimit("/api/governance/citations", "GET")).toEqual(WRITE_RULE);
+  });
+
+  it("answers with rate-limit headers", () => {
+    const response = middleware(
+      new NextRequest("http://localhost/api/governance/recommendations", {
+        method: "POST",
+        headers: { authorization: "Bearer user-token" }
+      })
+    );
+    expect(response.headers.get("X-RateLimit-Limit")).toBe(String(READ_RULE.limit));
+  });
+});

@@ -2,7 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
-import { BookOpenText, Mic, Dices, WifiOff } from "lucide-react";
+import { BookOpenText, Mic, Dices, Scale, WifiOff } from "lucide-react";
 
 /**
  * The lanes, reachable.
@@ -44,6 +44,12 @@ const DESTINATIONS = [
     icon: BookOpenText,
     label: "ደብተር",
     sub: "Ledger"
+  },
+  {
+    href: "/governance",
+    icon: Scale,
+    label: "መመሪያ",
+    sub: "Bylaws"
   },
   {
     href: "/offline",

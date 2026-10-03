@@ -38,7 +38,12 @@ export const RATE_LIMITED = new Set([
   // cannot name a binding without one, so these are on the path to verifying
   // anything at all, and they return account metadata.
   "/api/bank-account-bindings",
-  "/api/my-groups"
+  "/api/my-groups",
+  // M5: the recommendation engine is a pure read-sized call; the citations
+  // route spends the server's ScholarXIV key, so it takes the write rule like
+  // the other third-party-backed routes.
+  "/api/governance/recommendations",
+  "/api/governance/citations"
 ]);
 
 const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
@@ -98,6 +103,12 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
   // A2: transcription and synthesis are billable third-party calls, so they
   // take the strictest rule the module has rather than the generic proxy one.
   if (pathname === "/api/voice/transcribe" || pathname === "/api/voice/speak") {
+    return WRITE_RULE;
+  }
+  if (pathname === "/api/governance/recommendations") {
+    return READ_RULE;
+  }
+  if (pathname === "/api/governance/citations") {
     return WRITE_RULE;
   }
   if (pathname.endsWith("/sync")) {

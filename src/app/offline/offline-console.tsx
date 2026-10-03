@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { OfflineSyncEngine } from "@/lib/offline/engine";
-import { UnconfiguredSyncTransport } from "@/lib/offline/transport";
+import { HttpSyncTransport, UnconfiguredSyncTransport } from "@/lib/offline/transport";
+import { useSession } from "@/lib/auth/useSession";
+import { readMyGroup } from "@/lib/ledger/clientRead";
 import { isContentHashingAvailable } from "@/lib/offline/hash";
 import { offlineCopy, type OfflineLocale } from "@/lib/offline/copy";
 import {
@@ -41,10 +43,70 @@ import { formatEtbDisplay } from "@/lib/ledger/money";
  *    `src/lib/offline/copy.ts` (see `docs/requests/agent-4.md` R3).
  */
 
-const GROUP_ID = "22222222-2222-4222-8222-222222222222";
-const CASH_ACCOUNT = "44444444-4444-4444-8444-444444444444";
-const INCOME_ACCOUNT = "55555555-5555-4555-8555-555555555555";
-const ACTOR_ID = "11111111-1111-4111-8111-111111111111";
+/**
+ * The group a *signed-out* (or unconfigured) device keeps its purely local
+ * desk under. It is a placeholder, not a real group: nothing recorded under it
+ * can be queued for the server. A signed-in device resolves its own group
+ * (`readMyGroup`) and refuses to queue an entry until it has one.
+ */
+const LOCAL_GROUP_ID = "22222222-2222-4222-8222-222222222222";
+const PLACEHOLDER_CASH_ACCOUNT = "44444444-4444-4444-8444-444444444444";
+const PLACEHOLDER_INCOME_ACCOUNT = "55555555-5555-4555-8555-555555555555";
+const GROUP_CACHE_KEY = "sened.offline.group.v1";
+
+type GroupState =
+  | { readonly status: "idle" }
+  | { readonly status: "loading" }
+  | {
+      readonly status: "ready";
+      readonly groupId: string;
+      readonly role: string | null;
+      readonly cashAccountId: string | null;
+      readonly incomeAccountId: string | null;
+    }
+  | { readonly status: "no-group" | "multiple-groups" | "unresolved" };
+
+interface CachedGroup {
+  readonly email: string;
+  readonly groupId: string;
+  readonly role: string | null;
+  readonly cashAccountId: string | null;
+  readonly incomeAccountId: string | null;
+}
+
+/** Per-device convenience only: lets a signed-in treasurer keep drafting with no network. */
+function readCachedGroup(email: string | null): GroupState | null {
+  if (!email) {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(GROUP_CACHE_KEY);
+    const value = raw ? (JSON.parse(raw) as Partial<CachedGroup>) : null;
+    if (value && value.email === email && typeof value.groupId === "string") {
+      return {
+        status: "ready",
+        groupId: value.groupId,
+        role: typeof value.role === "string" ? value.role : null,
+        cashAccountId: typeof value.cashAccountId === "string" ? value.cashAccountId : null,
+        incomeAccountId: typeof value.incomeAccountId === "string" ? value.incomeAccountId : null
+      };
+    }
+  } catch {
+    // Storage blocked or corrupt: no cache.
+  }
+  return null;
+}
+
+function writeCachedGroup(email: string | null, group: Extract<GroupState, { status: "ready" }>): void {
+  if (!email) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(GROUP_CACHE_KEY, JSON.stringify({ email, ...group, status: undefined }));
+  } catch {
+    // Best effort.
+  }
+}
 
 const CHANNELS = ["telebirr", "cbe-birr", "cash", "bank-transfer"] as const;
 const ENTRY_TYPES = ["contribution", "disbursement", "journal"] as const;
@@ -76,9 +138,9 @@ const EMPTY_STATE: DeskState = {
 };
 
 export interface OfflineConsoleProps {
-  /** Wave 2 replaces this. Defaults to the fail-closed transport. */
+  /** Test seam. Defaults to `HttpSyncTransport` when signed in, else the fail-closed transport. */
   readonly transport?: SyncTransport;
-  /** Wave 2 supplies the session token. Never persisted. */
+  /** Test seam. Defaults to the signed-in session's Bearer token. Never persisted. */
   readonly authorization?: string;
   readonly initialLocale?: OfflineLocale;
   /** Test seam. Production resolves the device's real IndexedDB. */
@@ -135,6 +197,72 @@ export function OfflineConsole(props: OfflineConsoleProps) {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const session = useSession();
+  const signedIn = session.status === "signed-in";
+  const accessToken = session.status === "signed-in" ? session.accessToken : null;
+  const email = session.status === "signed-in" ? session.email : null;
+  const [group, setGroup] = useState<GroupState>({ status: "idle" });
+
+  useEffect(() => {
+    if (!accessToken) {
+      setGroup({ status: "idle" });
+      return;
+    }
+    let active = true;
+    setGroup({ status: "loading" });
+    void readMyGroup({ getToken: async () => accessToken }).then((read) => {
+      if (!active) {
+        return;
+      }
+      if (read.status === "ok") {
+        const accountByCode = new Map(read.accounts.map((account) => [account.code, account.id]));
+        const ready = {
+          status: "ready" as const,
+          groupId: read.groupId,
+          role: read.role,
+          cashAccountId: accountByCode.get("POT_CASH") ?? null,
+          incomeAccountId: accountByCode.get("CONTRIBUTION_INCOME") ?? null
+        };
+        writeCachedGroup(email, ready);
+        setGroup(ready);
+      } else if (read.status === "no-group" || read.status === "multiple-groups") {
+        setGroup({ status: read.status });
+      } else {
+        // Could not look (offline, 401, 5xx). A group this account resolved
+        // before is still its group; otherwise say so rather than guess.
+        setGroup(readCachedGroup(email) ?? { status: "unresolved" });
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [accessToken, email]);
+
+  const GROUP_ID = group.status === "ready" ? group.groupId : LOCAL_GROUP_ID;
+  const authorization = props.authorization ?? (accessToken ? `Bearer ${accessToken}` : undefined);
+
+  /** Why a signed-in device may not queue entries yet, or `null` when it may. */
+  const groupBlock: string | null = !signedIn
+    ? null
+    : group.status === "ready"
+      ? group.role === "member"
+        ? "offline.group.readOnly"
+        : null
+      : group.status === "no-group"
+        ? "offline.group.none"
+        : group.status === "multiple-groups"
+          ? "offline.group.multiple"
+          : "offline.group.unresolved";
+
+  const syncModeKey: string | null = props.transport
+    ? null
+    : session.status === "unconfigured"
+      ? "offline.sync.authUnconfigured"
+      : session.status === "signed-out"
+        ? "offline.sync.needsToken"
+        : signedIn && group.status !== "idle" && group.status !== "loading"
+          ? (groupBlock ?? "offline.sync.connected")
+          : null;
 
   const t = useCallback(
     (key: string, variables: Record<string, string | number> = {}) =>
@@ -149,8 +277,11 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     if (!db) {
       return null;
     }
-    return new OfflineSyncEngine({ db, transport: props.transport ?? new UnconfiguredSyncTransport() });
-  }, [db, props.transport]);
+    return new OfflineSyncEngine({
+      db,
+      transport: props.transport ?? (signedIn ? new HttpSyncTransport() : new UnconfiguredSyncTransport())
+    });
+  }, [db, props.transport, signedIn]);
 
   const refresh = useCallback(async () => {
     if (!db) {
@@ -177,7 +308,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
         return;
       }
     }
-  }, [db]);
+  }, [db, GROUP_ID]);
 
   useEffect(() => {
     if (!isOfflineStorageAvailable()) {
@@ -218,7 +349,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
     // `drain` is stable enough for this listener: it re-reads the engine on call.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [db, engine]);
+  }, [db, engine, authorization, GROUP_ID, groupBlock]);
 
   const run = useCallback(
     async (action: () => Promise<string | null>) => {
@@ -263,10 +394,13 @@ export function OfflineConsole(props: OfflineConsoleProps) {
       return;
     }
     await run(async () => {
-      if (!props.authorization) {
+      if (!authorization) {
         return t("offline.sync.needsToken");
       }
-      const report = await engine.drain(props.authorization, { groupId: GROUP_ID });
+      if (!props.transport && groupBlock) {
+        return t(groupBlock);
+      }
+      const report = await engine.drain(authorization, { groupId: GROUP_ID });
       await refresh();
       // Localised, actionable copy first. A raw transport string is honest but
       // is not something an Ethiopian treasurer can act on in Amharic.
@@ -288,10 +422,13 @@ export function OfflineConsole(props: OfflineConsoleProps) {
       return;
     }
     await run(async () => {
-      if (!props.authorization) {
+      if (!authorization) {
         return t("offline.sync.needsToken");
       }
-      const report = await engine.pull(props.authorization, { groupId: GROUP_ID });
+      if (!props.transport && groupBlock) {
+        return t(groupBlock);
+      }
+      const report = await engine.pull(authorization, { groupId: GROUP_ID });
       if (report.notConfigured) {
         return t("offline.sync.notConfigured");
       }
@@ -352,8 +489,13 @@ export function OfflineConsole(props: OfflineConsoleProps) {
       if (!db) {
         throw new Error(t("offline.storage.unavailable"));
       }
+      // A signed-in device only saves a draft under its real group. Under the
+      // placeholder it could never sync, and would look like pending work.
+      if (groupBlock) {
+        throw new Error(t(groupBlock));
+      }
       const draft = await saveDraft(db, {
-        updatedBy: ACTOR_ID,
+        updatedBy: email ?? "this-device",
         request: {
           groupId: GROUP_ID,
           idempotencyKey: `offline-${Date.now().toString(36)}`,
@@ -511,6 +653,11 @@ export function OfflineConsole(props: OfflineConsoleProps) {
               {t("offline.sync.push")}
             </button>
           </div>
+          {syncModeKey ? (
+            <p className="mt-3 text-xs text-offline-quiet" data-testid="offline-sync-mode">
+              {t(syncModeKey)}
+            </p>
+          ) : null}
           {status ? (
             <p className="mt-3 text-xs text-gold-300" role="status">
               {status}
@@ -525,7 +672,13 @@ export function OfflineConsole(props: OfflineConsoleProps) {
 
         <RosterPanel desk={desk} t={t} onRecord={recordNote} />
         <NotesPanel notes={desk.notes} t={t} onDelete={deleteNote} />
-        <DraftsPanel desk={desk} t={t} onRecord={recordDraft} />
+        <DraftsPanel
+          desk={desk}
+          t={t}
+          onRecord={recordDraft}
+          defaultCashAccountId={group.status === "ready" ? group.cashAccountId : null}
+          defaultIncomeAccountId={group.status === "ready" ? group.incomeAccountId : null}
+        />
         <QueuePanel desk={desk} t={t} />
       </div>
     </main>
@@ -689,11 +842,20 @@ function NotesPanel({ notes, t, onDelete }: { readonly notes: readonly SpokenNot
   );
 }
 
-function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly t: TFn; readonly onRecord: (input: { amount: string; entryType: (typeof ENTRY_TYPES)[number]; cashAccountId: string; incomeAccountId: string; occurredAt: string; queueNow: boolean }) => Promise<void> }) {
+function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAccountId }: { readonly defaultCashAccountId: string | null; readonly defaultIncomeAccountId: string | null; readonly desk: DeskState; readonly t: TFn; readonly onRecord: (input: { amount: string; entryType: (typeof ENTRY_TYPES)[number]; cashAccountId: string; incomeAccountId: string; occurredAt: string; queueNow: boolean }) => Promise<void> }) {
   const [amount, setAmount] = useState("");
   const [entryType, setEntryType] = useState<(typeof ENTRY_TYPES)[number]>("contribution");
-  const [cashAccountId, setCashAccountId] = useState(CASH_ACCOUNT);
-  const [incomeAccountId, setIncomeAccountId] = useState(INCOME_ACCOUNT);
+  const [cashAccountId, setCashAccountId] = useState(defaultCashAccountId ?? PLACEHOLDER_CASH_ACCOUNT);
+  const [incomeAccountId, setIncomeAccountId] = useState(defaultIncomeAccountId ?? PLACEHOLDER_INCOME_ACCOUNT);
+  // The group's own chart replaces the placeholder ids once it is known.
+  useEffect(() => {
+    if (defaultCashAccountId) {
+      setCashAccountId(defaultCashAccountId);
+    }
+    if (defaultIncomeAccountId) {
+      setIncomeAccountId(defaultIncomeAccountId);
+    }
+  }, [defaultCashAccountId, defaultIncomeAccountId]);
   const [occurredAt, setOccurredAt] = useState(() => new Date().toISOString().slice(0, 16));
 
   return (

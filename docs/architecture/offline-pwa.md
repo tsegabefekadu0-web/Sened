@@ -29,9 +29,10 @@ dependency (`dexie@4.4.6`).
 
 **Deliberately deferred (Wave 2, AGENTWORK §10)**
 
-- **No `/api/sync` route.** The *client* half is complete and typed; the server
-  half belongs to A1. §3 specifies the contract precisely enough to be
-  implemented without a redesign.
+- **`/api/sync` now exists** (`src/app/api/sync/route.ts`, logic in
+  `src/lib/sync/routeHandlers.ts`); §3 describes what it does. The app still
+  *defaults* to `UnconfiguredSyncTransport`: wiring `HttpSyncTransport` into the
+  console is a separate, deliberate step.
 - **No Playwright E2E.** `@playwright/test` is not installed, and the brief
   forbids adding it this wave.
 - **No SQL migration.** Nothing here needs a table; the server is A1's.
@@ -76,7 +77,7 @@ string is what every comparison uses.
 
 ---
 
-## 3. The sync contract (Wave 2 server half)
+## 3. The sync contract (implemented server half)
 
 ```ts
 interface SyncTransport {
@@ -87,7 +88,36 @@ interface SyncTransport {
 
 `POST /api/sync` with `{ mutations: SyncPushEnvelope[] }` →
 `{ results: SyncPushResult[] }`, or `{ groupId, sinceSequence, limit }` →
-`SyncPullResult`.
+`SyncPullResult`. One URL, two disjoint strict shapes, chosen by body
+(pulls are metered by `/api/sync`'s write rule because the middleware cannot see
+the body). Requests require a Bearer token, `application/json`, a 256 KiB body cap, and answer
+`Cache-Control: no-store`.
+
+**Push.** Each envelope is replayed, in order, through `LedgerService.append`
+-> `post_ledger_entry_v1`, the same path as `POST /api/ledger/entries`, so
+validation, balancing, the owner/treasurer role gate and idempotency are that
+path's. Idempotency is the RPC's unique `(group, idempotency key)` row plus the
+request fingerprint: a replay returns the stored entry as `REPLAYED`, a
+different body under the same key is `idempotency_conflict`. The **envelope's**
+`idempotencyKey` is the ledger key (the outbox derives it from the draft id and
+keeps it across retries; the payload's own `idempotencyKey` is only a local
+label and is overridden). The envelope's `groupId` must equal the payload's
+(`envelope_mismatch` otherwise). The response always holds one result per envelope, in order; a
+failure is that item's `REJECTED` + `error` (`invalid_request`, `forbidden`,
+`not_found`, `idempotency_conflict`, `unprocessable_ledger_entry`,
+`unsupported_mutation_kind`). Transient ledger failures (`ledger_unavailable`,
+`ledger_write_failed`) are `REJECTED` **with `retryAfterMs`**, which the engine
+turns into a bounded retry rather than a dead end. Only `ledger-draft` has a
+server path; `spoken-note` and `roster-member` are refused, never faked.
+
+**Pull.** Reads under the caller's JWT (RLS): the group's `ledger_group_heads`
+row, then entries with `sequence > sinceSequence` and `<= head.lastSequence`
+ascending (so head and slice are one snapshot), `limit` 1..500, `hasMore` from a
+`limit + 1` read. Before returning, the server checks the slice for sequence
+gaps, `previousHash` links, and that a slice ending at the head hashes to
+`head.lastHash`; a failure is a 502, never a page to trust. A group the caller
+cannot see is 404. Entries omit tenant id, request fingerprint and idempotency
+key; the head carries the tenant id.
 
 Rules the server must honour, in priority order:
 
@@ -435,7 +465,7 @@ mistakes:
 
 | Request | Target | Blocking? |
 |---|---|---|
-| R1 — add `/api/sync` to `RATE_LIMITED` in `src/middleware.ts` (the `resolveRateLimit` branch at line 27-29 is already there but unreachable) | A1 | No — Wave 2 |
+| R1 — add `/api/sync` to `RATE_LIMITED` in `src/middleware.ts` | A1 | Done  |
 | R2 — add `<link rel="manifest">` + `apple-touch-icon` to `src/app/layout.tsx` | A1 | **Yes** — installability |
 | R3 — fold the 70 `offline.*` triples in §6 into `src/lib/i18n.ts`, then delete `src/lib/offline/copy.ts` | A2 | No |
 | R4/R5 — no change requested; `canonical.ts` signatures and the ledger route are dependencies I only read | A1 | No |
@@ -444,9 +474,9 @@ mistakes:
 
 ## 12. Known limitations, stated rather than hidden
 
-- **No server exists.** Wave 2. Every drain fails closed with
-  `SYNC_NOT_CONFIGURED` and the queue stays visibly queued. That is the honest
-  state today, not a gap in the design.
+- **The server exists but is not wired in by default.** The engine's default
+  transport is still `UnconfiguredSyncTransport`, so a drain fails closed with
+  `SYNC_NOT_CONFIGURED` until `HttpSyncTransport` is injected.
 - **The console uses fixture group and account UUIDs.** A1 supplies real ones at
   integration; they are module constants for that reason.
 - **No audio blobs are persisted.** A 25 MB base64 string in IndexedDB is how a

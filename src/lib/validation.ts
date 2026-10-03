@@ -149,6 +149,61 @@ export const ledgerInviteRevokeRequestSchema = z.object({ inviteId: uuidSchema }
 /** Query of `GET /api/ledger/invites` and `GET /api/ledger/members`. */
 export const ledgerGroupQuerySchema = z.object({ groupId: uuidSchema }).strict();
 
+/**
+ * `POST /api/sync` bodies (the offline outbox drain and the chain pull share
+ * one URL; the shapes are disjoint and both strict, so a body can only ever be
+ * one of them). The push envelope carries an opaque `payload`: it is judged by
+ * `ledgerEntryRequestSchema` per item, so one malformed draft is that item's
+ * rejection and not the whole batch's 400.
+ */
+export const SYNC_PUSH_MAX_BATCH = 25;
+export const SYNC_PULL_MAX_LIMIT = 500;
+
+const syncKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+
+export const syncPushEnvelopeSchema = z
+  .object({
+    mutationId: z.string().min(1).max(128),
+    idempotencyKey: syncKeySchema,
+    kind: z.enum(["ledger-draft", "spoken-note", "roster-member"]),
+    groupId: uuidSchema,
+    payload: z.unknown(),
+    clientRecordedAt: z.string().max(35).datetime({ offset: true })
+  })
+  .strict();
+
+export const syncPushRequestSchema = z
+  .object({
+    mutations: z.array(syncPushEnvelopeSchema).min(1).max(SYNC_PUSH_MAX_BATCH)
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const seen = new Set<string>();
+    value.mutations.forEach((mutation, index) => {
+      if (seen.has(mutation.mutationId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["mutations", index, "mutationId"],
+          message: "Duplicate mutation id"
+        });
+      }
+      seen.add(mutation.mutationId);
+    });
+  });
+
+export const syncPullRequestSchema = z
+  .object({
+    groupId: uuidSchema,
+    sinceSequence: z.string().regex(/^(0|[1-9]\d{0,17})$/),
+    limit: z.number().int().min(1).max(SYNC_PULL_MAX_LIMIT)
+  })
+  .strict();
+
 export type LedgerEntryRequestInput = z.input<typeof ledgerEntryRequestSchema>;
 export type ValidatedLedgerEntryRequest = z.output<typeof ledgerEntryRequestSchema>;
 

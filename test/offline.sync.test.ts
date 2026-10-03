@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const serverMocks = vi.hoisted(() => ({ getUser: vi.fn(), rpc: vi.fn() }));
+
+vi.mock("server-only", () => ({}));
+vi.mock("@supabase/supabase-js", () => ({
+  createClient: vi.fn(() => ({ auth: { getUser: serverMocks.getUser }, rpc: serverMocks.rpc }))
+}));
+
 import { createSenedDatabase, deleteSenedDatabase, resetSenedDatabase, type SenedDatabase } from "@/lib/db";
 import { saveDraft, queueDraft } from "@/lib/db/drafts";
 import { readDivergence, resolveDivergence } from "@/lib/db/meta";
@@ -18,6 +26,8 @@ import {
 import { HttpSyncTransport, UnconfiguredSyncTransport } from "@/lib/offline/transport";
 import { computeBackoffMs, parseRetryAfterMs } from "@/lib/offline/backoff";
 import type { LedgerEntryLike } from "@/lib/offline/contract";
+import { POST as syncRoute } from "@/app/api/sync/route";
+import { buildLedgerEntry, type LedgerEntryRequest } from "@/lib/ledger";
 
 const groupId = "22222222-2222-4222-8222-222222222222";
 const cashAccount = "44444444-4444-4444-8444-444444444444";
@@ -937,5 +947,116 @@ describe("HttpSyncTransport", () => {
     await expect(transport.pull(token, { groupId, sinceSequence: "0", limit: 1 })).rejects.toMatchObject({
       code: "SYNC_NOT_CONFIGURED"
     });
+  });
+});
+
+describe("the offline engine against the real /api/sync handler", () => {
+  const tenantId = "99999999-9999-4999-8999-999999999999";
+
+  function fakeLedger() {
+    const store = new Map<string, ReturnType<typeof buildLedgerEntry>>();
+    serverMocks.rpc.mockReset().mockImplementation(async (_name: string, args: Record<string, unknown>) => {
+      const key = args.requested_idempotency_key as string;
+      const existing = store.get(key);
+      if (existing) {
+        return { data: { entry: existing, replayed: true }, error: null };
+      }
+      const sequence = String(store.size + 1);
+      const request: LedgerEntryRequest = {
+        groupId: args.requested_group_id as string,
+        idempotencyKey: key,
+        occurredAt: args.requested_occurred_at as string,
+        entryType: args.requested_entry_type as LedgerEntryRequest["entryType"],
+        postings: args.requested_postings as LedgerEntryRequest["postings"]
+      };
+      const built = buildLedgerEntry({
+        request,
+        actorId,
+        tenantId,
+        entryId: `5555555${sequence}-5555-4555-8555-555555555555`,
+        nonce: `6666666${sequence}-6666-4666-8666-666666666666`,
+        sequence,
+        previousHash: "0".repeat(64),
+        recordedAt: "2026-09-20T09:00:01.000Z",
+        postingIds: [`aaaaaaa${sequence}-aaaa-4aaa-8aaa-aaaaaaaaaaaa`, `bbbbbbb${sequence}-bbbb-4bbb-8bbb-bbbbbbbbbbbb`]
+      });
+      store.set(key, built);
+      return { data: { entry: built, replayed: false }, error: null };
+    });
+    return store;
+  }
+
+  function realTransport() {
+    const fetchImpl = (async (url: string, init: RequestInit) =>
+      syncRoute(new Request(`http://localhost${url}`, init))) as unknown as typeof fetch;
+    return new HttpSyncTransport({ fetchImpl });
+  }
+
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://demo.supabase.co");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon-key");
+    serverMocks.getUser.mockReset().mockResolvedValue({ data: { user: { id: actorId } }, error: null });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("settles a queued draft synced from the server's own entry id and hash", async () => {
+    const store = fakeLedger();
+    const draft = await saveDraft(db, { request: contributionRequest("local-label-1"), updatedBy: actorId });
+    await queueDraft(db, draft.id, { now: clockAt });
+
+    const report = await engine(realTransport()).drain(token, { groupId });
+
+    expect(report).toMatchObject({ attempted: 1, synced: 1, rejected: 0, blocked: 0 });
+    const row = (await db.outbox.toArray())[0]!;
+    expect(row.state).toBe("synced");
+    expect(row.serverEntryId).toBe([...store.values()][0]!.id);
+    expect(row.serverEntryHash).toBe([...store.values()][0]!.entryHash);
+    // The ledger saw the outbox's derived key, not the draft's local label.
+    expect(serverMocks.rpc.mock.calls[0]![1].requested_idempotency_key).toBe(row.idempotencyKey);
+  });
+
+  it("never duplicates an entry when the response is lost and the drain is retried", async () => {
+    const store = fakeLedger();
+    const draft = await saveDraft(db, { request: contributionRequest("local-label-2"), updatedBy: actorId });
+    await queueDraft(db, draft.id, { now: clockAt });
+
+    const real = realTransport();
+    const lossy: SyncTransport = {
+      async push(authorization, envelopes) {
+        await real.push(authorization, envelopes); // the server accepted...
+        throw new SyncError("SYNC_NETWORK", "response lost"); // ...but the device never heard
+      },
+      pull: (authorization, query) => real.pull(authorization, query)
+    };
+    const first = await engine(lossy).drain(token, { groupId });
+    expect(first.retried).toBe(1);
+    expect(store.size).toBe(1);
+
+    clockAt = new Date(clockAt.getTime() + 10 * 60_000);
+    const second = await engine(real).drain(token, { groupId });
+
+    expect(second.synced).toBe(1);
+    expect(store.size).toBe(1);
+    const row = (await db.outbox.toArray())[0]!;
+    expect(row.state).toBe("synced");
+    expect(row.serverEntryId).toBe([...store.values()][0]!.id);
+  });
+
+  it("settles a refused draft as rejected without touching its neighbour", async () => {
+    fakeLedger();
+    const good = await saveDraft(db, { request: contributionRequest("local-label-3"), updatedBy: actorId });
+    await queueDraft(db, good.id, { now: clockAt });
+    const bad = await saveDraft(db, { request: contributionRequest("local-label-4", "10.00"), updatedBy: actorId });
+    await queueDraft(db, bad.id, { now: clockAt });
+    serverMocks.rpc.mockImplementationOnce(async () => ({ data: null, error: { code: "42501", message: "ledger_forbidden" } }));
+
+    const report = await engine(realTransport()).drain(token, { groupId });
+
+    expect(report).toMatchObject({ attempted: 2, synced: 1, rejected: 1 });
+    const states = (await db.outbox.toArray()).map((row) => row.state).sort();
+    expect(states).toEqual(["rejected", "synced"]);
   });
 });

@@ -2,8 +2,11 @@
  * Offline sync contract — AGENT-4 (M6.1).
  *
  * This file is the *client half* of a bidirectional sync protocol. The server
- * half (`/api/sync`, `/api/sync/pull`) is Wave 2 and does not exist yet
- * (AGENTWORK §10), so every transport in this repo currently fails closed.
+ * half lives in `src/lib/sync/routeHandlers.ts`: `POST /api/sync` takes either
+ * `{ mutations }` (push) or `{ groupId, sinceSequence, limit }` (pull), which is
+ * the one URL `HttpSyncTransport` posts both to. `/offline` uses
+ * `HttpSyncTransport` when signed in and `UnconfiguredSyncTransport` (which
+ * fails closed) otherwise.
  *
  * Deliberate constraints:
  *

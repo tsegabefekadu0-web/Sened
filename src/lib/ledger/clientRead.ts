@@ -113,6 +113,60 @@ export type GroupLedgerRead =
   | { readonly status: "read-only" }
   | { readonly status: "error" };
 
+/** The caller's single group (id, role, chart of accounts) from `GET /api/my-groups`. */
+export type MyGroupRead =
+  | {
+      readonly status: "ok";
+      readonly groupId: string;
+      readonly role: string | null;
+      readonly accounts: readonly { readonly id: string; readonly code: string }[];
+    }
+  | { readonly status: "unauthorized" }
+  | { readonly status: "no-group" }
+  | { readonly status: "multiple-groups" }
+  | { readonly status: "error" };
+
+/**
+ * Resolve which group the caller is acting for. Exactly one group or a refusal:
+ * with none there is nothing to act on, and with several this refuses rather
+ * than choosing, because guessing is how money lands on the wrong ledger.
+ */
+export async function readMyGroup(deps: AuthedFetchDeps = {}): Promise<MyGroupRead> {
+  try {
+    const response = await authedFetch("/api/my-groups", { method: "GET" }, deps);
+    if (response.status === 401) {
+      return { status: "unauthorized" };
+    }
+    if (!response.ok) {
+      return { status: "error" };
+    }
+    const groups = ((await response.json()) as { groups?: readonly WireGroup[] }).groups ?? [];
+    if (groups.length === 0) {
+      return { status: "no-group" };
+    }
+    if (groups.length > 1) {
+      return { status: "multiple-groups" };
+    }
+    const group = groups[0];
+    if (typeof group.groupId !== "string") {
+      return { status: "error" };
+    }
+    const accounts = (Array.isArray(group.accounts) ? group.accounts : []).flatMap((account: WireAccount) =>
+      typeof account?.id === "string" && typeof account.code === "string"
+        ? [{ id: account.id, code: account.code }]
+        : []
+    );
+    return {
+      status: "ok",
+      groupId: group.groupId,
+      role: typeof group.role === "string" ? group.role : null,
+      accounts
+    };
+  } catch (error) {
+    return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
+  }
+}
+
 /**
  * Read the caller's group from `GET /api/my-groups`, then its entries from
  * `GET /api/ledger/entries`. The one place that sequence lives, shared by the
@@ -132,25 +186,12 @@ export async function readGroupLedger(
   options: { readonly writerOnly?: boolean; readonly limit?: number } = {}
 ): Promise<GroupLedgerRead> {
   try {
-    const groupsResponse = await authedFetch("/api/my-groups", { method: "GET" }, deps);
-    if (groupsResponse.status === 401) {
-      return { status: "unauthorized" };
+    const mine = await readMyGroup(deps);
+    if (mine.status !== "ok") {
+      return { status: mine.status };
     }
-    if (!groupsResponse.ok) {
-      return { status: "error" };
-    }
-    const groups = ((await groupsResponse.json()) as { groups?: readonly WireGroup[] }).groups ?? [];
-    if (groups.length === 0) {
-      return { status: "no-group" };
-    }
-    if (groups.length > 1) {
-      return { status: "multiple-groups" };
-    }
-    const groupId = groups[0].groupId;
-    if (typeof groupId !== "string") {
-      return { status: "error" };
-    }
-    if (options.writerOnly && groups[0].role === "member") {
+    const { groupId, role } = mine;
+    if (options.writerOnly && role === "member") {
       return { status: "read-only" };
     }
 
@@ -170,13 +211,7 @@ export async function readGroupLedger(
     if (!Array.isArray(wire)) {
       return { status: "error" };
     }
-    const accounts = (Array.isArray(groups[0].accounts) ? groups[0].accounts : []).flatMap(
-      (account: WireAccount) =>
-        typeof account?.id === "string" && typeof account.code === "string"
-          ? [{ id: account.id, code: account.code }]
-          : []
-    );
-    return { status: "ok", groupId, accounts, entries: wire };
+    return { status: "ok", groupId, accounts: mine.accounts, entries: wire };
   } catch (error) {
     return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
   }

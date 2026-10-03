@@ -1,4 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const hoisted = vi.hoisted(() => ({
+  session: { status: "unconfigured" } as { status: string; accessToken?: string; email?: string | null }
+}));
+
+vi.mock("@/lib/auth/useSession", () => ({ useSession: () => hoisted.session }));
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createSenedDatabase, deleteSenedDatabase, resetSenedDatabase, type SenedDatabase } from "@/lib/db";
@@ -64,6 +70,7 @@ async function findPanel(key: keyof typeof OFFLINE_COPY) {
 }
 
 beforeEach(() => {
+  hoisted.session = { status: "unconfigured" };
   dbName = `sened-test-console-${Math.random().toString(36).slice(2, 10)}`;
   db = createSenedDatabase(dbName);
   setOnline(false);
@@ -72,6 +79,8 @@ beforeEach(() => {
 afterEach(async () => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  window.localStorage.clear();
   db.close();
   await resetSenedDatabase();
   await deleteSenedDatabase(dbName);
@@ -416,3 +425,157 @@ describe("offline console", () => {
 });
 
 const OFFLINE_SYNC_PUSH = OFFLINE_COPY["offline.sync.push"].en;
+
+describe("offline console — real sync wiring", () => {
+  const REAL_GROUP = "77777777-7777-4777-8777-777777777777";
+  const POT_CASH = "88888888-8888-4888-8888-888888888881";
+  const CONTRIBUTION_INCOME = "88888888-8888-4888-8888-888888888882";
+  const SIGNED_IN = { status: "signed-in", accessToken: "tok", email: "t@example.com" };
+
+  function groupBody(groups: number, role = "treasurer") {
+    return {
+      groups: Array.from({ length: groups }, (_, index) => ({
+        groupId: index === 0 ? REAL_GROUP : `66666666-6666-4666-8666-66666666666${index}`,
+        role,
+        accounts: [
+          { id: POT_CASH, code: "POT_CASH" },
+          { id: CONTRIBUTION_INCOME, code: "CONTRIBUTION_INCOME" }
+        ]
+      }))
+    };
+  }
+
+  /** A stand-in for the two routes the wired console talks to. */
+  function stubServer(groups: ReturnType<typeof groupBody> | "network-down") {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit = {}) => {
+        calls.push({ url, init });
+        if (groups === "network-down") {
+          throw new TypeError("network down");
+        }
+        if (url === "/api/my-groups") {
+          return Response.json(groups);
+        }
+        const body = JSON.parse(String(init.body)) as { mutations: { mutationId: string }[] };
+        return Response.json({
+          results: body.mutations.map((m, index) => ({
+            mutationId: m.mutationId,
+            outcome: "ACCEPTED",
+            serverEntryId: `real-entry-${index + 1}`,
+            serverEntryHash: "a".repeat(64),
+            serverSequence: String(index + 1)
+          }))
+        });
+      })
+    );
+    return calls;
+  }
+
+  async function recordDraftVia(button: "queue" | "save") {
+    const user = userEvent.setup();
+    const panel = await findPanel("offline.drafts.title");
+    await user.type(within(panel).getByLabelText(OFFLINE_COPY["offline.drafts.amountLabel"].en), "250.00");
+    await user.click(within(panel).getByRole("button", { name: OFFLINE_COPY[`offline.drafts.${button}`].en }));
+    return { user, panel };
+  }
+
+  it("signed in: resolves the real group, drafts under it with its accounts, and pushes over HttpSyncTransport", async () => {
+    hoisted.session = SIGNED_IN;
+    const calls = stubServer(groupBody(1));
+    render(<OfflineConsole database={db} />);
+
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.sync.connected"].en);
+    const { user } = await recordDraftVia("queue");
+
+    await waitFor(async () => expect(await db.drafts.count()).toBe(1));
+    const draft = (await db.drafts.toArray())[0]!;
+    expect(draft.groupId).toBe(REAL_GROUP);
+    expect(draft.request.groupId).toBe(REAL_GROUP);
+    expect(draft.request.postings.map((posting) => posting.accountId)).toEqual([POT_CASH, CONTRIBUTION_INCOME]);
+    expect(draft.updatedBy).toBe("t@example.com");
+
+    const push = screen.getByRole("button", { name: OFFLINE_SYNC_PUSH });
+    await waitFor(() => expect(push).toBeEnabled());
+    await user.click(push);
+    await waitFor(async () => expect((await db.outbox.toArray())[0]?.state).toBe("synced"));
+
+    const syncCall = calls.find((call) => call.url === "/api/sync")!;
+    expect((syncCall.init.headers as Record<string, string>).authorization).toBe("Bearer tok");
+    const sent = JSON.parse(String(syncCall.init.body)) as { mutations: { groupId: string; idempotencyKey: string }[] };
+    expect(sent.mutations[0]).toMatchObject({
+      groupId: REAL_GROUP,
+      idempotencyKey: expect.stringContaining(`sened-offline:ledger-draft:${REAL_GROUP}:`)
+    });
+    expect((await db.outbox.toArray())[0]?.serverEntryId).toBe("real-entry-1");
+  });
+
+  it("refuses to queue entries when the account has no group or several, and says why", async () => {
+    for (const [groups, key] of [
+      [0, "offline.group.none"],
+      [2, "offline.group.multiple"]
+    ] as const) {
+      cleanup();
+      hoisted.session = SIGNED_IN;
+      stubServer(groupBody(groups));
+      render(<OfflineConsole database={db} />);
+      expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY[key].en);
+      await recordDraftVia("queue");
+      expect(await screen.findByRole("alert")).toHaveTextContent(OFFLINE_COPY[key].en);
+      expect(await db.drafts.count()).toBe(0);
+    }
+  });
+
+  it("refuses a plain member, who may read but not record", async () => {
+    hoisted.session = SIGNED_IN;
+    stubServer(groupBody(1, "member"));
+    render(<OfflineConsole database={db} />);
+    await screen.findByTestId("offline-sync-mode");
+    await recordDraftVia("save");
+    expect(await screen.findByRole("alert")).toHaveTextContent(OFFLINE_COPY["offline.group.readOnly"].en);
+    expect(await db.drafts.count()).toBe(0);
+  });
+
+  it("offline-first: with no network a returning user still drafts under the group they resolved before", async () => {
+    hoisted.session = SIGNED_IN;
+    stubServer(groupBody(1));
+    const first = render(<OfflineConsole database={db} />);
+    await screen.findByText(OFFLINE_COPY["offline.sync.connected"].en);
+    first.unmount();
+
+    const calls = stubServer("network-down");
+    render(<OfflineConsole database={db} />);
+    await recordDraftVia("save");
+    await waitFor(async () => expect(await db.drafts.count()).toBe(1));
+    expect((await db.drafts.toArray())[0]?.groupId).toBe(REAL_GROUP);
+    expect(calls.every((call) => call.url === "/api/my-groups")).toBe(true);
+  });
+
+  it("offline and never resolved: says the group is unknown instead of drafting under a placeholder", async () => {
+    hoisted.session = SIGNED_IN;
+    stubServer("network-down");
+    render(<OfflineConsole database={db} />);
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.group.unresolved"].en);
+    await recordDraftVia("save");
+    expect(await screen.findByRole("alert")).toHaveTextContent(OFFLINE_COPY["offline.group.unresolved"].en);
+    expect(await db.drafts.count()).toBe(0);
+  });
+
+  it("signed out or unconfigured: stays on the fail-closed transport, says why, and still drafts locally", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    hoisted.session = { status: "signed-out" };
+    render(<OfflineConsole database={db} />);
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.sync.needsToken"].en);
+    await recordDraftVia("save");
+    await waitFor(async () => expect(await db.drafts.count()).toBe(1));
+    cleanup();
+
+    hoisted.session = { status: "unconfigured" };
+    render(<OfflineConsole database={db} initialLocale="am" />);
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.sync.authUnconfigured"].am);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

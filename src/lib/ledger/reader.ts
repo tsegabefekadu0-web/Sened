@@ -191,7 +191,16 @@ export async function listGroupLedgerEntries(
     return [];
   }
 
-  const entryIds = entries.data.map((row) => uuid(isRecord(row) ? row : {}, "id"));
+  return attachPostings(client, groupId, entries.data);
+}
+
+/** Fetch the postings for already-read entry rows and join them on. */
+async function attachPostings(
+  client: SupabaseClient,
+  groupId: string,
+  rows: readonly unknown[]
+): Promise<readonly PublicLedgerEntry[]> {
+  const entryIds = rows.map((row) => uuid(isRecord(row) ? row : {}, "id"));
   const postings = await client
     .from("ledger_entry_postings")
     .select(POSTING_COLUMNS)
@@ -210,7 +219,7 @@ export async function listGroupLedgerEntries(
     const { entryId, ...posting } = parsePosting(raw);
     byEntry.set(entryId, [...(byEntry.get(entryId) ?? []), posting]);
   }
-  return entries.data.map((row) => {
+  return rows.map((row) => {
     const parsed = parseEntry(row, []);
     const entryPostings = byEntry.get(parsed.id);
     if (!entryPostings || entryPostings.length === 0) {
@@ -218,4 +227,96 @@ export async function listGroupLedgerEntries(
     }
     return { ...parsed, postings: entryPostings };
   });
+}
+
+/** The server's chain head for one group, as the sync pull reports it. */
+export interface PublicLedgerChainHead {
+  readonly groupId: string;
+  readonly tenantId: string;
+  readonly lastSequence: string;
+  readonly lastHash: string;
+}
+
+export interface LedgerChainSlice {
+  readonly head: PublicLedgerChainHead;
+  /** Ascending by sequence, every sequence in `(since, head.lastSequence]`. */
+  readonly entries: readonly PublicLedgerEntry[];
+  readonly hasMore: boolean;
+}
+
+/**
+ * A contiguous, hash-linked slice of one group's chain for the offline pull:
+ * entries with `sequence > sinceSequence`, ascending, at most `limit`, never
+ * past the head read in the same call (so the head and the slice describe one
+ * snapshot even while another device is appending).
+ *
+ * Runs under the caller's JWT and the tables' own `select` policies. `null`
+ * means the caller cannot see the group's head (absent and not-yours are the
+ * same answer). The slice is checked for gaps and broken `previousHash` links
+ * before it is returned: a chain the server cannot vouch for is an integrity
+ * failure, never a page the client is asked to trust.
+ */
+export async function readLedgerChainSlice(
+  client: SupabaseClient,
+  groupId: string,
+  sinceSequence: string,
+  limit: number
+): Promise<LedgerChainSlice | null> {
+  const headResult = await client
+    .from("ledger_group_heads")
+    .select("group_id, tenant_id, last_sequence, last_hash")
+    .eq("group_id", groupId)
+    .maybeSingle();
+  if (headResult.error) {
+    throw storageFailure(headResult.error);
+  }
+  if (!headResult.data) {
+    return null;
+  }
+  const headRow = isRecord(headResult.data) ? headResult.data : {};
+  const head: PublicLedgerChainHead = {
+    groupId: uuid(headRow, "group_id"),
+    tenantId: uuid(headRow, "tenant_id"),
+    lastSequence: numeric(headRow, "last_sequence"),
+    lastHash: str(headRow, "last_hash")
+  };
+
+  const rows = await client
+    .from("ledger_entries")
+    .select(ENTRY_COLUMNS)
+    .eq("group_id", groupId)
+    .gt("sequence", sinceSequence)
+    .lte("sequence", head.lastSequence)
+    .order("sequence", { ascending: true })
+    .limit(limit + 1);
+  if (rows.error) {
+    throw storageFailure(rows.error);
+  }
+  if (!Array.isArray(rows.data)) {
+    throw integrity("Ledger read returned an invalid entry list");
+  }
+  const hasMore = rows.data.length > limit;
+  const page = hasMore ? rows.data.slice(0, limit) : rows.data;
+  if (page.length === 0) {
+    return { head, entries: [], hasMore: false };
+  }
+
+  const entries = await attachPostings(client, groupId, page);
+  let expectedSequence: bigint | null = null;
+  let previous: PublicLedgerEntry | null = null;
+  for (const entry of entries) {
+    const sequence = BigInt(entry.sequence);
+    if (expectedSequence !== null && sequence !== expectedSequence) {
+      throw integrity("Ledger slice has a gap in its sequence");
+    }
+    if (previous !== null && entry.previousHash !== previous.entryHash) {
+      throw integrity("Ledger slice has a broken previous-hash link");
+    }
+    expectedSequence = sequence + 1n;
+    previous = entry;
+  }
+  if (previous !== null && previous.sequence === head.lastSequence && previous.entryHash !== head.lastHash) {
+    throw integrity("Ledger head does not match its last entry");
+  }
+  return { head, entries, hasMore };
 }

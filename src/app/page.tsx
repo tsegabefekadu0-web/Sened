@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Header } from "@/components/shell/Header";
@@ -11,8 +11,10 @@ import { BottomVoiceNav } from "@/components/navigation/BottomVoiceNav";
 import { VoiceModal } from "@/components/voice/VoiceModal";
 import { AudioDigestModal } from "@/components/voice/AudioDigestModal";
 import { TabPanel } from "@/components/shell/TabPanel";
-import { createTranslator, type Locale } from "@/lib/i18n";
+import { createTranslator, type Locale, type MessageKey } from "@/lib/i18n";
 import { useSession } from "@/lib/auth/useSession";
+import type { HomeLedgerResult } from "@/lib/ledger/clientHome";
+import { useHomeLedger } from "@/lib/ledger/useHomeLedger";
 import { requestBankVerification } from "@/lib/voice/clientVerify";
 import { getSenedDatabase, isOfflineStorageAvailable } from "@/lib/db";
 import { saveSpokenNote } from "@/lib/db/notes";
@@ -86,13 +88,30 @@ const referenceContributions: MemberContribution[] = [
   }
 ];
 
+/**
+ * The sample figures shown only when nobody is signed in, and labelled as such
+ * on screen and in the spoken digest. They are not a group's numbers.
+ */
+const SAMPLE_POT_BALANCE = 175000;
+const SAMPLE_CONTRIBUTED_COUNT = 17;
+const SAMPLE_TOTAL_MEMBERS = 20;
+
+const LIVE_NOTICE_KEYS: Readonly<Record<Exclude<HomeLedgerResult["status"], "ready">, MessageKey>> = {
+  empty: "home.live.empty",
+  unauthorized: "home.live.unauthorized",
+  "no-group": "home.live.noGroup",
+  "multiple-groups": "home.live.multipleGroups",
+  incomplete: "home.live.incomplete",
+  error: "home.live.error"
+};
+
 export default function SenedHome() {
   const router = useRouter();
   // The shell is Ge'ez-primary, so it opens in Amharic. It is also the first
   // surface to call `t()` rather than hard-coding literals, which the rest of
   // the Gen A tree still does.
   const [locale] = useState<Locale>("am");
-  const t = createTranslator(locale);
+  const t = useMemo(() => createTranslator(locale), [locale]);
   // Signed in -> the voice flow POSTs to /api/bank-verifications. Anything else
   // (loading, unconfigured, signed out) keeps the on-device provisional path.
   const session = useSession();
@@ -101,8 +120,39 @@ export default function SenedHome() {
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isDigestModalOpen, setIsDigestModalOpen] = useState(false);
 
-  const [contributions, setContributions] = useState<MemberContribution[]>(referenceContributions);
-  const [potBalance] = useState(175000);
+  // On-device spoken notes. They are provisional rows beside the feed and are
+  // never added to the pot balance, which comes from the ledger (or the sample).
+  const [localNotes, setLocalNotes] = useState<MemberContribution[]>([]);
+  const home = useHomeLedger(session);
+  const ledger = home.kind === "live" && home.result.status === "ready" ? home.result.summary : null;
+
+  // Signed out shows the labelled sample; signed in shows the ledger or nothing.
+  const ledgerRows = useMemo<MemberContribution[]>(
+    () =>
+      (ledger?.contributions ?? []).map((contribution) => ({
+        id: contribution.id,
+        name: t("shell.feed.ledgerContribution", { sequence: contribution.sequence }),
+        amountWire: contribution.amount,
+        transactionId: `#${contribution.sequence}`,
+        status: "PROVISIONAL" as const,
+        source: "ledger" as const
+      })),
+    [ledger, t]
+  );
+  const contributions = [
+    ...localNotes,
+    ...(home.kind === "sample" ? referenceContributions : ledgerRows)
+  ];
+  const potBalance: number | string | null =
+    home.kind === "sample" ? SAMPLE_POT_BALANCE : home.kind === "live" && home.result.status === "empty" ? "0.00" : ledger?.potBalance ?? null;
+  const notice: string | null =
+    home.kind === "sample"
+      ? t("home.sample.notice")
+      : home.kind === "loading"
+        ? t("home.live.loading")
+        : home.result.status === "ready"
+          ? null
+          : t(LIVE_NOTICE_KEYS[home.result.status]);
 
   /**
    * Record a spoken contribution on this device, as a provisional note.
@@ -141,7 +191,7 @@ export default function SenedHome() {
         occurredAt: new Date().toISOString()
       });
 
-      setContributions((previous) => [
+      setLocalNotes((previous) => [
         {
           id: note.id,
           name: "የተናገረ ልይል",
@@ -172,6 +222,14 @@ export default function SenedHome() {
           <div className="w-full md:grid md:grid-cols-12 md:gap-6 md:p-6 md:items-start max-w-5xl mx-auto">
             {/* Left Column on Desktop: Debter Treasury Card & Built Tools */}
             <div className="md:col-span-6 space-y-4">
+              {notice !== null && (
+                <p
+                  role={home.kind === "live" && home.result.status !== "empty" ? "alert" : "status"}
+                  className="mx-4 md:mx-0 mt-4 rounded-xl border border-dashed border-[#C6532B]/50 bg-[#FBEFE6] px-3 py-2 text-xs font-semibold leading-5 text-[#8A4B2A]"
+                >
+                  {notice}
+                </p>
+              )}
               <DebterCard potBalance={potBalance} onDrawClick={() => router.push("/draw")} />
               <WorkspaceLinks />
               <p className="px-4 md:px-0 text-center">
@@ -226,6 +284,9 @@ export default function SenedHome() {
           isOpen={isDigestModalOpen}
           onClose={() => setIsDigestModalOpen(false)}
           potBalance={potBalance}
+          isSample={home.kind === "sample"}
+          contributedCount={home.kind === "sample" ? SAMPLE_CONTRIBUTED_COUNT : undefined}
+          totalMembers={home.kind === "sample" ? SAMPLE_TOTAL_MEMBERS : undefined}
         />
       </div>
     </main>

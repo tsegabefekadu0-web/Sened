@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Pause, Play, RotateCcw, Square, Volume2, X } from "lucide-react";
 import { createTranslator, type Locale } from "@/lib/i18n";
+import { formatPotBalance } from "@/lib/ledger/homeSummary";
 import { TTS_SPEEDS, type TtsSpeed } from "@/lib/voice/tts";
 import { canSpeak, createSpeechPlayer, type PlaybackStatus } from "@/lib/voice/synthesis";
 import type { VoiceLanguage } from "@/lib/voice/types";
@@ -13,9 +14,17 @@ const BAR_COUNT = 24;
 export interface AudioDigestModalProps {
   isOpen: boolean;
   onClose: () => void;
-  potBalance?: number;
+  /**
+   * What the screen shows, spoken as-is: a number is the sample figure, a string
+   * a ledger amount. `null` or absent means there is no balance, and the report
+   * says so rather than inventing one.
+   */
+  potBalance?: number | string | null;
+  /** Both or neither: a cycle count is only spoken when it is known. */
   contributedCount?: number;
   totalMembers?: number;
+  /** The numbers are fixtures, not the group's ledger; the report says so. */
+  isSample?: boolean;
   /** Defaults to `am` — the M1 shell's existing language. */
   locale?: Locale;
   language?: VoiceLanguage;
@@ -45,26 +54,36 @@ type Player = ReturnType<typeof createSpeechPlayer>;
 export function AudioDigestModal({
   isOpen,
   onClose,
-  potBalance = 175_000,
-  contributedCount = 17,
-  totalMembers = 20,
+  potBalance = null,
+  contributedCount,
+  totalMembers,
+  isSample = false,
   locale = "am",
   language = "am"
 }: AudioDigestModalProps) {
   const t = useMemo(() => createTranslator(locale), [locale]);
 
-  const digestScript = useMemo(
-    () =>
-      `${t("audio.title")}: ${contributedCount} / ${totalMembers}. ` +
-      `${potBalance.toLocaleString("en-US")} ETB. ` +
-      `${totalMembers - contributedCount}.`,
-    [contributedCount, potBalance, t, totalMembers]
-  );
+  // One entry per spoken sentence. Counting sentences by splitting the script on
+  // "." would cut "175,000.00" in two.
+  const digestSentences = useMemo(() => {
+    const sentences = [`${t("audio.title")}.`];
+    if (isSample) {
+      sentences.push(t("audio.script.sample"));
+    }
+    sentences.push(
+      potBalance === null
+        ? t("audio.script.unavailable")
+        : t("audio.script.potBalance", { amount: formatPotBalance(potBalance) })
+    );
+    if (contributedCount !== undefined && totalMembers !== undefined) {
+      sentences.push(t("audio.script.contributed", { contributed: contributedCount, total: totalMembers }));
+    }
+    return sentences;
+  }, [contributedCount, isSample, potBalance, t, totalMembers]);
 
-  const sentenceCount = useMemo(
-    () => Math.max(1, digestScript.split(/[.!?\n]+/).filter((part) => part.trim().length > 0).length),
-    [digestScript]
-  );
+  const digestScript = useMemo(() => digestSentences.join(" "), [digestSentences]);
+
+  const sentenceCount = digestSentences.length;
 
   const [status, setStatus] = useState<PlaybackStatus>("idle");
   const [progress, setProgress] = useState(0);

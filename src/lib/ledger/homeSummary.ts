@@ -1,0 +1,132 @@
+import { STANDARD_ACCOUNTS } from "./accounts";
+import { LedgerError } from "./errors";
+import { formatEtbGrouped, formatEtbMinorUnits, toEtbMinorUnits } from "./money";
+import type { LedgerEntryType, LedgerPostingDirection } from "./types";
+
+/**
+ * What the home screen shows of a group's ledger: the pot balance and the
+ * contributions that built it. Pure, so the arithmetic is testable without a
+ * network and the screen, the card and the spoken digest cannot disagree.
+ *
+ * The pot balance is the net of every posting on the group's `POT_CASH`
+ * account — the asset the ደብተር shows (see `accounts.ts`). It is an asset, so
+ * a debit adds and a credit subtracts. Corrections, adjustments and
+ * disbursements are all in the sum because they all moved that account;
+ * counting only contributions would show money that was paid out or reversed.
+ * Money is `bigint` minor units throughout.
+ */
+
+export interface SummaryPosting {
+  readonly accountId: string;
+  readonly direction: LedgerPostingDirection;
+  readonly amount: string;
+}
+
+export interface SummaryEntry {
+  readonly id: string;
+  readonly sequence: string;
+  readonly occurredAt: string;
+  readonly entryType: LedgerEntryType;
+  readonly correctsEntryId: string | null;
+  readonly postings: readonly SummaryPosting[];
+}
+
+export interface SummaryAccount {
+  readonly id: string;
+  readonly code: string;
+}
+
+export interface HomeContribution {
+  readonly id: string;
+  readonly sequence: string;
+  readonly occurredAt: string;
+  /** ETB, two decimals: what this entry added to the pot. */
+  readonly amount: string;
+}
+
+export interface HomeLedgerSummary {
+  /** ETB, two decimals. */
+  readonly potBalance: string;
+  /** Newest first. Contributions that were later corrected are left out. */
+  readonly contributions: readonly HomeContribution[];
+}
+
+function integrity(message: string): LedgerError {
+  return new LedgerError("INTEGRITY_FAILURE", message);
+}
+
+/**
+ * Net change to one account by one entry, in minor units (debit positive).
+ * Throws on an amount that is not a valid ETB value, because a total built over
+ * a row we could not read is a wrong total.
+ */
+function netOnAccount(entry: SummaryEntry, accountId: string): bigint {
+  let net = 0n;
+  for (const posting of entry.postings) {
+    if (posting.accountId !== accountId) {
+      continue;
+    }
+    const units = toEtbMinorUnits(posting.amount);
+    net += posting.direction === "debit" ? units : -units;
+  }
+  return net;
+}
+
+/**
+ * Derive the home summary from a group's complete entry list.
+ *
+ * "Complete" is the caller's job to establish: summing a truncated list yields
+ * a plausible, wrong balance. Throws `INTEGRITY_FAILURE` when the group's chart
+ * has no `POT_CASH` account (it cannot be guessed) or when the ledger nets the
+ * pot below zero (cash cannot be owed; something is missing or wrong).
+ */
+export function summarizeLedger(
+  entries: readonly SummaryEntry[],
+  accounts: readonly SummaryAccount[]
+): HomeLedgerSummary {
+  const pot = accounts.find((account) => account.code === STANDARD_ACCOUNTS.POT_CASH.code);
+  if (!pot) {
+    throw integrity("The group's chart of accounts has no pot cash account");
+  }
+
+  let balance = 0n;
+  for (const entry of entries) {
+    balance += netOnAccount(entry, pot.id);
+  }
+  if (balance < 0n) {
+    throw integrity("The ledger nets the pot below zero");
+  }
+
+  const corrected = new Set(entries.map((entry) => entry.correctsEntryId).filter((id) => id !== null));
+  const contributions: HomeContribution[] = [];
+  for (const entry of entries) {
+    if (entry.entryType !== "contribution" || corrected.has(entry.id)) {
+      continue;
+    }
+    const added = netOnAccount(entry, pot.id);
+    // A contribution that did not add to the pot is not a pot contribution.
+    if (added > 0n) {
+      contributions.push({
+        id: entry.id,
+        sequence: entry.sequence,
+        occurredAt: entry.occurredAt,
+        amount: formatEtbMinorUnits(added)
+      });
+    }
+  }
+  contributions.sort((left, right) => {
+    const difference = BigInt(right.sequence) - BigInt(left.sequence);
+    return difference < 0n ? -1 : difference > 0n ? 1 : 0;
+  });
+
+  return { potBalance: formatEtbMinorUnits(balance), contributions };
+}
+
+/**
+ * One rendering of the pot balance for the card and the digest. A string is a
+ * ledger amount and is only ever grouped, never turned into a float; a number
+ * is the sample figure.
+ */
+export function formatPotBalance(value: number | string): string {
+  return typeof value === "string" ? formatEtbGrouped(value) : value.toLocaleString("en-US");
+}

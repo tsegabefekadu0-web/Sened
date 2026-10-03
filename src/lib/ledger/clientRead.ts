@@ -29,16 +29,21 @@ export type LiveLedgerResult =
   | { readonly status: "read-only" }
   | { readonly status: "error" };
 
+interface WireAccount {
+  readonly id?: unknown;
+  readonly code?: unknown;
+}
 interface WireGroup {
   readonly groupId?: unknown;
   readonly role?: unknown;
+  readonly accounts?: readonly WireAccount[];
 }
-interface WirePosting {
+export interface WirePosting {
   readonly accountId?: unknown;
   readonly direction?: unknown;
   readonly amount?: unknown;
 }
-interface WireEntry {
+export interface WireEntry {
   readonly id?: unknown;
   readonly groupId?: unknown;
   readonly occurredAt?: unknown;
@@ -94,16 +99,38 @@ function toTarget(entry: WireEntry): LiveCorrectionTarget | null {
   };
 }
 
+/** The caller's single group, with its chart of accounts and raw entries. */
+export type GroupLedgerRead =
+  | {
+      readonly status: "ok";
+      readonly groupId: string;
+      readonly accounts: readonly { readonly id: string; readonly code: string }[];
+      readonly entries: readonly WireEntry[];
+    }
+  | { readonly status: "unauthorized" }
+  | { readonly status: "no-group" }
+  | { readonly status: "multiple-groups" }
+  | { readonly status: "read-only" }
+  | { readonly status: "error" };
+
 /**
- * Load the entries the correction form can target: the caller's group from
- * `GET /api/my-groups`, then `GET /api/ledger/entries` for it.
+ * Read the caller's group from `GET /api/my-groups`, then its entries from
+ * `GET /api/ledger/entries`. The one place that sequence lives, shared by the
+ * correction form and the home screen.
  *
  * Every non-success is a distinct result, because "you have nothing" and "we
  * could not look" must not render the same. With more than one group this
  * refuses rather than choosing: picking the group someone is acting for is
  * exactly the guess that puts money on the wrong ledger.
+ *
+ * `writerOnly` is for callers that go on to record entries: only the owner and
+ * treasurer may (the database enforces it), so say so up front rather than
+ * letting a submit fail with a 403. Readers pass nothing: any member may read.
  */
-export async function loadCorrectionTargets(deps: AuthedFetchDeps = {}): Promise<LiveLedgerResult> {
+export async function readGroupLedger(
+  deps: AuthedFetchDeps = {},
+  options: { readonly writerOnly?: boolean; readonly limit?: number } = {}
+): Promise<GroupLedgerRead> {
   try {
     const groupsResponse = await authedFetch("/api/my-groups", { method: "GET" }, deps);
     if (groupsResponse.status === 401) {
@@ -123,14 +150,13 @@ export async function loadCorrectionTargets(deps: AuthedFetchDeps = {}): Promise
     if (typeof groupId !== "string") {
       return { status: "error" };
     }
-    // Only the owner and treasurer may record entries (the database enforces
-    // it). Say so up front rather than letting a submit fail with a 403.
-    if (groups[0].role === "member") {
+    if (options.writerOnly && groups[0].role === "member") {
       return { status: "read-only" };
     }
 
+    const limitQuery = options.limit === undefined ? "" : `&limit=${options.limit}`;
     const entriesResponse = await authedFetch(
-      `/api/ledger/entries?groupId=${encodeURIComponent(groupId)}`,
+      `/api/ledger/entries?groupId=${encodeURIComponent(groupId)}${limitQuery}`,
       { method: "GET" },
       deps
     );
@@ -144,17 +170,36 @@ export async function loadCorrectionTargets(deps: AuthedFetchDeps = {}): Promise
     if (!Array.isArray(wire)) {
       return { status: "error" };
     }
-    const alreadyCorrected = new Set(wire.map((entry) => entry.correctsEntryId));
-    const targets = wire
-      .filter((entry) => entry.entryType !== "correction" && !alreadyCorrected.has(entry.id))
-      .map(toTarget);
-    if (targets.some((target) => target === null)) {
-      return { status: "error" };
-    }
-    return targets.length === 0
-      ? { status: "empty" }
-      : { status: "ready", targets: targets as LiveCorrectionTarget[] };
+    const accounts = (Array.isArray(groups[0].accounts) ? groups[0].accounts : []).flatMap(
+      (account: WireAccount) =>
+        typeof account?.id === "string" && typeof account.code === "string"
+          ? [{ id: account.id, code: account.code }]
+          : []
+    );
+    return { status: "ok", groupId, accounts, entries: wire };
   } catch (error) {
     return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
   }
+}
+
+/**
+ * Load the entries the correction form can target: the caller's group, then
+ * its entries (see `readGroupLedger`).
+ */
+export async function loadCorrectionTargets(deps: AuthedFetchDeps = {}): Promise<LiveLedgerResult> {
+  const read = await readGroupLedger(deps, { writerOnly: true });
+  if (read.status !== "ok") {
+    return { status: read.status };
+  }
+  const wire = read.entries;
+  const alreadyCorrected = new Set(wire.map((entry) => entry.correctsEntryId));
+  const targets = wire
+    .filter((entry) => entry.entryType !== "correction" && !alreadyCorrected.has(entry.id))
+    .map(toTarget);
+  if (targets.some((target) => target === null)) {
+    return { status: "error" };
+  }
+  return targets.length === 0
+    ? { status: "empty" }
+    : { status: "ready", targets: targets as LiveCorrectionTarget[] };
 }

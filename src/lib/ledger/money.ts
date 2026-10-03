@@ -59,10 +59,15 @@ export function formatEtbAmount(value: string): string {
   return formatEtbMinorUnits(toEtbMinorUnits(value));
 }
 
-export function formatEtbDisplay(value: string): string {
+/** `175000` -> `175,000.00`: the amount alone, for callers that draw their own currency mark. */
+export function formatEtbGrouped(value: string): string {
   const canonical = formatEtbAmount(value);
   const [whole, fraction] = canonical.split(".");
-  return `Br ${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fraction}`;
+  return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fraction}`;
+}
+
+export function formatEtbDisplay(value: string): string {
+  return `Br ${formatEtbGrouped(value)}`;
 }
 
 export function addEtbAmounts(...values: readonly string[]): string {

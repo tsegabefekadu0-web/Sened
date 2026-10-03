@@ -2,9 +2,10 @@
 
 import React, { useMemo, useState } from "react";
 import Image from "next/image";
-import { Check, Clock, ShieldCheck, X } from "lucide-react";
+import { Check, Clock, FileText, ShieldCheck, User, X } from "lucide-react";
 
 import { createTranslator, type Locale } from "@/lib/i18n";
+import { formatEtbGrouped } from "@/lib/ledger/money";
 
 /**
  * A contribution's trust state.
@@ -27,9 +28,20 @@ export type ContributionStatus = "PROVISIONAL" | "VERIFIED";
 export interface MemberContribution {
   id: string;
   name: string;
-  avatar: string;
+  /** Absent when no photo is on record; the row draws a neutral placeholder. */
+  avatar?: string;
   secondaryAvatar?: string;
   amount?: number;
+  /**
+   * A ledger amount in ETB with two decimals, shown as written. Preferred over
+   * `amount`, which is a float and only for the on-device fixtures.
+   */
+  amountWire?: string;
+  /**
+   * `ledger` marks a row read from the group ledger. It is still not a bank
+   * verification: only `status` plus `verifiedBy` earn the badge.
+   */
+  source?: "ledger";
   /** The rail the member named. A claim, not a confirmation. */
   channel?: "telebirr" | "cbe" | "awash" | "cash";
   /** A bank reference, when one was read out. A claim, not a confirmation. */
@@ -111,14 +123,20 @@ export function ContributionFeed({
               >
                 {/* Left: Authentic Portrait Photo */}
                 <div className="relative w-[70px] h-[76px] rounded-[16px] overflow-hidden shrink-0 shadow-sm border border-[#DECDBB] bg-[#EFE6D9]">
-                  <Image
-                    src={c.avatar}
-                    alt={c.name}
-                    fill
-                    sizes="70px"
-                    className="object-cover"
-                    priority
-                  />
+                  {c.avatar ? (
+                    <Image
+                      src={c.avatar}
+                      alt={c.name}
+                      fill
+                      sizes="70px"
+                      className="object-cover"
+                      priority
+                    />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-[#9C8B7A]" aria-hidden="true">
+                      <User className="w-8 h-8" />
+                    </div>
+                  )}
                 </div>
 
                 {/* Middle: Trust badge + Name + Reference */}
@@ -127,6 +145,11 @@ export function ContributionFeed({
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#138A4B] text-white text-[11px] font-semibold shadow-xs">
                       <Check className="w-3 h-3 stroke-[3]" />
                       {channelLabel(c)}
+                    </span>
+                  ) : c.source === "ledger" ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-[11px] font-semibold">
+                      <FileText className="w-3 h-3 stroke-[3]" />
+                      {t("shell.feed.recorded")}
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-[11px] font-semibold">
@@ -192,15 +215,19 @@ export function ContributionFeed({
               <span className="text-xs font-bold uppercase tracking-wider">
                 {isVerified(selected)
                   ? t("shell.feed.verifiedTitle")
-                  : t("shell.feed.unverifiedTitle")}
+                  : selected.source === "ledger"
+                    ? t("shell.feed.ledgerEntryTitle")
+                    : t("shell.feed.unverifiedTitle")}
               </span>
             </div>
 
             <h3 className="text-lg font-bold text-[#1F1714]">{selected.name}</h3>
             <p className="text-2xl font-extrabold text-[#1F1714] mt-1 font-sans">
-              {typeof selected.amount === "number"
-                ? `${selected.amount.toLocaleString(locale === "am" ? "am-ET" : "en-US")} ብር`
-                : "—"}
+              {selected.amountWire !== undefined
+                ? `${formatEtbGrouped(selected.amountWire)} ${t("shell.debter.currency")}`
+                : typeof selected.amount === "number"
+                  ? `${selected.amount.toLocaleString(locale === "am" ? "am-ET" : "en-US")} ብር`
+                  : "—"}
             </p>
 
             <div className="mt-4 pt-3 border-t border-[#E5DACD] space-y-2 text-xs">
@@ -233,7 +260,7 @@ export function ContributionFeed({
                 </>
               ) : (
                 <p className="pt-1 leading-relaxed text-[#6B5433]">
-                  {t("shell.feed.notAContribution")}
+                  {selected.source === "ledger" ? t("shell.feed.ledgerEntryNote") : t("shell.feed.notAContribution")}
                 </p>
               )}
             </div>

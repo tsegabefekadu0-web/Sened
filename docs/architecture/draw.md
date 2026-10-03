@@ -29,6 +29,11 @@ commitment = SHA-256( canonical_commit( groupId, cycleId, round, drawId,
                                         rosterDigest, commitmentNonce, seed ) )
 ```
 
+> **Current code (2026-10-03):** the commitment is now serialized as
+> `sened-draw-commit-v2` (`src/lib/draw/canonical.ts`) and additionally binds a
+> digest of every member's sealed nonce, so the preimage above is the
+> pre-M4.3 shape. See §5.
+
 The seed is **never** in the response. `createCommitment`
 (`src/lib/draw/engine.ts`) returns the commitment and nothing else.
 
@@ -122,6 +127,13 @@ stored round is reported as unverified.
 
 ## 5. ⚠️ Residual risk: seed grinding — stated, not hidden
 
+> **Status (2026-10-03): option (1) below, member-seed commitments, has been
+> implemented** (commit 84072cb, `20260927120000_draw_member_commitments.sql`,
+> `20260927130000_draw_member_rpcs.sql`). Each member seals a nonce before the
+> treasurer commits, and the winner derives from a value the treasurer cannot
+> search over. The rest of this section describes the single-commitment scheme
+> it replaced; the abandoned-commitment warning is still in place.
+
 **A single-commitment scheme does not prevent a treasurer from searching seeds
 for a preferred winner.** They can generate many seeds offline, publish one
 commitment, reveal the one that lands on their relative, and never reveal the
@@ -144,7 +156,7 @@ so a treasurer who ground seeds is *detectable by the members they wronged*. The
 warning is kept separate from `verified` on purpose: verification is a
 mathematical fact, while whether to honour a draw is a governance decision.
 
-**What would actually close it**, out of scope for this wave:
+**What would actually close it** (as written before M4.3):
 
 1. **Dual commit** — every member (or a quorum) commits their own nonce; the
    winner is derived from the concatenation. Grinding requires *every*
@@ -157,7 +169,7 @@ mathematical fact, while whether to honour a draw is a governance decision.
    treasurer from the loop entirely, but adds infrastructure this hackathon
    cannot rely on.
 
-Recommendation for the reviewer: treat (1) as the M4.3 milestone.
+Recommendation for the reviewer: treat (1) as the M4.3 milestone. (Done, see the status note above.)
 
 ## 6. M4.2 — Rotation
 
@@ -285,7 +297,8 @@ multiple columns where one composite was required.
 
 **It also found a blocking bug in AGENT-1's committed migration** —
 `bank_verification_reconciliation.sql:285` uses `schema.table%rowtype`, which
-PostgreSQL rejects. Filed as request **R-6**; I did not edit that file.
+PostgreSQL rejects. Filed as request **R-6**; I did not edit that file. It has
+since been fixed (commit 9016e48): the parameter now uses the composite type.
 
 ## 10. The ceremony
 
@@ -321,11 +334,10 @@ for demonstration.
 
 ### Honest copy
 
-`src/components/draw/copy.ts` is lane-local because `src/lib/i18n.ts` is A2's
-single-writer file. Both `am` and `en` are present (§12.6), matching the Gen A
-convention of hard-coding Ge'ez. Full `draw.*` key triples are filed as request
-**R-3**; when A2 lands them, delete `copy.ts` and switch to
-`createTranslator(locale)`.
+`src/components/draw/copy.ts` is now a thin adapter: the strings live in the
+`draw.*` keys of `src/lib/i18n.ts` (request **R-3**, resolved) and `copy.ts`
+maps them onto the `DrawCopy` field names the components use. Both `am` and
+`en` are present (§12.6).
 
 The page states plainly that it runs on-device and does not depend on the server
 — because that is true, and because a demo that quietly implied server
@@ -350,13 +362,16 @@ Handler factories (`createCommitHandler(serviceFactory)`) follow the banking
 lane's Style B, so tests inject a fake service and the production path is
 exercised separately to prove it 503s when Supabase is unconfigured.
 
-**Known exposure:** `/api/draw/*` is not in `middleware.ts`'s `RATE_LIMITED`
-set, so writes are unmetered. That file is A1's — filed as request **R-1**.
+**Rate limiting:** every `/api/draw/*` path, including `rounds/[roundId]` via a
+UUID regex, is in `src/middleware.ts`'s `RATE_LIMITED` with write or read rules
+(request **R-1**, resolved).
 
 ## 12. Tests
 
-`test/draw.*.test.ts` — **96 tests across 4 files**. Full suite 171/16, up from
-the 75/12 baseline with **no existing test deleted or weakened**.
+`test/draw.*.test.ts` — **126 tests across 6 files** as of 2026-10-03 (the
+table below lists the original four; `draw.fairness.test.ts` and
+`draw.rpc-contract.test.ts` were added later). The full suite is 1039 tests in
+59 files.
 
 | File | Tests | Covers |
 |---|---|---|
@@ -377,15 +392,16 @@ effect did *not* happen** — `expect(service.commit).not.toHaveBeenCalled()`.
 | No fabricated trust signals | Tamper switch is labelled; the demo states it is on-device; a failed verification shows no winner |
 | Voice is never a committer | Out of scope for this lane; the draw does not consume voice output |
 | Fail closed | Refused reveal names no winner; broken hasher → `INTEGRITY_FAILURE`; unconfigured → 503, never a fake draw |
-| Both languages | `copy.ts` has `am` and `en`; `draw.*` triples filed as R-3 |
+| Both languages | `draw.*` keys in `src/lib/i18n.ts` have `am` and `en`; `copy.ts` adapts them (R-3, resolved) |
 | Honest empty states | "No commitment sealed yet"; unverified states say so; grinding warnings are surfaced, not hidden |
 
 ## 14. Deferred
 
-- **Dual commit (M4.3)** — the real fix for seed grinding. §5.
+- **Wiring the ceremony UI to the API.** `/draw` runs the engine on-device with a
+  fixture roster and does not call `/api/draw/*`.
 - **`draw_cycles` seeding API** — the table and policies exist; no RPC creates a
-  cycle yet, so the demo uses fixtures like the rest of Gen A.
+  cycle yet (checked 2026-10-03), so the demo uses fixtures like the rest of Gen A.
 - **Supabase round-trip tests** — the repository is written and the SQL is
   verified against real Postgres, but the suite has no live-Supabase test. The
   existing lanes use the same mocked-`rpc` approach.
-- **Rate-limit buckets** — R-1.
+- ~~Rate-limit buckets~~ — done (R-1).

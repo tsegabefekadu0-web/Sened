@@ -4,8 +4,9 @@
 > the network does, it does not work for the one person who needs it most.
 > Offline here is not a nice-to-have; it is a correctness feature.
 
-Branch: `feat/agent-4-offline-pwa` · 101 tests across 3 files · one new
-dependency (`dexie@4.4.6`).
+Branch: `feat/agent-4-offline-pwa` · 111 tests across 3 files (`db.stores` 40,
+`offline.sync` 45, `offline.console` 26) plus 17 for the server route
+(`sync.api.route`), as of 2026-10-03 · one new dependency (`dexie`).
 
 ---
 
@@ -22,19 +23,21 @@ dependency (`dexie@4.4.6`).
 | `src/lib/offline/transport.ts` | `UnconfiguredSyncTransport` (fail-closed) and `HttpSyncTransport` (real, tested against a mocked `fetch`) |
 | `src/lib/offline/backoff.ts` | Jittered exponential backoff, `Retry-After` parsing |
 | `src/lib/offline/hash.ts` | Browser-side WebCrypto SHA-256 for note integrity |
-| `src/lib/offline/copy.ts` | Lane-local `en`/`am` copy, pending A2 integration |
+| `src/lib/offline/copy.ts` | Thin adapter over the `offline.*` keys in `src/lib/i18n.ts` |
 | `src/app/offline/**` | The treasurer's offline desk at `/offline` |
 | `public/manifest.json`, `public/sw.js`, `public/icons/**` | Installability and the app shell |
 | `next.config.mjs` | Service-worker scope, revalidation and manifest headers |
 
-**Deliberately deferred (Wave 2, AGENTWORK §10)**
+**Wave 2 items (AGENTWORK §10) and their current state**
 
-- **`/api/sync` now exists** (`src/app/api/sync/route.ts`, logic in
-  `src/lib/sync/routeHandlers.ts`); §3 describes what it does. The app still
-  *defaults* to `UnconfiguredSyncTransport`: wiring `HttpSyncTransport` into the
-  console is a separate, deliberate step.
-- **No Playwright E2E.** `@playwright/test` is not installed, and the brief
-  forbids adding it this wave.
+- **`/api/sync` exists and the console uses it** (`src/app/api/sync/route.ts`,
+  logic in `src/lib/sync/routeHandlers.ts`; §3). `src/app/offline/offline-console.tsx`
+  uses `HttpSyncTransport` when the visitor is signed in and
+  `UnconfiguredSyncTransport` (fail-closed) otherwise. Sync is started by the
+  treasurer's buttons, not automatically on reconnect.
+- **Playwright E2E exists now** (`test/e2e/`, `playwright.config.ts`,
+  `npm run test:e2e`); the offline desk itself has component tests, not a
+  browser test of an offline reload.
 - **No SQL migration.** Nothing here needs a table; the server is A1's.
 
 ---
@@ -167,7 +170,7 @@ complete**. This matters twice over: `src/lib/ledger/canonical.ts` imports
 `node:crypto` and cannot ship to a browser, and A1 owns that file (§8.5).
 Re-deriving a hash client-side would mean re-implementing the single most
 safety-critical function in the product in a second place. A1's
-`verifyLedgerChain` still runs server-side during a Wave 2 pull, where Node is
+`verifyLedgerChain` runs server-side in the `/api/sync` pull, where Node is
 available.
 
 ### What the client refuses to write
@@ -255,9 +258,9 @@ the delay is never 0.
 
 ## 6. i18n — the `offline.*` triples to fold into `src/lib/i18n.ts`
 
-`src/lib/i18n.ts` belongs to AGENT-2 alone (§4.1) and a key in `en` without its
-`am` twin is a compile error, so these are **filed, not added** (request R3).
-`src/lib/offline/copy.ts` mirrors them and must be deleted at integration.
+These triples are now in `src/lib/i18n.ts` (request R3 is closed), and
+`src/lib/offline/copy.ts` reads them from there. The table below is the
+original filing and the dictionary is the source of truth.
 
 | key | en | am |
 |---|---|---|
@@ -343,6 +346,10 @@ the delay is never 0.
 `public/sw.js` is plain, build-free JavaScript served verbatim, on purpose: a
 worker whose job is to replace itself on a new deploy should not need a build
 step to do that.
+
+> **Current state:** the worker and manifest are written and served, but no
+> code registers the worker (§12), so none of what follows is active in the
+> running app yet.
 
 It does three things and refuses several others:
 
@@ -465,26 +472,36 @@ mistakes:
 
 | Request | Target | Blocking? |
 |---|---|---|
-| R1 — add `/api/sync` to `RATE_LIMITED` in `src/middleware.ts` | A1 | Done  |
-| R2 — add `<link rel="manifest">` + `apple-touch-icon` to `src/app/layout.tsx` | A1 | **Yes** — installability |
-| R3 — fold the 70 `offline.*` triples in §6 into `src/lib/i18n.ts`, then delete `src/lib/offline/copy.ts` | A2 | No |
+| R1 — add `/api/sync` to `RATE_LIMITED` in `src/middleware.ts` | A1 | Done |
+| R2 — add the manifest link and icons to `src/app/layout.tsx` | A1 | Done (`metadata.manifest` and `icons`) |
+| R3 — fold the `offline.*` triples in §6 into `src/lib/i18n.ts` | A2 | Done; `copy.ts` was kept as an adapter rather than deleted |
 | R4/R5 — no change requested; `canonical.ts` signatures and the ledger route are dependencies I only read | A1 | No |
 
 ---
 
 ## 12. Known limitations, stated rather than hidden
 
-- **The server exists but is not wired in by default.** The engine's default
-  transport is still `UnconfiguredSyncTransport`, so a drain fails closed with
-  `SYNC_NOT_CONFIGURED` until `HttpSyncTransport` is injected.
-- **The console uses fixture group and account UUIDs.** A1 supplies real ones at
-  integration; they are module constants for that reason.
+- **Sync only runs when signed in, and only when the treasurer presses it.**
+  Signed out, the console uses `UnconfiguredSyncTransport` and a drain fails
+  closed with `SYNC_NOT_CONFIGURED`. Nothing syncs automatically when the
+  network returns.
+- **The pulled mirror is only displayed on `/offline`** (entry count and chain
+  head). The home and ledger screens do not read it.
+- **The console resolves the signed-in user's group** (via `/api/my-groups`) and
+  falls back to a fixed local UUID (`LOCAL_GROUP_ID`) when signed out or when the
+  group cannot be resolved; a plain `member` cannot queue entries.
+- **Only `ledger-draft` mutations have a server path.** Spoken notes and roster
+  edits stay on the device.
 - **No audio blobs are persisted.** A 25 MB base64 string in IndexedDB is how a
   treasurer loses a Sunday's work to a quota error, so the row keeps mime type,
   byte length and duration, and the caller owns blob storage.
 - **No plural forms.** The repo's `translate()` has none; §6 notes which keys
   would need them.
-- **Service worker registration is not in `layout.tsx`** (A1's file) — §7.
+- **Nothing registers the service worker.** No code calls
+  `navigator.serviceWorker.register` (verified by search of `src/`), so
+  `public/sw.js` is never installed and the shell is not cached for offline
+  loads; the page only listens for its messages. IndexedDB persistence works
+  regardless. See §7.
 - **Round trips are a single batch of 25.** A 200-member Sunday with no signal
   produces a 200-row queue that drains over several passes. Correct, but the
   treasurer should see the queue depth, which the console does.

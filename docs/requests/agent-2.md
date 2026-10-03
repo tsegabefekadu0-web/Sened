@@ -12,7 +12,7 @@
 | Field | Value |
 |---|---|
 | Target | A1, `src/middleware.ts` |
-| Status | **OPEN** |
+| Status | **CLOSED (done: `/api/voice/transcribe` and `/api/voice/speak` are in `RATE_LIMITED` in `src/middleware.ts`, commit 2257934)** |
 | Blocks my lane? | **No.** I ship without it and document the exposure. |
 
 **What I need.** `src/middleware.ts:4-8` — add:
@@ -43,7 +43,7 @@ as a substitute for a real limiter.
 | Field | Value |
 |---|---|
 | Target | A1, integration step |
-| Status | **OPEN** |
+| Status | **CLOSED (wired: `src/app/page.tsx` passes `requestBankVerification` from `src/lib/voice/clientVerify.ts` as `onRequestVerification` when signed in, commit 2d8f5c8; signed out, voice notes are saved on the device via `onRecordLocally` instead, and the submit button is no longer permanently disabled)** |
 | Blocks my lane? | **No.** By design — `AGENTWORK.md` §8.2 assigns this to you. |
 
 **What I hand you.** `src/lib/voice/intent.ts` exports:
@@ -72,7 +72,7 @@ which is A1's surface.
 | Field | Value |
 |---|---|
 | Target | A1, `src/app/page.tsx` |
-| Status | **OPEN** |
+| Status | **CLOSED (done: `src/components/shell/WorkspaceLinks.tsx`, rendered on the home screen, links `/voice`, `/draw` and more, commit 2257934)** |
 | Blocks my lane? | **No.** I have my own route. |
 
 **What I need.** A link/nav entry to `/voice` during integration. The M1 shell
@@ -92,7 +92,7 @@ conclude the voice engine is also fake.
 | Field | Value |
 |---|---|
 | Target | A1, `src/app/page.tsx:39-57` and `src/components/contributions/ContributionFeed.tsx` |
-| Status | **OPEN** — blocking for *M3* acceptance, not for my lane |
+| Status | **CLOSED (removed: `handleAddContribution` / `onAddContribution` no longer exist in `src/app/page.tsx`; `ContributionFeed.tsx` only shows a verified badge for a row with `status: "VERIFIED"` and `verifiedBy`, and the hard-coded `verifiedBy` string is gone; commit 2257934)** |
 | Blocks my lane? | **No.** I cannot edit either file. |
 
 **What the code does today.** `handleAddContribution` maps the channel a
@@ -137,7 +137,7 @@ rail, not a fix.
 | Field | Value |
 |---|---|
 | Target | A4 |
-| Status | **OPEN** — informational |
+| Status | **ANSWERED (the Dexie `spokenNotes` row has a per-row `audioMimeType`, not a constant: `src/lib/db/notes.ts`, `src/lib/db/types.ts`, commit 93b96f6. Note that the voice flow in `src/app/page.tsx` currently saves the transcript only and passes no audio, so no mime type is actually stored yet)** — informational |
 | Blocks my lane? | **No.** |
 
 `MediaRecorder` negotiates `audio/webm;codecs=opus` in Chromium and

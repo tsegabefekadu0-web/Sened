@@ -1,5 +1,7 @@
 # AGENT-1 claim & progress
 
+> **Historical log.** This file records one agent's work during the multi-agent build phase and is not kept up to date. For current status, see [ROADMAP.md](../../ROADMAP.md).
+
 **Agent:** AGENT-1 · Ledger Trust Core (ROADMAP M2.2 + M2.3)
 **Branch:** `feat/agent-1-ledger-trust`
 **Working directory:** `C:\Sened` — ⚠️ **shared with A2/A3/A4, see BLOCKER below**

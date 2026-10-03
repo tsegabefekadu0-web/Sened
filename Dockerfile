@@ -19,6 +19,18 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# `NEXT_PUBLIC_*` values are inlined into the browser bundle by `next build`
+# (src/lib/auth/browserClient.ts reads them as literal property accesses), so
+# they must be supplied HERE, at build time; setting them on the running
+# container does not reach the client. Both are public by design (the anon key
+# is not a secret). Left empty, the build succeeds and sign-in is simply
+# disabled in the browser. Server-only secrets are deliberately NOT build args:
+# they are read at runtime and must never be baked into an image layer.
+ARG NEXT_PUBLIC_SUPABASE_URL=""
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY=""
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
+    NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+
 # `output: "standalone"` in next.config.mjs produces `.next/standalone`, a
 # self-contained server plus only the modules it actually imports.
 RUN npm run build

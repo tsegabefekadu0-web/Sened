@@ -21,26 +21,31 @@ const REPO_ROOT = process.cwd();
 
 /** Files permitted to reach for a Node builtin, and why. */
 const ALLOWED: Readonly<Record<string, string>> = {
-  "src\\lib\\draw\\nodeHasher.ts":
+  "src/lib/draw/nodeHasher.ts":
     "The Node half of the draw hashing seam. Server and tests only; the browser uses webDrawHasher.",
-  "src\\lib\\draw\\service.ts":
+  "src/lib/draw/service.ts":
     "Server-side draw orchestration. Reached only through /api/draw/*, never from a component."
 };
 
 /** Every directory whose contents are reachable from a client component. */
 const BROWSER_REACHABLE = [
-  "src\\lib\\draw",
-  "src\\lib\\voice",
-  "src\\lib\\offline",
-  "src\\lib\\db",
-  "src\\components\\draw",
-  "src\\components\\voice",
-  "src\\app\\draw",
-  "src\\app\\voice",
-  "src\\app\\offline"
+  "src/lib/draw",
+  "src/lib/voice",
+  "src/lib/offline",
+  "src/lib/db",
+  "src/components/draw",
+  "src/components/voice",
+  "src/app/draw",
+  "src/app/voice",
+  "src/app/offline"
 ];
 
 const NODE_BUILTIN = /from\s+["']node:/;
+
+/** Allow-list keys are POSIX-style; scanned paths use the host separator. */
+function toPosix(path: string): string {
+  return path.split(sep).join("/");
+}
 
 function sourceFiles(directory: string): string[] {
   const absolute = join(REPO_ROOT, directory);
@@ -70,7 +75,7 @@ describe("no Node builtin is reachable from a browser bundle", () => {
 
     for (const directory of BROWSER_REACHABLE) {
       for (const file of sourceFiles(directory)) {
-        const normalised = file.split("/").join(sep);
+        const normalised = toPosix(file);
         if (ALLOWED[normalised]) {
           continue;
         }

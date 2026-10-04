@@ -93,13 +93,13 @@ graph TD
 **Target:** Implement a transparent, mathematically fair pot allocation system based on Dr. Rediet Abebe et al. (AAAI 2022) ROSCA mechanism design.
 
 - [ ] **4.1 Cryptographically Fair Random Draw**:
-  - Status: the SHA-256 commit-reveal engine (`src/lib/draw/`), member-seed commitments (so the treasurer cannot choose the seed), the `/api/draw/*` routes, the SQL (`20260926100000_draw_commit_reveal.sql` and later) and an independent verifier are built and tested. It uses member/treasurer-committed seeds, not block hashes. The `/draw` ceremony page with the Mesob animation runs the real engine on-device with a fixture roster and does not call `/api/draw/*`; there is no haptic feedback.
+  - Status: the SHA-256 commit-reveal engine (`src/lib/draw/`), member-seed commitments (so the treasurer cannot choose the seed), the `/api/draw/*` routes, the SQL (`20260926100000_draw_commit_reveal.sql` and later) and an independent verifier are built and tested. It uses member/treasurer-committed seeds, not block hashes. The `/draw` ceremony page now drives the real flow through `/api/draw/*` when signed in (member seal, treasurer commit and reveal, in-browser re-verification compared with the server, confirmed payout), and keeps a labelled on-device demo when signed out. Not fully delivered, so not ticked: there is no cycle-creation API (the treasurer types an existing cycle id), no endpoint for members to submit their seals (they are passed to the treasurer by hand), and there is no haptic feedback.
   - Commit-reveal lottery mechanism using SHA-256 block hashes to prevent treasurer bias or favoritism.
   - Visual ceremonial *Mesob* (መሶብ) draw animation with celebratory tactile feedback.
 - [ ] **4.2 Rotation & Default Risk Management (Abebe et al.)**:
   - Tracking payout history: previous winners are excluded from remaining draws in the cycle.
   - Dynamic social collateral & reserve retention model to minimize post-win contribution defaults.
-  - Status: previous winners are excluded from later rounds (`src/lib/draw/rotation.ts`, `draw_payouts` in SQL) and a deterministic reserve-retention heuristic (`src/lib/draw/risk.ts`, capped at a third of the pot) is implemented and tested, but, as with 4.1, the UI that shows it uses fixture data. It is a heuristic, not a proven equilibrium model, and there is no separate collateral tracking.
+  - Status: previous winners are excluded from later rounds (`src/lib/draw/rotation.ts`, `draw_payouts` in SQL) and a deterministic reserve-retention heuristic (`src/lib/draw/risk.ts`, capped at a third of the pot) is implemented and tested, and the signed-in `/draw` now shows it from the real roster and the contribution the treasurer enters (recomputed in the browser and checked against the server's split), though nothing reads contributions from the ledger yet. It is a heuristic, not a proven equilibrium model, and there is no separate collateral tracking.
 
 ---
 

@@ -341,7 +341,8 @@ maps them onto the `DrawCopy` field names the components use. Both `am` and
 
 The page states plainly that it runs on-device and does not depend on the server
 — because that is true, and because a demo that quietly implied server
-verification would be a fabricated trust signal.
+verification would be a fabricated trust signal. That demo is now the signed-out
+mode only, behind a demo banner; see §14 for the signed-in flow.
 
 ## 11. API
 
@@ -395,13 +396,81 @@ effect did *not* happen** — `expect(service.commit).not.toHaveBeenCalled()`.
 | Both languages | `draw.*` keys in `src/lib/i18n.ts` have `am` and `en`; `copy.ts` adapts them (R-3, resolved) |
 | Honest empty states | "No commitment sealed yet"; unverified states say so; grinding warnings are surfaced, not hidden |
 
-## 14. Deferred
+## 14. The signed-in ceremony (UI wired to the API)
 
-- **Wiring the ceremony UI to the API.** `/draw` runs the engine on-device with a
-  fixture roster and does not call `/api/draw/*`.
-- **`draw_cycles` seeding API** — the table and policies exist; no RPC creates a
-  cycle yet (checked 2026-10-03), so the demo uses fixtures like the rest of Gen A.
+`/draw` now has two modes, chosen by `useSession`:
+
+- **Signed out, or no Supabase configured** — the on-device demo (`DrawBoard`),
+  with a fixture roster. It carries a `data-testid="draw-demo-banner"` label in
+  both languages and never calls `/api/draw/*`.
+- **Signed in** — `LiveDraw` (`src/components/draw/LiveDraw.tsx`), backed by
+  `src/lib/draw/clientDraw.ts`. The group is resolved with `readMyGroup` (it
+  refuses on no group or several groups) and the roster comes from
+  `GET /api/ledger/members`.
+
+Sequence, and who may do each step:
+
+| # | Step | Call | Who |
+|---|---|---|---|
+| 0 | Seal a nonce for a draw id | none (on-device; only the hash is shared) | any member |
+| 1 | Commit | `POST /api/draw/commits` | owner / treasurer |
+| 2 | Reveal | `POST /api/draw/reveals`, then `POST /api/draw/verify` | owner / treasurer |
+| 3 | Verify | `POST /api/draw/verify` | any member |
+| 4 | Payout | `POST /api/draw/payouts` (after an explicit confirmation) | owner / treasurer |
+
+Notes on how it behaves:
+
+- **Verification is recomputed in the browser** (`verifyInBrowser`) from the
+  published transcript with `webDrawHasher`: roster digest, tickets, member
+  digest, commitment, transcript digest, winner (`verifyTranscript`), plus that
+  every member nonce opens its sealed hash, and the payout/reserve split
+  (`planReserve`). The result is *compared* with the server's verdict, winner,
+  transcript digest and amounts; any difference is shown as a disagreement and
+  the payout is withheld. `/api/draw/verify` now also returns `memberNonces` so
+  the openings can be checked on the device.
+- **Payout** is offered only to owner/treasurer, only when this device verified
+  the draw and agrees with the server. It shows the winner, the amount, the
+  reserve and the `PAYOUT_EXPENSE` (debit) and `POT_CASH` (credit) account ids
+  from `/api/my-groups`, and the button stays disabled until a confirmation box
+  is ticked.
+- **Member seals travel out-of-band.** There is no endpoint for a member to
+  submit a seal to the server; a seal exists only inside the treasurer's commit
+  request. So a member seals on their device (the draw id is bound into the
+  seal, so the treasurer creates the id first and shares it), and sends the
+  treasurer the `memberId:hash` line, later the `memberId:nonce` opening. The UI
+  requires at least one seal from a member other than the committer.
+- The treasurer's seed lives in `localStorage` on the treasurer's device until
+  the reveal (the server never returns one it generated), and is wiped after.
+- The commit endpoint takes the seed in clear because the server computes the
+  commitment; the seed is not stored until the reveal, but the server does see it.
+- Error codes from the routes are mapped to bilingual messages
+  (`drawErrorKey`); the server's own `message` is shown beneath.
+- The request body cap is 8 KiB (`MAX_BODY_BYTES`), which bounds a commit to a
+  roster of roughly 50 members.
+
+Tests: `test/draw.live.test.tsx` runs the real route handlers and `DrawService`
+(in-memory repositories) behind a fake `fetch`, so the browser verifies what a
+real server would publish.
+
+## 15. Deferred
+
+- **Cycle creation.** `draw_cycles` still has no creating RPC or API. The
+  treasurer types an existing cycle id; an unknown one is refused as not found.
+  There is also no endpoint listing a group's cycles or draws, so draw ids are
+  shared by hand and the live board remembers only the draw this device opened.
+- **A member-seal endpoint** (so sealing and openings need not be copy-pasted)
+  and a UI to show who has sealed.
+- **Contribution amounts and pot** are typed by the treasurer; nothing reads
+  them from the ledger yet, so the reserve uses the typed figures.
+- **Observation for review:** the winner is derived from the member *digest*
+  (a hash of the sealed hashes), not from the nonces, and a treasurer sees the
+  sealed hashes before choosing a seed. So the treasurer can still try seeds
+  against the known digest before committing. The existing fairness tests cover
+  grinding *after* the commit only. Worth a protocol review before the draw is
+  described as grinding-proof.
+- `VerifyPanel` and `RiskPanel` still carry Amharic-only text.
 - **Supabase round-trip tests** — the repository is written and the SQL is
   verified against real Postgres, but the suite has no live-Supabase test. The
   existing lanes use the same mocked-`rpc` approach.
+- ~~Wiring the ceremony UI to the API~~ — done for signed-in users (§14).
 - ~~Rate-limit buckets~~ — done (R-1).

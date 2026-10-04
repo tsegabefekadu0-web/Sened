@@ -3,11 +3,15 @@
 import React, { useState } from "react";
 
 import { DrawBoard } from "@/components/draw/DrawBoard";
+import { LiveDraw } from "@/components/draw/LiveDraw";
 import { MeskelCross } from "@/components/cultural/CulturalIcons";
 import type { Locale } from "@/components/draw/copy";
+import { useSession } from "@/lib/auth/useSession";
+import { translate } from "@/lib/i18n";
 
 export default function DrawPage() {
   const [locale, setLocale] = useState<Locale>("am");
+  const session = useSession();
 
   return (
     <main className="min-h-screen w-full bg-[#120D0A] flex flex-col items-center justify-center sm:py-6 antialiased selection:bg-amber-500 selection:text-coffee-950">
@@ -36,7 +40,23 @@ export default function DrawPage() {
           </button>
         </header>
 
-        <DrawBoard locale={locale} />
+        {session.status === "signed-in" ? (
+          <LiveDraw locale={locale} accessToken={session.accessToken} />
+        ) : session.status === "loading" ? (
+          <p role="status" className="px-4 py-6 text-[13px] text-[#6F625D]">
+            {translate(locale, "drawLive.loading")}
+          </p>
+        ) : (
+          // Signed out, or this build has no Supabase: the on-device demo,
+          // labelled as such. It never calls /api/draw/*.
+          <DrawBoard
+            locale={locale}
+            demoNotice={translate(
+              locale,
+              session.status === "unconfigured" ? "draw.demoUnconfigured" : "draw.demoSignedOut"
+            )}
+          />
+        )}
       </div>
     </main>
   );

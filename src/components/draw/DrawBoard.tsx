@@ -62,7 +62,7 @@ function entropy(): string {
     .join("");
 }
 
-function usePrefersReducedMotion(): boolean {
+export function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(false);
   useEffect(() => {
     const query = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)");
@@ -79,9 +79,11 @@ export interface DrawBoardProps {
   readonly locale?: Locale;
   /** Rotated out by A1 during integration to link the real ceremony. */
   readonly defaultLocale?: Locale;
+  /** Why this is the demo (signed out, or no server), appended to the demo label. */
+  readonly demoNotice?: string;
 }
 
-export function DrawBoard({ locale = "am" }: DrawBoardProps) {
+export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
   const copy = useMemo(() => t(locale), [locale]);
   const reducedMotion = usePrefersReducedMotion();
 
@@ -240,6 +242,14 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden no-scrollbar">
+      <p
+        role="note"
+        data-testid="draw-demo-banner"
+        className="mx-auto mt-3 w-full max-w-md rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2 text-[12px] font-semibold leading-5 text-[#6B4E16] md:max-w-5xl"
+      >
+        {copy.demoBanner}
+        {demoNotice ? ` ${demoNotice}` : ""}
+      </p>
       <MesobCeremony
         phase={phase}
         reducedMotion={reducedMotion}

@@ -362,6 +362,9 @@ describe("POST /api/draw/verify", () => {
 
     expect(response.status).toBe(200);
     expect(service.verify).toHaveBeenCalledWith(drawId, { userId: actorId });
+    // The browser re-checks every member opening, so the nonces are published
+    // (empty until the reveal).
+    expect(((await response.json()) as { memberNonces: unknown }).memberNonces).toEqual([]);
   });
 
   it("404s a malformed draw id rather than 400ing", async () => {

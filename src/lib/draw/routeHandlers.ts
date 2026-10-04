@@ -281,7 +281,10 @@ export function createVerifyHandler(
         {
           round: publicRound(result.round),
           verification: result.verification,
-          transcript: result.transcript
+          transcript: result.transcript,
+          // Published with the seed at reveal. A member's browser needs them to
+          // check that every sealed contribution was opened honestly.
+          memberNonces: result.round.reveal?.memberNonces ?? []
         },
         200
       );

@@ -1,11 +1,23 @@
 import type { AuthedFetchDeps } from "@/lib/auth/authedFetch";
 import { readGroupLedger, type WireEntry } from "./clientRead";
 import { LEDGER_ENTRY_TYPES, type LedgerEntryType } from "./types";
-import { summarizeLedger, type HomeLedgerSummary, type SummaryEntry } from "./homeSummary";
+import { loadMembers } from "./clientInvites";
+import { summarizeLedger, type EntryProvenance, type HomeLedgerSummary, type SummaryEntry } from "./homeSummary";
 import { toEtbMinorUnits } from "./money";
 
 export type HomeLedgerResult =
-  | { readonly status: "ready"; readonly summary: HomeLedgerSummary }
+  | {
+      readonly status: "ready";
+      readonly summary: HomeLedgerSummary;
+      /**
+       * Display names for the members named in the summary's provenance, keyed
+       * by user id. The value is the login email only when the members API
+       * already shows it to this caller (the group owner); otherwise `null`
+       * and the screen falls back to the anonymous "Member xxxxxxxx" label.
+       * Empty when nothing has provenance or the members could not be read.
+       */
+      readonly memberLabels: Readonly<Record<string, string | null>>;
+    }
   /** The group exists and has no entries yet: the balance is genuinely zero. */
   | { readonly status: "empty" }
   | { readonly status: "unauthorized" }
@@ -17,6 +29,38 @@ export type HomeLedgerResult =
 
 /** The most the entries route returns in one read (`LEDGER_READ_MAX_LIMIT`). */
 const READ_LIMIT = 100;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * A provenance object is trusted only when every field is present and
+ * well-formed. A partial one is dropped, so the row stays "Recorded in ledger"
+ * rather than becoming a half-evidenced "Verified".
+ */
+export function toEntryProvenance(value: unknown): EntryProvenance | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  if (
+    raw.kind !== "bank_verification" ||
+    (raw.provider !== "telebirr" && raw.provider !== "cbe" && raw.provider !== "awash") ||
+    typeof raw.verifiedAt !== "string" ||
+    !Number.isFinite(Date.parse(raw.verifiedAt)) ||
+    typeof raw.verificationId !== "string" ||
+    !UUID.test(raw.verificationId) ||
+    typeof raw.memberUserId !== "string" ||
+    !UUID.test(raw.memberUserId)
+  ) {
+    return null;
+  }
+  return {
+    provider: raw.provider,
+    verifiedAt: raw.verifiedAt,
+    verificationId: raw.verificationId,
+    memberUserId: raw.memberUserId
+  };
+}
 
 function toSummaryEntry(entry: WireEntry): SummaryEntry | null {
   if (
@@ -53,7 +97,8 @@ function toSummaryEntry(entry: WireEntry): SummaryEntry | null {
     occurredAt: entry.occurredAt,
     entryType: entry.entryType as LedgerEntryType,
     correctsEntryId: (entry.correctsEntryId as string | null | undefined) ?? null,
-    postings
+    postings,
+    provenance: toEntryProvenance(entry.provenance)
   };
 }
 
@@ -87,9 +132,41 @@ export async function loadHomeLedger(deps: AuthedFetchDeps = {}): Promise<HomeLe
   if (entries.length >= READ_LIMIT && oldest !== "1") {
     return { status: "incomplete" };
   }
+  let summary: HomeLedgerSummary;
   try {
-    return { status: "ready", summary: summarizeLedger(entries, read.accounts) };
+    summary = summarizeLedger(entries, read.accounts);
   } catch {
     return { status: "error" };
   }
+  return { status: "ready", summary, memberLabels: await readMemberLabels(read.groupId, summary, deps) };
+}
+
+/**
+ * Names for the members whose receipts were verified. Best effort: if the
+ * members cannot be read the contributions are still shown as verified (that
+ * comes from the ledger read), just with the anonymous label. The members API
+ * decides what a caller may see of a member; nothing is added here.
+ */
+async function readMemberLabels(
+  groupId: string,
+  summary: HomeLedgerSummary,
+  deps: AuthedFetchDeps
+): Promise<Readonly<Record<string, string | null>>> {
+  const wanted = new Set(
+    summary.contributions.flatMap((contribution) => (contribution.provenance ? [contribution.provenance.memberUserId] : []))
+  );
+  if (wanted.size === 0) {
+    return {};
+  }
+  const outcome = await loadMembers(groupId, deps);
+  if (outcome.status !== "ready") {
+    return {};
+  }
+  const labels: Record<string, string | null> = {};
+  for (const member of outcome.members) {
+    if (wanted.has(member.userId)) {
+      labels[member.userId] = member.email;
+    }
+  }
+  return labels;
 }

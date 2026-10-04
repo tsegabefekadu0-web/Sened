@@ -3,11 +3,22 @@ import { describe, expect, it } from "vitest";
 import { cycleLedgerFigures, loadCycleLedgerFigures } from "@/lib/draw/ledgerFigures";
 import type { HomeContribution } from "@/lib/ledger/homeSummary";
 
-const contribution = (sequence: string, occurredAt: string, amount: string): HomeContribution => ({
+const ALEM = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const BERHAN = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+const contribution = (
+  sequence: string,
+  occurredAt: string,
+  amount: string,
+  payer?: string
+): HomeContribution => ({
   id: `entry-${sequence}`,
   sequence,
   occurredAt,
-  amount
+  amount,
+  provenance: payer
+    ? { provider: "telebirr", verifiedAt: occurredAt, verificationId: `ffffffff-ffff-4fff-8fff-${sequence.padStart(12, "0")}`, memberUserId: payer }
+    : null
 });
 
 describe("cycleLedgerFigures", () => {
@@ -20,20 +31,55 @@ describe("cycleLedgerFigures", () => {
       ],
       "2026-10-01T10:00:00.000Z"
     );
-    expect(figures).toEqual({ count: 2, total: "3000.30" });
+    expect(figures).toMatchObject({ count: 2, total: "3000.30" });
   });
 
   it("is zero, not an error, when nothing falls in the cycle", () => {
     expect(cycleLedgerFigures([contribution("1", "2026-01-01T00:00:00.000Z", "10.00")], "2026-10-01T00:00:00.000Z")).toEqual({
       count: 0,
-      total: "0.00"
+      total: "0.00",
+      byMember: [],
+      unattributedCount: 0,
+      unattributedTotal: "0.00"
     });
   });
 
-  it("offers no per-member or per-round figure: the shape has only a count and a total", () => {
-    // Ledger entries carry no member id and no cycle or round id, so anything
-    // more would be invented. This pins the honest shape.
-    expect(Object.keys(cycleLedgerFigures([], "2026-10-01T00:00:00.000Z")).sort()).toEqual(["count", "total"]);
+  it("credits a member only for entries a verified bank receipt posted for them", () => {
+    const figures = cycleLedgerFigures(
+      [
+        contribution("5", "2026-10-05T09:00:00.000Z", "1000.00", ALEM),
+        contribution("4", "2026-10-04T09:00:00.000Z", "250.50", BERHAN),
+        contribution("3", "2026-10-03T09:00:00.000Z", "1000.00", ALEM),
+        contribution("2", "2026-10-02T09:00:00.000Z", "300.00"),
+        contribution("1", "2026-09-01T09:00:00.000Z", "999.00", BERHAN)
+      ],
+      "2026-10-01T00:00:00.000Z"
+    );
+    expect(figures.byMember).toEqual([
+      { memberUserId: ALEM, count: 2, total: "2000.00" },
+      { memberUserId: BERHAN, count: 1, total: "250.50" }
+    ]);
+    // The entry before the cycle began is neither counted nor credited.
+    expect(figures.count).toBe(4);
+    expect(figures.total).toBe("2550.50");
+  });
+
+  it("keeps an entry with no bank provenance unattributed instead of guessing its payer", () => {
+    const figures = cycleLedgerFigures(
+      [contribution("2", "2026-10-02T09:00:00.000Z", "300.00"), contribution("1", "2026-10-01T09:00:00.000Z", "50.25", ALEM)],
+      "2026-10-01T00:00:00.000Z"
+    );
+    expect(figures.unattributedCount).toBe(1);
+    expect(figures.unattributedTotal).toBe("300.00");
+    expect(figures.byMember).toEqual([{ memberUserId: ALEM, count: 1, total: "50.25" }]);
+    // Attributed + unattributed always reconciles with the cycle total.
+    expect(figures.total).toBe("350.25");
+  });
+
+  it("lists no member at all when no entry carries provenance", () => {
+    const figures = cycleLedgerFigures([contribution("1", "2026-10-02T09:00:00.000Z", "10.00")], "2026-10-01T00:00:00.000Z");
+    expect(figures.byMember).toEqual([]);
+    expect(figures.unattributedCount).toBe(1);
   });
 });
 
@@ -67,7 +113,36 @@ describe("loadCycleLedgerFigures", () => {
       "2026-10-01T00:00:00.000Z",
       deps([entry("2", "2026-10-02T00:00:00.000Z", "1000.00"), entry("1", "2026-09-01T00:00:00.000Z", "250.00")])
     );
-    expect(result).toEqual({ status: "ready", figures: { count: 1, total: "1000.00" } });
+    expect(result).toMatchObject({ status: "ready", figures: { count: 1, total: "1000.00" } });
+  });
+
+  it("attributes a wire entry to the member named by its bank provenance and not to its actor", async () => {
+    const payer = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const bankEntry = {
+      ...entry("2", "2026-10-02T00:00:00.000Z", "1000.00"),
+      actorId: "11111111-1111-4111-8111-111111111111",
+      provenance: {
+        kind: "bank_verification",
+        provider: "telebirr",
+        verifiedAt: "2026-10-02T00:00:05.000Z",
+        verificationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        memberUserId: payer
+      }
+    };
+    const result = await loadCycleLedgerFigures(
+      "2026-10-01T00:00:00.000Z",
+      deps([bankEntry, entry("3", "2026-10-03T00:00:00.000Z", "40.00")])
+    );
+    expect(result).toMatchObject({
+      status: "ready",
+      figures: {
+        count: 2,
+        total: "1040.00",
+        byMember: [{ memberUserId: payer, count: 1, total: "1000.00" }],
+        unattributedCount: 1,
+        unattributedTotal: "40.00"
+      }
+    });
   });
 
   it("says the ledger is empty rather than inventing a zero total", async () => {

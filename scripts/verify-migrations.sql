@@ -3178,3 +3178,217 @@ end;
 $grants$;
 
 select 'ALL DRAW CYCLE AND SEAL CHECKS PASSED' as result;
+
+-- ---------------------------------------------------------------------------
+-- Ledger entry provenance (20261006100000_ledger_entry_provenance.sql)
+--
+-- A member must be able to learn that ANOTHER member's contribution was bank
+-- verified, without the intents table being opened to them and without any
+-- form of the provider reference leaving the database. Checks that the
+-- SECURITY DEFINER read function (a) returns provenance only for VERIFIED
+-- intents linked to an entry, with exactly the five safe fields, (b) is scoped
+-- to group membership (an outsider is refused, another group's id returns
+-- nothing), (c) never returns a reference, HMAC or ciphertext, (d) leaves the
+-- intents table unreadable to members, (e) is not callable by anon, and that
+-- the backfill links only a matching, unlinked VERIFIED intent and is
+-- idempotent. Runs in a transaction that is rolled back.
+-- ---------------------------------------------------------------------------
+reset role;
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+
+do $prov$
+declare
+  owner_uid  constant text := '11111111-1111-4111-8111-111111111111';
+  other_uid  constant text := '22222222-2222-4222-8222-222222222222';
+  viewer_uid constant text := '33333333-3333-4333-8333-333333333333';
+  outsider   constant text := '44444444-4444-4444-8444-444444444444';
+  group_p    uuid;
+  group_q    uuid;
+  cash_p     uuid;
+  income_p   uuid;
+  tenant_p   uuid;
+  binding_p  uuid := 'cccccccc-0000-4000-8000-0000000000e1';
+  e_bank     uuid;
+  e_pending  uuid;
+  e_manual   uuid;
+  e_orphan   uuid;
+  e_other    uuid;
+  result     jsonb;
+  n          bigint;
+  secret_ref constant text := repeat('9', 64);
+begin
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  group_p := (public.sened_ledger_provision_group_v1('Provenance equb') ->> 'groupId')::uuid;
+  perform set_config('request.jwt.claim.sub', other_uid, true);
+  group_q := (public.sened_ledger_provision_group_v1('Other provenance equb') ->> 'groupId')::uuid;
+  select tenant_id into tenant_p from public.ledger_groups where id = group_p;
+  select id into cash_p from public.ledger_accounts where group_id = group_p and code = 'POT_CASH';
+  select id into income_p from public.ledger_accounts where group_id = group_p and code = 'CONTRIBUTION_INCOME';
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role)
+  values (group_p, tenant_p, viewer_uid::uuid, 'member');
+
+  -- Five entries in group P. Only e_bank and e_orphan have bank-style keys.
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  e_bank := (public.post_ledger_entry_v1(group_p, 'bank-verified-prov-1', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_p, 'direction', 'debit', 'amount', '25.00'),
+                      jsonb_build_object('accountId', income_p, 'direction', 'credit', 'amount', '25.00'))) -> 'entry' ->> 'id')::uuid;
+  e_pending := (public.post_ledger_entry_v1(group_p, 'bank-verified-prov-2', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_p, 'direction', 'debit', 'amount', '30.00'),
+                      jsonb_build_object('accountId', income_p, 'direction', 'credit', 'amount', '30.00'))) -> 'entry' ->> 'id')::uuid;
+  e_manual := (public.post_ledger_entry_v1(group_p, 'manual-prov-3', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_p, 'direction', 'debit', 'amount', '40.00'),
+                      jsonb_build_object('accountId', income_p, 'direction', 'credit', 'amount', '40.00'))) -> 'entry' ->> 'id')::uuid;
+  e_orphan := (public.post_ledger_entry_v1(group_p, 'bank-verified-prov-4', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_p, 'direction', 'debit', 'amount', '50.00'),
+                      jsonb_build_object('accountId', income_p, 'direction', 'credit', 'amount', '50.00'))) -> 'entry' ->> 'id')::uuid;
+  e_other := (public.post_ledger_entry_v1(group_p, 'bank-verified-prov-5', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_p, 'direction', 'debit', 'amount', '60.00'),
+                      jsonb_build_object('accountId', income_p, 'direction', 'credit', 'amount', '60.00'))) -> 'entry' ->> 'id')::uuid;
+
+  -- Superuser fixtures: a binding and four intents owned by the group owner.
+  reset role;
+  insert into public.bank_account_bindings (id,user_id,tenant_id,group_id,ledger_account_id,provider,account_label,account_fingerprint_hmac,sender_fingerprint_hmac,receiver_fingerprint_hmac)
+  values (binding_p, owner_uid::uuid, tenant_p, group_p, cash_p, 'cbe', 'P', repeat('a',64), repeat('b',64), repeat('c',64));
+  insert into public.bank_verification_intents (id,user_id,tenant_id,group_id,bank_account_binding_id,ledger_account_id,provider,provider_reference_hmac,idempotency_key,request_fingerprint,amount,direction,occurred_at)
+  values
+    ('dddddddd-0000-4000-8000-0000000000e1', owner_uid::uuid, tenant_p, group_p, binding_p, cash_p, 'cbe', secret_ref,       'prov-1', repeat('e',64), 25.00, 'inbound', now()),
+    ('dddddddd-0000-4000-8000-0000000000e2', owner_uid::uuid, tenant_p, group_p, binding_p, cash_p, 'cbe', repeat('8',64),    'prov-2', repeat('e',64), 30.00, 'inbound', now()),
+    ('dddddddd-0000-4000-8000-0000000000e4', owner_uid::uuid, tenant_p, group_p, binding_p, cash_p, 'cbe', repeat('7',64),    'prov-4', repeat('e',64), 50.00, 'inbound', now()),
+    -- same key as e_other's entry but a different amount: must never be linked by the backfill
+    ('dddddddd-0000-4000-8000-0000000000e5', owner_uid::uuid, tenant_p, group_p, binding_p, cash_p, 'cbe', repeat('6',64),    'prov-5', repeat('e',64), 61.00, 'inbound', now());
+  -- e1: verified and linked (the normal path). e2: still pending, no link.
+  -- e4 and e5: verified but never linked (the post succeeded, the result was not stored).
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('1',64), verified_at = '2026-10-06 09:00:05.123+00',
+      ledger_entry_id = e_bank
+  where id = 'dddddddd-0000-4000-8000-0000000000e1';
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('2',64), verified_at = now()
+  where id = 'dddddddd-0000-4000-8000-0000000000e4';
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('3',64), verified_at = now()
+  where id = 'dddddddd-0000-4000-8000-0000000000e5';
+
+  -- ---- A plain member (not the payer) reads provenance for the group --------
+  perform set_config('request.jwt.claim.sub', viewer_uid, true);
+  set local role authenticated;
+  result := public.get_ledger_entry_provenance_v1(group_p, array[e_bank, e_pending, e_manual, e_orphan, e_other]);
+  if jsonb_array_length(result) <> 1 then
+    raise exception 'PROVENANCE 1 FAILED: expected exactly the linked verified entry, got %', result;
+  end if;
+  if (result -> 0 ->> 'entryId')::uuid <> e_bank
+     or result -> 0 ->> 'verificationId' <> 'dddddddd-0000-4000-8000-0000000000e1'
+     or result -> 0 ->> 'provider' <> 'cbe'
+     or result -> 0 ->> 'memberUserId' <> owner_uid
+     or result -> 0 ->> 'verifiedAt' <> '2026-10-06T09:00:05.123Z' then
+    raise exception 'PROVENANCE 2 FAILED: wrong content %', result;
+  end if;
+  if (select array_agg(k order by k) from jsonb_object_keys(result -> 0) k)
+     is distinct from array['entryId','memberUserId','provider','verificationId','verifiedAt'] then
+    raise exception 'PROVENANCE 3 FAILED: unexpected fields %', result -> 0;
+  end if;
+  -- no form of the stored reference or evidence is in the response
+  if result::text like '%' || secret_ref || '%' or result::text like '%' || repeat('f',64) || '%'
+     or result::text like '%' || repeat('1',64) || '%' or result::text ~* '(hmac|ciphertext|reference|fingerprint|idempotency)' then
+    raise exception 'PROVENANCE 4 FAILED: the response leaks reference material: %', result;
+  end if;
+
+  -- an empty or null id list is empty, not an error; more than 500 is refused
+  if public.get_ledger_entry_provenance_v1(group_p, array[]::uuid[]) <> '[]'::jsonb
+     or public.get_ledger_entry_provenance_v1(group_p, null) <> '[]'::jsonb then
+    raise exception 'PROVENANCE 5 FAILED: empty input was not an empty result';
+  end if;
+  begin
+    perform public.get_ledger_entry_provenance_v1(group_p, (select array_agg(gen_random_uuid()) from generate_series(1, 501)));
+    raise exception 'PROVENANCE 6 FAILED: 501 ids were accepted';
+  exception when sqlstate '22023' then null;
+  end;
+
+  -- the member still cannot read the intents table directly
+  if has_table_privilege('authenticated', 'public.bank_verification_intents', 'SELECT') then
+    raise exception 'PROVENANCE 7 FAILED: authenticated can select bank_verification_intents';
+  end if;
+  begin
+    perform 1 from public.bank_verification_intents limit 1;
+    raise exception 'PROVENANCE 8 FAILED: a member read the intents table';
+  exception when insufficient_privilege then null;
+  end;
+
+  -- ---- Isolation -------------------------------------------------------------
+  -- An outsider to group P is refused outright.
+  perform set_config('request.jwt.claim.sub', outsider, true);
+  begin
+    perform public.get_ledger_entry_provenance_v1(group_p, array[e_bank]);
+    raise exception 'PROVENANCE 9 FAILED: an outsider read group P provenance';
+  exception when sqlstate '42501' then null;
+  end;
+  -- The owner of another group asking for group P's entry under THEIR group gets nothing.
+  perform set_config('request.jwt.claim.sub', other_uid, true);
+  if public.get_ledger_entry_provenance_v1(group_q, array[e_bank]) <> '[]'::jsonb then
+    raise exception 'PROVENANCE 10 FAILED: group Q saw group P provenance';
+  end if;
+  -- ...and is refused when naming group P.
+  begin
+    perform public.get_ledger_entry_provenance_v1(group_p, array[e_bank]);
+    raise exception 'PROVENANCE 11 FAILED: the other group owner read group P provenance';
+  exception when sqlstate '42501' then null;
+  end;
+  -- No identity at all.
+  perform set_config('request.jwt.claim.sub', '', true);
+  begin
+    perform public.get_ledger_entry_provenance_v1(group_p, array[e_bank]);
+    raise exception 'PROVENANCE 12 FAILED: an anonymous caller read provenance';
+  exception when sqlstate '28000' then null;
+  end;
+
+  reset role;
+  if has_function_privilege('anon', 'public.get_ledger_entry_provenance_v1(uuid, uuid[])', 'EXECUTE') then
+    raise exception 'PROVENANCE 13 FAILED: anon can execute the provenance function';
+  end if;
+  if not has_function_privilege('authenticated', 'public.get_ledger_entry_provenance_v1(uuid, uuid[])', 'EXECUTE') then
+    raise exception 'PROVENANCE 14 FAILED: authenticated cannot execute the provenance function';
+  end if;
+
+  -- ---- Backfill (the migration's UPDATE, run again over fixtures it has not seen) ----
+  -- e4 matches (same group, key, actor, type, debit amount) and is linked;
+  -- e5's amount differs from its entry, so it stays unlinked; e1 is untouched.
+  update public.bank_verification_intents intent_row
+  set ledger_entry_id = entry_row.id
+  from public.ledger_entries entry_row
+  where intent_row.state = 'VERIFIED'
+    and intent_row.ledger_entry_id is null
+    and entry_row.group_id = intent_row.group_id
+    and entry_row.idempotency_key = 'bank-verified-' || intent_row.idempotency_key
+    and entry_row.actor_id = intent_row.user_id
+    and entry_row.entry_type = case intent_row.direction when 'inbound' then 'contribution' else 'disbursement' end
+    and exists (
+      select 1 from public.ledger_entry_postings posting_row
+      where posting_row.entry_id = entry_row.id and posting_row.direction = 'debit' and posting_row.amount = intent_row.amount
+    );
+  get diagnostics n = row_count;
+  if n <> 1 then raise exception 'BACKFILL 1 FAILED: expected 1 intent linked, got %', n; end if;
+  if (select ledger_entry_id from public.bank_verification_intents where id = 'dddddddd-0000-4000-8000-0000000000e4') is distinct from e_orphan then
+    raise exception 'BACKFILL 2 FAILED: the matching intent was not linked to its entry';
+  end if;
+  if (select ledger_entry_id from public.bank_verification_intents where id = 'dddddddd-0000-4000-8000-0000000000e5') is not null then
+    raise exception 'BACKFILL 3 FAILED: a mismatched amount was linked';
+  end if;
+  if (select ledger_entry_id from public.bank_verification_intents where id = 'dddddddd-0000-4000-8000-0000000000e2') is not null then
+    raise exception 'BACKFILL 4 FAILED: a PENDING intent was linked';
+  end if;
+
+  -- The backfilled link is then visible to a member.
+  perform set_config('request.jwt.claim.sub', viewer_uid, true);
+  set local role authenticated;
+  if jsonb_array_length(public.get_ledger_entry_provenance_v1(group_p, array[e_bank, e_orphan])) <> 2 then
+    raise exception 'BACKFILL 5 FAILED: the backfilled entry has no provenance';
+  end if;
+  reset role;
+end;
+$prov$;
+rollback;
+select 'ALL LEDGER PROVENANCE CHECKS PASSED' as result;

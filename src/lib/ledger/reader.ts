@@ -10,6 +10,9 @@ import {
   type LedgerPostingDirection
 } from "./types";
 
+/** Mirrors `bank_verification_intents.provider`; kept local so the read side does not import the banking module. */
+type BankProvider = "telebirr" | "cbe" | "awash";
+
 /**
  * The read side of the ledger: a group's entries, newest first, with postings.
  *
@@ -31,6 +34,24 @@ export interface PublicLedgerPosting {
   readonly amount: string;
 }
 
+/**
+ * Where an entry came from, when that is a verified bank receipt.
+ *
+ * Read from `bank_verification_intents` through the SECURITY DEFINER function
+ * `get_ledger_entry_provenance_v1`, which any active member of the group may
+ * call and which returns only these fields. `memberUserId` is the member whose
+ * receipt was verified (not the actor who recorded the entry). There is
+ * deliberately no reference field: the stored provider reference is only
+ * ciphertext and HMACs, and nothing derived from it is safe to show.
+ */
+export interface PublicLedgerProvenance {
+  readonly kind: "bank_verification";
+  readonly provider: BankProvider;
+  readonly verifiedAt: string;
+  readonly verificationId: string;
+  readonly memberUserId: string;
+}
+
 /** What the browser sees. No tenant id, request fingerprint or idempotency key. */
 export interface PublicLedgerEntry {
   readonly id: string;
@@ -46,7 +67,14 @@ export interface PublicLedgerEntry {
   readonly previousHash: string;
   readonly entryHash: string;
   readonly postings: readonly PublicLedgerPosting[];
+  /** `null` for every entry not posted from a verified bank receipt. */
+  readonly provenance: PublicLedgerProvenance | null;
 }
+
+const BANK_PROVIDERS: readonly BankProvider[] = ["telebirr", "cbe", "awash"];
+
+/** The only entry types the bank-verification sink posts. */
+const BANK_POSTED_TYPES: readonly LedgerEntryType[] = ["contribution", "disbursement"];
 
 const ENTRY_COLUMNS =
   "id, group_id, sequence, occurred_at, recorded_at, entry_type, corrects_entry_id, rationale, actor_id, nonce, previous_hash, entry_hash";
@@ -149,7 +177,8 @@ function parseEntry(value: unknown, postings: readonly PublicLedgerPosting[]): P
     nonce: uuid(value, "nonce"),
     previousHash: str(value, "previous_hash"),
     entryHash: str(value, "entry_hash"),
-    postings
+    postings,
+    provenance: null
   };
 }
 
@@ -194,7 +223,68 @@ export async function listGroupLedgerEntries(
   return attachPostings(client, groupId, entries.data);
 }
 
-/** Fetch the postings for already-read entry rows and join them on. */
+function parseProvenance(value: unknown): PublicLedgerProvenance & { readonly entryId: string } {
+  if (!isRecord(value)) {
+    throw integrity("Ledger read returned an invalid provenance row");
+  }
+  const provider = str(value, "provider");
+  if (!BANK_PROVIDERS.includes(provider as BankProvider)) {
+    throw integrity("Ledger read returned an invalid provenance provider");
+  }
+  const verifiedAt = str(value, "verifiedAt");
+  if (!Number.isFinite(Date.parse(verifiedAt))) {
+    throw integrity("Ledger read returned an invalid provenance time");
+  }
+  // Only the named fields are copied: whatever else a row carried is dropped.
+  return {
+    entryId: uuid(value, "entryId"),
+    kind: "bank_verification",
+    provider: provider as BankProvider,
+    verifiedAt,
+    verificationId: uuid(value, "verificationId"),
+    memberUserId: uuid(value, "memberUserId")
+  };
+}
+
+/**
+ * Bank-verification provenance for the given entries, keyed by entry id.
+ *
+ * Only contribution and disbursement entries can come from the sink, so other
+ * entries are not asked about. The RPC re-checks group membership itself.
+ */
+async function readProvenance(
+  client: SupabaseClient,
+  groupId: string,
+  rows: readonly Record<string, unknown>[]
+): Promise<ReadonlyMap<string, PublicLedgerProvenance>> {
+  const candidates = rows
+    .filter((row) => BANK_POSTED_TYPES.includes(row.entry_type as LedgerEntryType))
+    .map((row) => uuid(row, "id"));
+  const found = new Map<string, PublicLedgerProvenance>();
+  if (candidates.length === 0) {
+    return found;
+  }
+  const result = await client.rpc("get_ledger_entry_provenance_v1", {
+    p_group_id: groupId,
+    p_entry_ids: candidates
+  });
+  if (result.error) {
+    throw storageFailure(result.error);
+  }
+  if (!Array.isArray(result.data)) {
+    throw integrity("Ledger read returned an invalid provenance list");
+  }
+  for (const raw of result.data) {
+    const { entryId, ...provenance } = parseProvenance(raw);
+    if (!candidates.includes(entryId) || found.has(entryId)) {
+      throw integrity("Ledger read returned provenance for an entry it was not asked about");
+    }
+    found.set(entryId, provenance);
+  }
+  return found;
+}
+
+/** Fetch the postings and provenance for already-read entry rows and join them on. */
 async function attachPostings(
   client: SupabaseClient,
   groupId: string,
@@ -219,13 +309,18 @@ async function attachPostings(
     const { entryId, ...posting } = parsePosting(raw);
     byEntry.set(entryId, [...(byEntry.get(entryId) ?? []), posting]);
   }
+  const provenance = await readProvenance(
+    client,
+    groupId,
+    rows.map((row) => (isRecord(row) ? row : {}))
+  );
   return rows.map((row) => {
     const parsed = parseEntry(row, []);
     const entryPostings = byEntry.get(parsed.id);
     if (!entryPostings || entryPostings.length === 0) {
       throw integrity("Ledger entry has no postings");
     }
-    return { ...parsed, postings: entryPostings };
+    return { ...parsed, postings: entryPostings, provenance: provenance.get(parsed.id) ?? null };
   });
 }
 

@@ -96,6 +96,12 @@ const SAMPLE_POT_BALANCE = 175000;
 const SAMPLE_CONTRIBUTED_COUNT = 17;
 const SAMPLE_TOTAL_MEMBERS = 20;
 
+const PROVIDER_LABEL_KEY = {
+  telebirr: "shell.feed.channelTelebirr",
+  cbe: "shell.feed.channelCbe",
+  awash: "shell.feed.channelAwash"
+} as const satisfies Record<"telebirr" | "cbe" | "awash", MessageKey>;
+
 const LIVE_NOTICE_KEYS: Readonly<Record<Exclude<HomeLedgerResult["status"], "ready">, MessageKey>> = {
   empty: "home.live.empty",
   unauthorized: "home.live.unauthorized",
@@ -127,17 +133,37 @@ export default function SenedHome() {
   const ledger = home.kind === "live" && home.result.status === "ready" ? home.result.summary : null;
 
   // Signed out shows the labelled sample; signed in shows the ledger or nothing.
+  const memberLabels = home.kind === "live" && home.result.status === "ready" ? home.result.memberLabels : null;
   const ledgerRows = useMemo<MemberContribution[]>(
     () =>
-      (ledger?.contributions ?? []).map((contribution) => ({
-        id: contribution.id,
-        name: t("shell.feed.ledgerContribution", { sequence: contribution.sequence }),
-        amountWire: contribution.amount,
-        transactionId: `#${contribution.sequence}`,
-        status: "PROVISIONAL" as const,
-        source: "ledger" as const
-      })),
-    [ledger, t]
+      (ledger?.contributions ?? []).map((contribution) => {
+        const base = {
+          id: contribution.id,
+          name: t("shell.feed.ledgerContribution", { sequence: contribution.sequence }),
+          amountWire: contribution.amount,
+          transactionId: `#${contribution.sequence}`,
+          source: "ledger" as const
+        };
+        const proof = contribution.provenance;
+        if (!proof) {
+          return { ...base, status: "PROVISIONAL" as const };
+        }
+        // A verified bank receipt posted this entry. The badge's evidence is the
+        // provider and the time it answered; the payer is the verification's
+        // user, named the way the members screen names them (email only if the
+        // members API showed it to this caller, else the anonymous label).
+        const provider = t(PROVIDER_LABEL_KEY[proof.provider]);
+        return {
+          ...base,
+          channel: proof.provider,
+          status: "VERIFIED" as const,
+          verifiedBy: provider,
+          verifiedAt: new Date(proof.verifiedAt).toLocaleString(locale === "am" ? "am-ET" : "en-US"),
+          memberLabel:
+            memberLabels?.[proof.memberUserId] ?? t("members.anonymous", { id: proof.memberUserId.slice(0, 8) })
+        };
+      }),
+    [ledger, memberLabels, t, locale]
   );
   const contributions = [
     ...localNotes,

@@ -126,7 +126,10 @@ export async function POST(request: Request): Promise<Response> {
 
 /**
  * `GET /api/ledger/entries?groupId=<uuid>[&limit=1..100]` — a group's entries,
- * newest first, each with its postings. Read-only.
+ * newest first, each with its postings and a `provenance` field: `null`, or the
+ * verified bank receipt that posted the entry (`{ kind: "bank_verification",
+ * provider, verifiedAt, verificationId, memberUserId }`, never a reference).
+ * Read-only.
  *
  * What the O-3 correction form needs in order to name the entry it corrects.
  * Authorization is the tables' own row-level security under the caller's JWT:

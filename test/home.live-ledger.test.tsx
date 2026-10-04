@@ -26,10 +26,25 @@ import { translate, type MessageKey } from "@/lib/i18n";
 const am = (key: MessageKey, vars: Record<string, string | number> = {}) => translate("am", key, vars);
 const SIGNED_IN = { status: "signed-in", accessToken: "tok", email: "t@example.com" };
 
-function ready(potBalance: string, contributions: Array<{ id: string; sequence: string; amount: string }>) {
+type TestContribution = {
+  id: string;
+  sequence: string;
+  amount: string;
+  provenance?: { provider: "telebirr" | "cbe" | "awash"; verifiedAt: string; verificationId: string; memberUserId: string };
+};
+
+function ready(
+  potBalance: string,
+  contributions: TestContribution[],
+  memberLabels: Record<string, string | null> = {}
+) {
   return {
     status: "ready",
-    summary: { potBalance, contributions: contributions.map((c) => ({ ...c, occurredAt: "2026-09-01T09:00:00.000Z" })) }
+    summary: {
+      potBalance,
+      contributions: contributions.map((c) => ({ provenance: null, ...c, occurredAt: "2026-09-01T09:00:00.000Z" }))
+    },
+    memberLabels
   };
 }
 
@@ -61,6 +76,65 @@ describe("home screen: signed in shows the group ledger", () => {
     // Never a verified badge for a ledger row: nothing here carries provenance.
     expect(screen.getAllByText(am("shell.feed.recorded"))).toHaveLength(2);
     expect(screen.queryByText(am("shell.feed.pending"))).not.toBeInTheDocument();
+  });
+
+  it("marks a bank-provenance contribution verified, with its provider and payer, and leaves the others recorded", async () => {
+    const PAYER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    hoisted.load.mockResolvedValue(
+      ready(
+        "300.00",
+        [
+          {
+            id: "e2",
+            sequence: "8",
+            amount: "250.00",
+            provenance: {
+              provider: "cbe",
+              verifiedAt: "2026-09-01T09:00:05.000Z",
+              verificationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              memberUserId: PAYER
+            }
+          },
+          { id: "e1", sequence: "7", amount: "50.00" }
+        ],
+        { [PAYER]: null }
+      )
+    );
+    render(<SenedHome />);
+    await screen.findByText("300.00");
+    expect(screen.getAllByText(am("shell.feed.recorded"))).toHaveLength(1);
+    expect(screen.getByText(am("shell.feed.channelCbe"))).toBeInTheDocument();
+    // The members API showed no email, so the anonymous label is used.
+    expect(screen.getByTestId("feed-paid-by")).toHaveTextContent(am("members.anonymous", { id: PAYER.slice(0, 8) }));
+    // The digest speaks no verified count: it has nothing to count honestly.
+    const script = await digestText();
+    expect(script).not.toMatch(/verified|የተረጋገጡ/i);
+  });
+
+  it("names the payer by email when the members API already showed it", async () => {
+    const PAYER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    hoisted.load.mockResolvedValue(
+      ready(
+        "250.00",
+        [
+          {
+            id: "e2",
+            sequence: "8",
+            amount: "250.00",
+            provenance: {
+              provider: "telebirr",
+              verifiedAt: "2026-09-01T09:00:05.000Z",
+              verificationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              memberUserId: PAYER
+            }
+          }
+        ],
+        { [PAYER]: "payer@example.test" }
+      )
+    );
+    render(<SenedHome />);
+    await screen.findByText("250.00");
+    expect(screen.getByTestId("feed-paid-by")).toHaveTextContent("payer@example.test");
   });
 
   it("speaks the same real numbers the screen shows", async () => {

@@ -621,12 +621,14 @@ at the service level.
 - ~~A member-seal endpoint and a UI to show who has sealed~~ — done (§16, M4.4).
 - ~~Contribution amounts and pot typed by the treasurer~~ — the cycle defines
   them; the commit takes them from the cycle (§16.2).
-- **Per-member payment status.** Ledger entries carry no member id (their actor is
-  whoever recorded them) and no cycle or round id, so who paid what for which
-  round cannot be derived. The screen shows the contributions recorded since the
-  cycle started (count and total, read the way the home screen reads the ledger)
-  and each member at the configured amount, and says it cannot show who paid. A
-  real answer needs a member (and cycle) reference on contribution postings.
+- **Per-member payment status.** Partly delivered (§16.5): an entry posted from a
+  verified bank receipt now carries provenance naming the member whose receipt it
+  was, so those entries are credited to that member. An entry with no bank
+  provenance (a treasurer's manual entry) still has only an actor, who recorded it
+  and did not necessarily pay, so it is shown as unattributed. Entries still carry
+  no cycle or round id and a cycle has no cadence, so there is no per-round
+  figure and no unpaid/default status. A complete answer needs a member (and
+  cycle) reference on every contribution posting.
 - **Closing a cycle.** `draw_cycles.closed_at` exists but the table is append-only
   and there is no closing RPC; a cycle is complete when every round is drawn.
 - **Draws committed before M4.4** have no stored nonces. They can be read and
@@ -733,14 +735,42 @@ back with a group-access policy. The exception is `draw_nonces` (§16.4).
 5. The caller supplies the seed and nothing else in `POST /api/draw/reveals`
    (`memberNonces` is a 400).
 
-### 16.5 Ledger figures
+### 16.5 Ledger figures and bank provenance
 
 `LiveDraw` reads the ledger the way the home screen does (`loadHomeLedger`) and
-shows the contribution entries recorded since the cycle started (count and
-total, `cycleLedgerFigures`). Ledger entries have no member id and no cycle or
-round id, so **who paid, and for which round, is not derivable and is not shown**:
-each member is listed at the cycle's configured amount and the screen says so. If
-the ledger is longer than one read returns, no total is shown rather than a guess.
+shows the contribution entries recorded since the cycle started (`cycleLedgerFigures`):
+count and total, and who has paid.
+
+**Where provenance comes from.** The link already existed:
+`bank_verification_intents.ledger_entry_id`, written by
+`record_bank_verification_result_v1` / `finalize_bank_reconciliation_job_v1` when
+`LedgerBankVerificationSink` posts the entry (idempotency key
+`bank-verified-<intent key>`), under a composite foreign key to
+`ledger_entries (id, group_id)`. The key is not parsed on the read path. Migration
+`20261006100000_ledger_entry_provenance.sql` backfills the link for a VERIFIED intent
+whose result was never stored (same group, the sink's key, the intent owner as
+actor, the entry type its direction implies, a debit posting of its amount) and adds
+`get_ledger_entry_provenance_v1(group, entry ids)`.
+
+**Why a function.** `bank_verification_intents` is owner-read only, so another
+member could never learn that a contribution was verified. The SECURITY DEFINER
+function checks `sened_ledger_can_access_group`, filters on the group, and returns
+only `entryId, verificationId, provider, verifiedAt, memberUserId` for VERIFIED
+intents. No policy or table privilege is widened. The provider reference exists only
+as ciphertext and HMACs, and nothing derived from it is returned, so there is no
+masked reference. `GET /api/ledger/entries` and the `/api/sync` pull attach it as
+`provenance: { kind: "bank_verification", provider, verifiedAt, verificationId,
+memberUserId } | null` on each entry (`null` for every entry the sink did not post).
+It is not part of the entry hash, so the chain is unaffected.
+
+**What `/draw` shows.** Each entry in the window is credited to `provenance.memberUserId`
+(never to the actor). Members with bank-verified entries are listed with their total
+and count; entries without provenance are counted and totalled as unattributed. The
+window is "since the cycle started": the cycle has no cadence and entries have no
+round id, so there is no per-round period, and a member who is not listed has no
+bank-verified entry in the window, which is not the same as unpaid. Member labels are
+the members API's own (email for the owner, "Member xxxxxxxx" otherwise). If the
+ledger is longer than one read returns, no total is shown rather than a guess.
 
 ### 16.6 Database-side hashes and their parity
 

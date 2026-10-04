@@ -64,7 +64,7 @@ type Tamper = (path: string, body: Record<string, unknown>) => Record<string, un
  * the stored seals). Only the network and the Supabase session are replaced, so
  * what the browser verifies is what a real server would have published.
  */
-function createServer(role: Role, opts: { override?: Override; tamper?: Tamper; groups?: number } = {}) {
+function createServer(role: Role, opts: { override?: Override; tamper?: Tamper; groups?: number; bankPaid?: boolean } = {}) {
   const ledger = new InMemoryLedgerRepository({
     groups: [{ id: GROUP, tenantId: TENANT, members: [{ userId: TREASURER, role: "treasurer" }] }],
     accounts: [
@@ -110,11 +110,27 @@ function createServer(role: Role, opts: { override?: Override; tamper?: Tamper; 
     email: entry.userId === TREASURER ? "treasurer@example.test" : null
   }));
 
-  const entries = [
+  const baseEntries = [
     { id: "e1", groupId: GROUP, occurredAt: "2026-09-01T09:00:00.000Z", sequence: "1", entryType: "contribution", correctsEntryId: null, postings: [{ accountId: CASH, direction: "debit", amount: "500.00" }, { accountId: INCOME, direction: "credit", amount: "500.00" }] },
     { id: "e2", groupId: GROUP, occurredAt: "2026-10-02T09:00:00.000Z", sequence: "2", entryType: "contribution", correctsEntryId: null, postings: [{ accountId: CASH, direction: "debit", amount: "1000.00" }, { accountId: INCOME, direction: "credit", amount: "1000.00" }] },
     { id: "e3", groupId: GROUP, occurredAt: "2026-10-03T09:00:00.000Z", sequence: "3", entryType: "contribution", correctsEntryId: null, postings: [{ accountId: CASH, direction: "debit", amount: "2000.00" }, { accountId: INCOME, direction: "credit", amount: "2000.00" }] }
   ];
+
+  // With `bankPaid`, entry 2 was posted from MEMBER_B's verified bank receipt.
+  const entries = baseEntries.map((entry) =>
+    opts.bankPaid && entry.id === "e2"
+      ? {
+          ...entry,
+          provenance: {
+            kind: "bank_verification",
+            provider: "telebirr",
+            verifiedAt: "2026-10-02T09:00:05.000Z",
+            verificationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            memberUserId: MEMBER_B
+          }
+        }
+      : { ...entry, provenance: null }
+  );
 
   const fetchImpl = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input);
@@ -280,8 +296,12 @@ describe("signed in: cycles", () => {
     expect(list).toHaveTextContent("Round 1 · sealing");
     // Contributions recorded since the cycle started: the two after it, not the one before.
     await waitFor(() => expect(screen.getByTestId("ledger-recorded")).toHaveTextContent("Br 3,000.00 ETB in 2 contribution entries"));
-    expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("does not record which member paid an entry");
-    expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("not as paid or unpaid");
+    // Neither entry carries bank provenance, so nobody is credited and the note says why.
+    expect(screen.queryByTestId("ledger-paid-members")).toBeNull();
+    expect(screen.getByTestId("ledger-no-verified")).toHaveTextContent("no member can be shown as having paid");
+    expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("2 entries (Br 3,000.00 ETB) have no bank verification");
+    expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("does not record which round an entry belongs to");
+    expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("does not mean they have not paid");
     // Members are listed at the configured amount and never marked paid.
     expect(document.querySelector('[data-draw-panel="roster"]')!.textContent).toContain("Br 1,000.00 expected");
     expect(document.querySelector('[data-draw-panel="roster"]')!.textContent).not.toMatch(/\bpaid\b/i);
@@ -289,6 +309,30 @@ describe("signed in: cycles", () => {
     expect(screen.queryByTestId("cycle-create-form")).toBeNull();
     expect(screen.queryByTestId("open-draw")).toBeNull();
     expect(screen.queryByTestId("commit-button")).toBeNull();
+  });
+});
+
+describe("signed in: who has paid, from bank-verified entries", () => {
+  it("credits the member whose receipt was verified, leaves the rest unattributed, and does not call anyone unpaid", async () => {
+    const user = userEvent.setup();
+    const server = createServer("treasurer", { bankPaid: true });
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+
+    renderAs(server, MEMBER_C);
+    const paid = await screen.findByTestId("ledger-paid-members");
+    const rows = within(paid).getAllByTestId("ledger-paid-member");
+    expect(rows).toHaveLength(1);
+    // MEMBER_B has no email in the members list, so the anonymous label is used.
+    expect(rows[0]).toHaveTextContent("Member 33333333");
+    expect(rows[0]).toHaveTextContent("Br 1,000.00 ETB in 1 verified entries");
+    // The other in-window entry (Br 2,000.00) has no bank verification.
+    expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("1 entries (Br 2,000.00 ETB)");
+    expect(screen.queryByTestId("ledger-no-verified")).toBeNull();
+    const text = document.querySelector('[data-draw-panel="ledger"]')!.textContent ?? "";
+    expect(text).not.toMatch(/unpaid|in default|overdue/i);
+    // Reading the figures never contacts anything but the two read routes.
+    expect(server.calls.filter((call) => call.includes("/api/ledger"))).not.toContain("POST /api/ledger/entries");
   });
 });
 

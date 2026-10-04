@@ -6,7 +6,8 @@ const mocks = vi.hoisted(() => ({
   getUser: vi.fn(),
   results: {} as Record<string, Result>,
   calls: [] as Array<{ table: string; op: string; args: unknown[] }>,
-  from: vi.fn()
+  from: vi.fn(),
+  rpc: vi.fn()
 }));
 
 vi.mock("server-only", () => ({}));
@@ -14,7 +15,8 @@ vi.mock("server-only", () => ({}));
 vi.mock("@supabase/supabase-js", () => ({
   createClient: vi.fn(() => ({
     auth: { getUser: mocks.getUser },
-    from: mocks.from
+    from: mocks.from,
+    rpc: mocks.rpc
   }))
 }));
 
@@ -105,6 +107,8 @@ beforeEach(() => {
   mocks.calls.length = 0;
   mocks.from.mockReset();
   mocks.from.mockImplementation((table: string) => builder(table));
+  mocks.rpc.mockReset();
+  mocks.rpc.mockResolvedValue({ data: [], error: null });
   mocks.results = {
     ledger_groups: { data: { id: groupId }, error: null },
     ledger_entries: { data: [entryRow()], error: null },
@@ -271,6 +275,119 @@ describe("GET /api/ledger/entries", () => {
       correctsEntryId: entryId,
       rationale: "Wrong member credited"
     });
+  });
+});
+
+const verificationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const payerId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const otherEntryId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+function provenanceRow(overrides: Record<string, unknown> = {}) {
+  return {
+    entryId: entryId,
+    verificationId,
+    provider: "telebirr",
+    verifiedAt: "2026-09-25T10:30:05.123Z",
+    memberUserId: payerId,
+    ...overrides
+  };
+}
+
+describe("GET /api/ledger/entries provenance", () => {
+  it("returns provenance for an entry the bank-verification sink posted, and null for the rest", async () => {
+    mocks.results.ledger_entries = {
+      data: [entryRow({ id: otherEntryId, sequence: 8 }), entryRow()],
+      error: null
+    };
+    mocks.results.ledger_entry_postings = { data: [...postingRows(otherEntryId), ...postingRows()], error: null };
+    mocks.rpc.mockResolvedValue({ data: [provenanceRow()], error: null });
+
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+
+    expect(body.entries[0].id).toBe(otherEntryId);
+    expect(body.entries[0].provenance).toBeNull();
+    expect(body.entries[1].id).toBe(entryId);
+    expect(body.entries[1].provenance).toEqual({
+      kind: "bank_verification",
+      provider: "telebirr",
+      verifiedAt: "2026-09-25T10:30:05.123Z",
+      verificationId,
+      memberUserId: payerId
+    });
+    // The group is passed so the function can scope to membership; only the
+    // entries on this page are asked about.
+    expect(mocks.rpc).toHaveBeenCalledWith("get_ledger_entry_provenance_v1", {
+      p_group_id: groupId,
+      p_entry_ids: [otherEntryId, entryId]
+    });
+  });
+
+  it("returns provenance: null on every entry when nothing was bank-verified", async () => {
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+    expect(body.entries[0].provenance).toBeNull();
+  });
+
+  it("does not ask about entry types the sink never posts", async () => {
+    mocks.results.ledger_entries = { data: [entryRow({ entry_type: "correction" })], error: null };
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(body.entries[0].provenance).toBeNull();
+  });
+
+  it("never reaches the provenance function for a group RLS hides (cross-group isolation)", async () => {
+    mocks.results.ledger_groups = { data: null, error: null };
+    expect((await GET(request(`?groupId=${groupId}`))).status).toBe(404);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("refuses (502) when the database says the caller is not a member, rather than showing unverified rows", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: { code: "42501", message: "ledger_forbidden" } });
+    expect((await GET(request(`?groupId=${groupId}`))).status).toBe(502);
+  });
+
+  it("refuses provenance for an entry that was not asked about", async () => {
+    mocks.rpc.mockResolvedValue({ data: [provenanceRow({ entryId: otherEntryId })], error: null });
+    expect((await GET(request(`?groupId=${groupId}`))).status).toBe(502);
+  });
+
+  it("refuses a malformed provenance row", async () => {
+    mocks.rpc.mockResolvedValue({ data: [provenanceRow({ provider: "paypal" })], error: null });
+    expect((await GET(request(`?groupId=${groupId}`))).status).toBe(502);
+  });
+
+  it("never exposes a stored reference, its HMAC, its ciphertext or the intent's other columns", async () => {
+    const reference = "FT26268ABCD1234";
+    const hmac = "d".repeat(64);
+    const ciphertext = "Y2lwaGVydGV4dC1vZi10aGUtcmVmZXJlbmNl";
+    // Even if the database function ever returned more than it should, the
+    // reader copies only the named fields.
+    mocks.rpc.mockResolvedValue({
+      data: [
+        provenanceRow({
+          providerReference: reference,
+          providerReferenceHmac: hmac,
+          provider_reference_ciphertext: ciphertext,
+          providerTransactionIdentityHmac: hmac,
+          evidenceFingerprint: "e".repeat(64),
+          idempotencyKey: "bank-intent-secret",
+          referenceMasked: reference
+        })
+      ],
+      error: null
+    });
+    const response = await GET(request(`?groupId=${groupId}`));
+    const text = JSON.stringify(await response.json());
+    expect(text).toContain(verificationId);
+    for (const secret of [reference, hmac, ciphertext, "e".repeat(64), "bank-intent-secret", "referenceMasked", "Hmac", "ciphertext"]) {
+      expect(text).not.toContain(secret);
+    }
+    expect(Object.keys(JSON.parse(text).entries[0].provenance).sort()).toEqual([
+      "kind",
+      "memberUserId",
+      "provider",
+      "verificationId",
+      "verifiedAt"
+    ]);
   });
 });
 

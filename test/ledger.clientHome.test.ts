@@ -81,3 +81,74 @@ describe("loadHomeLedger", () => {
     expect(result.status === "ready" && result.summary.potBalance).toBe("100.00");
   });
 });
+
+describe("loadHomeLedger provenance", () => {
+  const PAYER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const proof = {
+    kind: "bank_verification",
+    provider: "cbe",
+    verifiedAt: "2026-09-01T09:00:05.000Z",
+    verificationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    memberUserId: PAYER
+  };
+  const members = (email: string | null) => ({
+    members: [{ userId: PAYER, role: "member", joinedAt: "2026-08-01T00:00:00.000Z", email }]
+  });
+
+  it("carries a complete provenance object onto the contribution and names the payer from the members API", async () => {
+    const d = deps([
+      json(groupBody()),
+      json({ entries: [{ ...wire(2), provenance: proof }, wire(1)] }),
+      json(members(null))
+    ]);
+    const result = await loadHomeLedger(d);
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") return;
+    const [bank, plain] = result.summary.contributions;
+    expect(bank.provenance).toEqual({
+      provider: "cbe",
+      verifiedAt: proof.verifiedAt,
+      verificationId: proof.verificationId,
+      memberUserId: PAYER
+    });
+    expect(plain.provenance).toBeNull();
+    // The members API showed this caller no email, so none is invented.
+    expect(result.memberLabels).toEqual({ [PAYER]: null });
+    expect(d.fetchImpl.mock.calls[2][0]).toBe(`/api/ledger/members?groupId=${GROUP}`);
+  });
+
+  it("passes on an email only when the members API already returned one", async () => {
+    const result = await loadHomeLedger(
+      deps([json(groupBody()), json({ entries: [{ ...wire(1), provenance: proof }] }), json(members("payer@example.test"))])
+    );
+    expect(result.status === "ready" && result.memberLabels).toEqual({ [PAYER]: "payer@example.test" });
+  });
+
+  it("does not read the members when nothing is bank-verified", async () => {
+    const d = deps([json(groupBody()), json({ entries: [wire(1)] })]);
+    const result = await loadHomeLedger(d);
+    expect(d.fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.status === "ready" && result.memberLabels).toEqual({});
+  });
+
+  it("keeps the verified contribution when the members cannot be read", async () => {
+    const result = await loadHomeLedger(
+      deps([json(groupBody()), json({ entries: [{ ...wire(1), provenance: proof }] }), json({}, 502)])
+    );
+    expect(result.status).toBe("ready");
+    expect(result.status === "ready" && result.summary.contributions[0].provenance?.memberUserId).toBe(PAYER);
+    expect(result.status === "ready" && result.memberLabels).toEqual({});
+  });
+
+  it.each([
+    ["an unknown provider", { ...proof, provider: "paypal" }],
+    ["a missing verification id", { ...proof, verificationId: undefined }],
+    ["a non-uuid member", { ...proof, memberUserId: "someone" }],
+    ["an unparseable time", { ...proof, verifiedAt: "yesterday" }],
+    ["the wrong kind", { ...proof, kind: "manual" }],
+    ["a bare string", "verified"]
+  ])("treats %s as no provenance, so the row is never half-verified", async (_name, bad) => {
+    const result = await loadHomeLedger(deps([json(groupBody()), json({ entries: [{ ...wire(1), provenance: bad }] })]));
+    expect(result.status === "ready" && result.summary.contributions[0].provenance).toBeNull();
+  });
+});

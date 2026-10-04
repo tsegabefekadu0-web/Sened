@@ -22,6 +22,18 @@ export interface SummaryPosting {
   readonly amount: string;
 }
 
+/**
+ * What the read path says about a bank-verified entry (see
+ * `PublicLedgerProvenance`). Present only when the server returned a complete,
+ * well-formed provenance object; anything else is treated as no provenance.
+ */
+export interface EntryProvenance {
+  readonly provider: "telebirr" | "cbe" | "awash";
+  readonly verifiedAt: string;
+  readonly verificationId: string;
+  readonly memberUserId: string;
+}
+
 export interface SummaryEntry {
   readonly id: string;
   readonly sequence: string;
@@ -29,6 +41,8 @@ export interface SummaryEntry {
   readonly entryType: LedgerEntryType;
   readonly correctsEntryId: string | null;
   readonly postings: readonly SummaryPosting[];
+  /** Absent or `null` for an entry with no bank-verification provenance. */
+  readonly provenance?: EntryProvenance | null;
 }
 
 export interface SummaryAccount {
@@ -42,6 +56,8 @@ export interface HomeContribution {
   readonly occurredAt: string;
   /** ETB, two decimals: what this entry added to the pot. */
   readonly amount: string;
+  /** Set only when a verified bank receipt posted this entry; otherwise `null`. */
+  readonly provenance: EntryProvenance | null;
 }
 
 export interface HomeLedgerSummary {
@@ -110,7 +126,8 @@ export function summarizeLedger(
         id: entry.id,
         sequence: entry.sequence,
         occurredAt: entry.occurredAt,
-        amount: formatEtbMinorUnits(added)
+        amount: formatEtbMinorUnits(added),
+        provenance: entry.provenance ?? null
       });
     }
   }

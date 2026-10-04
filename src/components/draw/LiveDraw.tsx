@@ -723,14 +723,55 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
             {ledger === "loading" || ledger === null ? (
               <p className={HINT}>{t("drawLive.ledgerLoading")}</p>
             ) : ledger.status === "ready" ? (
-              <p data-testid="ledger-recorded" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
-                {t("drawLive.ledgerRecorded", {
-                  total: formatEtbDisplay(ledger.figures.total),
-                  currency: copy.currency,
-                  count: ledger.figures.count,
-                  date: cycle.startedAt.slice(0, 10)
-                })}
-              </p>
+              <>
+                <p data-testid="ledger-recorded" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
+                  {t("drawLive.ledgerRecorded", {
+                    total: formatEtbDisplay(ledger.figures.total),
+                    currency: copy.currency,
+                    count: ledger.figures.count,
+                    date: cycle.startedAt.slice(0, 10)
+                  })}
+                </p>
+                {ledger.figures.byMember.length > 0 ? (
+                  <div data-testid="ledger-paid-members" className="mt-2">
+                    <p className={HINT}>{t("drawLive.ledgerPaidTitle")}</p>
+                    <ul className="mt-1 space-y-1">
+                      {ledger.figures.byMember.map((figure) => (
+                        <li
+                          key={figure.memberUserId}
+                          data-testid="ledger-paid-member"
+                          className="flex items-center justify-between gap-2 rounded-lg bg-[#F5EFEB] px-2.5 py-1.5 text-[12px]"
+                        >
+                          <span className="min-w-0 truncate font-semibold">
+                            {labelFor(figure.memberUserId)}
+                            {figure.memberUserId === myUserId ? ` ${t("drawLive.you")}` : ""}
+                          </span>
+                          <span className="shrink-0 text-right text-[11px] text-[#6F625D]">
+                            {t("drawLive.ledgerPaidRow", {
+                              total: formatEtbDisplay(figure.total),
+                              currency: copy.currency,
+                              count: figure.count
+                            })}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : ledger.figures.count > 0 ? (
+                  <p data-testid="ledger-no-verified" className={HINT}>
+                    {t("drawLive.ledgerNoVerified")}
+                  </p>
+                ) : null}
+                {ledger.figures.unattributedCount > 0 ? (
+                  <p data-testid="ledger-unattributed-entries" className={HINT}>
+                    {t("drawLive.ledgerUnattributed", {
+                      count: ledger.figures.unattributedCount,
+                      total: formatEtbDisplay(ledger.figures.unattributedTotal),
+                      currency: copy.currency
+                    })}
+                  </p>
+                ) : null}
+              </>
             ) : ledger.status === "empty" ? (
               <p data-testid="ledger-recorded" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
                 {t("drawLive.ledgerEmpty")}

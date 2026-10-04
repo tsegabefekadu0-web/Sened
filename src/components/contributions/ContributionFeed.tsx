@@ -51,6 +51,11 @@ export interface MemberContribution {
   verifiedBy?: string;
   /** Required for `VERIFIED`: when that provider answered. */
   verifiedAt?: string;
+  /**
+   * Who paid, from the verification's own user. Shown only on a verified row:
+   * naming a payer for an unverified one would be a claim nothing backs.
+   */
+  memberLabel?: string;
 }
 
 const CHANNEL_KEY: Readonly<Record<NonNullable<MemberContribution["channel"]>, string>> = {
@@ -162,6 +167,12 @@ export function ContributionFeed({
                     {c.name}
                   </h4>
 
+                  {verified && c.memberLabel ? (
+                    <p className="text-[12px] font-semibold text-[#4A3B32] mt-0.5 truncate font-sans" data-testid="feed-paid-by">
+                      {t("shell.feed.paidBy")}: {c.memberLabel}
+                    </p>
+                  ) : null}
+
                   <p className="text-[12px] font-normal text-[#7D6F66] mt-0.5 truncate font-sans">
                     {c.transactionId
                       ? `${t("shell.feed.reference")}: ${c.transactionId}`
@@ -245,6 +256,12 @@ export function ContributionFeed({
               </div>
               {isVerified(selected) ? (
                 <>
+                  {selected.memberLabel ? (
+                    <div className="flex justify-between gap-4">
+                      <span className="text-[#7A6B60]">{t("shell.feed.paidBy")}:</span>
+                      <span className="font-semibold text-[#1F1714] text-right break-all">{selected.memberLabel}</span>
+                    </div>
+                  ) : null}
                   <div className="flex justify-between gap-4">
                     <span className="text-[#7A6B60]">{t("shell.feed.verifiedBy")}:</span>
                     <span className="font-semibold text-[#138A4B] text-right break-all">
@@ -257,6 +274,9 @@ export function ContributionFeed({
                       {selected.verifiedAt ?? "—"}
                     </span>
                   </div>
+                  {selected.source === "ledger" ? (
+                    <p className="pt-1 leading-relaxed text-[#6B5433]">{t("shell.feed.verifiedLedgerNote")}</p>
+                  ) : null}
                 </>
               ) : (
                 <p className="pt-1 leading-relaxed text-[#6B5433]">

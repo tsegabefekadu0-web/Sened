@@ -1,4 +1,5 @@
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hoisted = vi.hoisted(() => ({
@@ -16,6 +17,7 @@ vi.mock("@/components/voice/VoiceModal", () => ({
 }));
 
 import SenedHome from "@/app/page";
+import { translate } from "@/lib/i18n";
 
 function lastProps() {
   return hoisted.modalProps[hoisted.modalProps.length - 1];
@@ -41,5 +43,13 @@ describe("home voice flow: signed-in / signed-out branches", () => {
     render(<SenedHome />);
     expect(lastProps().onRequestVerification).toBeTypeOf("function");
     expect(lastProps().onRecordLocally).toBeUndefined();
+  });
+
+  it.each(["signed-out", "unconfigured"])("keeps the honest Profile placeholder when %s", async (status) => {
+    hoisted.session = { status };
+    render(<SenedHome />);
+    await userEvent.setup().click(screen.getByRole("button", { name: translate("am", "shell.nav.profile") }));
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    expect(screen.getByRole("region")).toBeInTheDocument();
   });
 });

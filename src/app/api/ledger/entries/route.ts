@@ -128,7 +128,8 @@ export async function POST(request: Request): Promise<Response> {
  * `GET /api/ledger/entries?groupId=<uuid>[&limit=1..100][&beforeSequence=<n>]` —
  * a group's entries, newest first, each with its postings and a `provenance` field: `null`, or the
  * verified bank receipt that posted the entry (`{ kind: "bank_verification",
- * provider, verifiedAt, verificationId, memberUserId }`, never a reference).
+ * provider, verifiedAt, verificationId, memberUserId, referenceMasked }`, where `referenceMasked`
+ * is `••••` plus the last 1-4 characters of the bank reference or `null`, never the full reference).
  * Read-only.
  *
  * Paging: the body is `{ entries, hasMore, nextCursor }`. `beforeSequence` is an

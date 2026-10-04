@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { formatEtbAmount, toEtbMinorUnits, WIRE_ETB_DECIMAL_PATTERN } from "@/lib/ledger/money";
+import { MASKED_REFERENCE_PATTERN } from "./referenceMask";
 import {
   BANK_DIRECTIONS,
   BANK_PROVIDER_RESULT_KINDS,
@@ -54,6 +55,9 @@ export const bankVerificationReasonCodeSchema = z.enum(BANK_VERIFICATION_REASON_
 export const bankProviderResultKindSchema = z.enum(BANK_PROVIDER_RESULT_KINDS);
 export const reconciliationJobStateSchema = z.enum(RECONCILIATION_JOB_STATES);
 export const reconciliationEventTypeSchema = z.enum(RECONCILIATION_EVENT_TYPES);
+
+/** Only the masked shape; a full reference can never pass as a display value. */
+export const maskedReferenceSchema = z.string().regex(MASKED_REFERENCE_PATTERN);
 
 export const sealedProviderReferenceSchema = z
   .object({
@@ -180,7 +184,8 @@ export const publicBankVerificationSchema = z
     direction: bankDirectionSchema,
     occurredAt: timestampSchema,
     createdAt: timestampSchema,
-    updatedAt: timestampSchema
+    updatedAt: timestampSchema,
+    referenceMasked: maskedReferenceSchema.nullable()
   })
   .strict();
 
@@ -207,7 +212,9 @@ export const bankVerificationIntentResponseSchema = z
     providerTransactionIdentityHmac: hmacSchema.nullable(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
-    ledgerEntryId: uuidSchema.nullable()
+    ledgerEntryId: uuidSchema.nullable(),
+    // Optional so a response from a database still on the previous migration parses.
+    referenceDisplay: maskedReferenceSchema.nullable().optional()
   })
   .strict();
 
@@ -298,9 +305,10 @@ export function parseBankVerificationIntent(value: unknown): BankVerificationInt
     createdAt: string;
     updatedAt: string;
     ledgerEntryId: string | null;
+    referenceDisplay?: string | null;
   };
-  const { verificationId, ...rest } = parsed;
-  return { id: verificationId, ...rest };
+  const { verificationId, referenceDisplay, ...rest } = parsed;
+  return { id: verificationId, ...rest, referenceDisplay: referenceDisplay ?? null };
 }
 
 export function parseBankVerificationEvent(value: unknown): BankVerificationEvent {

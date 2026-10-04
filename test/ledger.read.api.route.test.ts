@@ -372,6 +372,7 @@ function provenanceRow(overrides: Record<string, unknown> = {}) {
     provider: "telebirr",
     verifiedAt: "2026-09-25T10:30:05.123Z",
     memberUserId: payerId,
+    referenceMasked: null,
     ...overrides
   };
 }
@@ -395,7 +396,8 @@ describe("GET /api/ledger/entries provenance", () => {
       provider: "telebirr",
       verifiedAt: "2026-09-25T10:30:05.123Z",
       verificationId,
-      memberUserId: payerId
+      memberUserId: payerId,
+      referenceMasked: null
     });
     // The group is passed so the function can scope to membership; only the
     // entries on this page are asked about.
@@ -452,8 +454,7 @@ describe("GET /api/ledger/entries provenance", () => {
           provider_reference_ciphertext: ciphertext,
           providerTransactionIdentityHmac: hmac,
           evidenceFingerprint: "e".repeat(64),
-          idempotencyKey: "bank-intent-secret",
-          referenceMasked: reference
+          idempotencyKey: "bank-intent-secret"
         })
       ],
       error: null
@@ -461,16 +462,45 @@ describe("GET /api/ledger/entries provenance", () => {
     const response = await GET(request(`?groupId=${groupId}`));
     const text = JSON.stringify(await response.json());
     expect(text).toContain(verificationId);
-    for (const secret of [reference, hmac, ciphertext, "e".repeat(64), "bank-intent-secret", "referenceMasked", "Hmac", "ciphertext"]) {
+    for (const secret of [reference, hmac, ciphertext, "e".repeat(64), "bank-intent-secret", "Hmac", "ciphertext"]) {
       expect(text).not.toContain(secret);
     }
     expect(Object.keys(JSON.parse(text).entries[0].provenance).sort()).toEqual([
       "kind",
       "memberUserId",
       "provider",
+      "referenceMasked",
       "verificationId",
       "verifiedAt"
     ]);
+  });
+
+  it("passes a masked reference through unchanged", async () => {
+    mocks.rpc.mockResolvedValue({ data: [provenanceRow({ referenceMasked: "\u2022\u2022\u2022\u20222F42" })], error: null });
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+    expect(body.entries[0].provenance.referenceMasked).toBe("\u2022\u2022\u2022\u20222F42");
+  });
+
+  it("treats an absent masked reference (a database one migration behind) as null", async () => {
+    const { referenceMasked: _omitted, ...withoutKey } = provenanceRow();
+    mocks.rpc.mockResolvedValue({ data: [withoutKey], error: null });
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+    expect(body.entries[0].provenance.referenceMasked).toBeNull();
+  });
+
+  it.each([
+    ["a full reference", "FT26268ABCD1234"],
+    ["a reference with only a bullet prefix too long", "\u2022\u2022\u2022\u202212345"],
+    ["no bullets", "2F42"],
+    ["a number", 2242],
+    ["an empty string", ""]
+  ])("refuses (502) %s in referenceMasked and returns none of it", async (_name, bad) => {
+    mocks.rpc.mockResolvedValue({ data: [provenanceRow({ referenceMasked: bad })], error: null });
+    const response = await GET(request(`?groupId=${groupId}`));
+    expect(response.status).toBe(502);
+    const text = JSON.stringify(await response.json());
+    expect(text).not.toContain("FT26268ABCD1234");
+    expect(text).not.toContain("12345");
   });
 });
 

@@ -31,6 +31,7 @@ import type {
   ReconciliationJobStore,
   ReconciliationVerificationOutcome
 } from "./types";
+import { maskBankReference } from "./referenceMask";
 import { InMemoryReferenceVault, createProviderReferenceHmac } from "./vault";
 import type { BankAccountBinding } from "./types";
 
@@ -255,7 +256,10 @@ export class BankVerificationService {
       direction: request.direction,
       occurredAt: request.occurredAt,
       idempotencyKey: request.idempotencyKey,
-      requestFingerprint
+      requestFingerprint,
+      // The one moment the server holds the plaintext: derive the masked display
+      // form now, because nothing can derive it from the stored ciphertext in SQL.
+      referenceDisplay: maskBankReference(request.providerReference)
     };
     const created = await this.repository.createIntent(createInput, context);
     if (this.jobStore) {

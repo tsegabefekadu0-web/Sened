@@ -186,7 +186,8 @@ describe("loadHomeLedger provenance", () => {
       provider: "cbe",
       verifiedAt: proof.verifiedAt,
       verificationId: proof.verificationId,
-      memberUserId: PAYER
+      memberUserId: PAYER,
+      referenceMasked: null
     });
     expect(plain.provenance).toBeNull();
     // The members API showed this caller no email, so none is invented.
@@ -206,6 +207,43 @@ describe("loadHomeLedger provenance", () => {
     const result = await loadHomeLedger(d);
     expect(d.fetchImpl).toHaveBeenCalledTimes(3);
     expect(result.status === "ready" && result.memberLabels).toEqual({});
+  });
+
+  it("carries a masked reference and drops anything that is not exactly the masked shape", async () => {
+    const masked = "\u2022\u2022\u2022\u20222F42";
+    const read = async (referenceMasked: unknown) => {
+      const result = await loadHomeLedger(
+        deps([
+          json(groupBody()),
+          json(balancesBody("10.00", 1)),
+          json({ entries: [{ ...wire(1), provenance: { ...proof, referenceMasked } }] }),
+          json(members(null))
+        ])
+      );
+      expect(result.status).toBe("ready");
+      return result.status === "ready" ? result.summary.contributions[0].provenance : undefined;
+    };
+    expect((await read(masked))?.referenceMasked).toBe(masked);
+    // The row stays verified (the rest of the proof is intact); only the reference is dropped.
+    for (const bad of ["FT26268ABCD1234", "2F42", "\u2022\u2022\u2022\u2022123456", 42, null, undefined]) {
+      const provenance = await read(bad);
+      expect(provenance?.referenceMasked, String(bad)).toBeNull();
+      expect(provenance?.provider).toBe("cbe");
+    }
+  });
+
+  it("returns each named member's own attire from the members read, and none for one it did not return", async () => {
+    const other = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const result = await loadHomeLedger(
+      deps([
+        json(groupBody()),
+        json(balancesBody("20.00", 2)),
+        json({ entries: [{ ...wire(1), provenance: proof }, { ...wire(2), provenance: { ...proof, memberUserId: other, verificationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab" } }] }),
+        json({ members: [{ userId: PAYER, role: "member", joinedAt: "2026-08-01T00:00:00.000Z", email: null, attire: "netela" }] })
+      ])
+    );
+    expect(result.status).toBe("ready");
+    expect(result.status === "ready" && result.memberAttire).toEqual({ [PAYER]: "netela" });
   });
 
   it("keeps the verified contribution when the members cannot be read", async () => {

@@ -3186,7 +3186,7 @@ select 'ALL DRAW CYCLE AND SEAL CHECKS PASSED' as result;
 -- verified, without the intents table being opened to them and without any
 -- form of the provider reference leaving the database. Checks that the
 -- SECURITY DEFINER read function (a) returns provenance only for VERIFIED
--- intents linked to an entry, with exactly the five safe fields, (b) is scoped
+-- intents linked to an entry, with exactly the six safe fields, (b) is scoped
 -- to group membership (an outsider is refused, another group's id returns
 -- nothing), (c) never returns a reference, HMAC or ciphertext, (d) leaves the
 -- intents table unreadable to members, (e) is not callable by anon, and that
@@ -3288,12 +3288,12 @@ begin
     raise exception 'PROVENANCE 2 FAILED: wrong content %', result;
   end if;
   if (select array_agg(k order by k) from jsonb_object_keys(result -> 0) k)
-     is distinct from array['entryId','memberUserId','provider','verificationId','verifiedAt'] then
+     is distinct from array['entryId','memberUserId','provider','referenceMasked','verificationId','verifiedAt'] then
     raise exception 'PROVENANCE 3 FAILED: unexpected fields %', result -> 0;
   end if;
   -- no form of the stored reference or evidence is in the response
   if result::text like '%' || secret_ref || '%' or result::text like '%' || repeat('f',64) || '%'
-     or result::text like '%' || repeat('1',64) || '%' or result::text ~* '(hmac|ciphertext|reference|fingerprint|idempotency)' then
+     or result::text like '%' || repeat('1',64) || '%' or replace(result::text, 'referenceMasked', '') ~* '(hmac|ciphertext|reference|fingerprint|idempotency)' then
     raise exception 'PROVENANCE 4 FAILED: the response leaks reference material: %', result;
   end if;
 
@@ -3642,3 +3642,443 @@ end;
 $bal$;
 rollback;
 select 'ALL LEDGER BALANCES CHECKS PASSED' as result;
+
+-- ---------------------------------------------------------------------------
+-- Masked bank reference display (20261008100000_bank_reference_display.sql)
+--
+-- The verified badge shows "••••2F42". Checks that (a) the CHECK constraint
+-- accepts only the masked shape - four bullets then 1-4 printable ASCII
+-- characters - so a full reference, a 5-character tail, an unmasked value, a
+-- value with surrounding text or a trailing newline can never be stored, while
+-- NULL and a well-formed mask can, (b) the create RPC stores the display it is
+-- given, still works with the original ten arguments (display NULL), refuses an
+-- unmasked display with bank_invalid_request, and replays idempotently without
+-- changing the stored display, (c) there is exactly one create function (an
+-- overload would be ambiguous to PostgREST), still executable by authenticated
+-- and not by anon, (d) the intent response exposes the display and no other
+-- reference material changes, (e) a plain group member reads the masked value
+-- through the provenance function, a verified intent with no display yields
+-- null, and the plaintext reference, its HMAC and its ciphertext appear in
+-- neither response. Runs in a transaction that is rolled back.
+-- ---------------------------------------------------------------------------
+reset role;
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+
+do $refd$
+declare
+  owner_uid  constant text := '11111111-1111-4111-8111-111111111111';
+  viewer_uid constant text := '33333333-3333-4333-8333-333333333333';
+  group_r    uuid;
+  tenant_r   uuid;
+  cash_r     uuid;
+  income_r   uuid;
+  binding_r  uuid := 'cccccccc-0000-4000-8000-0000000000f1';
+  mask       constant text := U&'\2022\2022\2022\20222F42';
+  full_ref   constant text := 'FT26280ABCD2F42';
+  full_hmac  constant text := repeat('d', 64);
+  res        jsonb;
+  res2       jsonb;
+  v_id       uuid;
+  v_id2      uuid;
+  entry_1    uuid;
+  entry_2    uuid;
+  prov       jsonb;
+  occurred_1 timestamptz;
+  n          int;
+begin
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  group_r := (public.sened_ledger_provision_group_v1('Reference display equb') ->> 'groupId')::uuid;
+  select tenant_id into tenant_r from public.ledger_groups where id = group_r;
+  select id into cash_r from public.ledger_accounts where group_id = group_r and code = 'POT_CASH';
+  select id into income_r from public.ledger_accounts where group_id = group_r and code = 'CONTRIBUTION_INCOME';
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role)
+  values (group_r, tenant_r, viewer_uid::uuid, 'member');
+  reset role;
+  insert into public.bank_account_bindings (id,user_id,tenant_id,group_id,ledger_account_id,provider,account_label,account_fingerprint_hmac,sender_fingerprint_hmac,receiver_fingerprint_hmac)
+  values (binding_r, owner_uid::uuid, tenant_r, group_r, cash_r, 'telebirr', 'R', repeat('a',64), repeat('b',64), repeat('c',64));
+
+  -- ---- (a) the CHECK constraint ----------------------------------------------
+  if not exists (select 1 from information_schema.columns
+                 where table_schema = 'public' and table_name = 'bank_verification_intents'
+                   and column_name = 'reference_display' and is_nullable = 'YES' and data_type = 'text') then
+    raise exception 'REFDISPLAY 1 FAILED: reference_display is missing or not a nullable text column';
+  end if;
+  -- Every case below inserts a fresh row; each refused one must name the constraint.
+  declare
+    bad text;
+    i int := 0;
+  begin
+    foreach bad in array array[
+      full_ref,                                  -- the full reference
+      'TXN2F42',                                 -- no bullets
+      U&'\2022\2022\2022\2022',                -- bullets, nothing visible
+      U&'\2022\2022\2022\202212345',           -- 5 visible characters
+      U&'\2022\2022\2022\2022AB' || E'\n',     -- trailing newline
+      U&'\2022\2022\2022AB',                    -- three bullets only
+      U&'\2022\2022\2022\2022\2022AB',          -- five bullets
+      'x' || U&'\2022\2022\2022\2022AB',        -- text before the bullets
+      U&'\2022\2022\2022\2022A B',              -- a space in the tail
+      U&'\2022\2022\2022\2022\00E9A',            -- non-ASCII in the tail
+      '',                                        -- empty
+      repeat('9', 64)                            -- looks like an HMAC
+    ] loop
+      i := i + 1;
+      begin
+        insert into public.bank_verification_intents (user_id,tenant_id,group_id,bank_account_binding_id,ledger_account_id,provider,provider_reference_hmac,idempotency_key,request_fingerprint,amount,direction,occurred_at,reference_display)
+        values (owner_uid::uuid, tenant_r, group_r, binding_r, cash_r, 'telebirr', repeat(to_hex(i), 64), 'refd-bad-' || i, repeat('e',64), 5.00, 'inbound', now(), bad);
+        raise exception 'REFDISPLAY 2 FAILED: the value at position % was stored: %', i, bad;
+      exception when check_violation then
+        if sqlerrm not like '%bank_intents_reference_display_masked%' then
+          raise exception 'REFDISPLAY 2 FAILED: position % refused by the wrong constraint: %', i, sqlerrm;
+        end if;
+      end;
+    end loop;
+  end;
+  insert into public.bank_verification_intents (user_id,tenant_id,group_id,bank_account_binding_id,ledger_account_id,provider,provider_reference_hmac,idempotency_key,request_fingerprint,amount,direction,occurred_at,reference_display)
+  values
+    (owner_uid::uuid, tenant_r, group_r, binding_r, cash_r, 'telebirr', repeat('1', 64), 'refd-ok-null', repeat('e',64), 5.00, 'inbound', now(), null),
+    (owner_uid::uuid, tenant_r, group_r, binding_r, cash_r, 'telebirr', repeat('2', 64), 'refd-ok-1', repeat('e',64), 5.00, 'inbound', now(), U&'\2022\2022\2022\2022F'),
+    (owner_uid::uuid, tenant_r, group_r, binding_r, cash_r, 'telebirr', repeat('3', 64), 'refd-ok-4', repeat('e',64), 5.00, 'inbound', now(), mask);
+
+  -- ---- (c) one create function, correct grants ---------------------------------
+  select count(*) into n from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
+  where ns.nspname = 'public' and p.proname = 'create_bank_verification_intent_v1';
+  if n <> 1 then
+    raise exception 'REFDISPLAY 3 FAILED: % create_bank_verification_intent_v1 overloads exist, expected 1', n;
+  end if;
+  if has_function_privilege('anon', 'public.create_bank_verification_intent_v1(uuid, text, text, text, text, numeric, text, text, timestamptz, text, text)', 'EXECUTE')
+     or has_function_privilege('public', 'public.create_bank_verification_intent_v1(uuid, text, text, text, text, numeric, text, text, timestamptz, text, text)', 'EXECUTE') then
+    raise exception 'REFDISPLAY 4 FAILED: anon or PUBLIC can execute the create function';
+  end if;
+  if not has_function_privilege('authenticated', 'public.create_bank_verification_intent_v1(uuid, text, text, text, text, numeric, text, text, timestamptz, text, text)', 'EXECUTE') then
+    raise exception 'REFDISPLAY 5 FAILED: authenticated cannot execute the create function';
+  end if;
+
+  -- ---- (b) the create RPC ------------------------------------------------------
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  set local role authenticated;
+  -- with a display
+  res := public.create_bank_verification_intent_v1(
+    binding_r, 'telebirr', full_hmac, 'Y2lwaGVydGV4dC1ub3QtYS1yZWFsLW9uZQ==', 'v1', 100.00, 'ETB',
+    'inbound', now(), 'refd-rpc-1', mask);
+  v_id := (res -> 'intent' ->> 'verificationId')::uuid;
+  reset role;
+  select occurred_at into occurred_1 from public.bank_verification_intents where id = v_id;
+  set local role authenticated;
+  if res -> 'intent' ->> 'referenceDisplay' is distinct from mask or (res ->> 'replayed')::boolean then
+    raise exception 'REFDISPLAY 6 FAILED: the display was not stored or returned: %', res;
+  end if;
+  -- the original ten arguments still work and store NULL
+  res2 := public.create_bank_verification_intent_v1(
+    binding_r, 'telebirr', repeat('7', 64), 'Y2lwaGVydGV4dC1ub3QtYS1yZWFsLXR3bw==', 'v1', 101.00, 'ETB',
+    'inbound', now(), 'refd-rpc-2');
+  v_id2 := (res2 -> 'intent' ->> 'verificationId')::uuid;
+  if not (res2 -> 'intent') ? 'referenceDisplay' or res2 -> 'intent' -> 'referenceDisplay' <> 'null'::jsonb then
+    raise exception 'REFDISPLAY 7 FAILED: an intent created without a display did not report null: %', res2;
+  end if;
+  -- an unmasked display is refused before anything is written
+  begin
+    perform public.create_bank_verification_intent_v1(
+      binding_r, 'telebirr', repeat('6', 64), 'Y2lwaGVydGV4dA==', 'v1', 102.00, 'ETB',
+      'inbound', now(), 'refd-rpc-3', full_ref);
+    raise exception 'REFDISPLAY 8 FAILED: the RPC accepted a full reference as the display';
+  exception when others then
+    if sqlerrm like 'REFDISPLAY%' then raise; end if;
+    if sqlerrm not like '%bank_invalid_request%' then
+      raise exception 'REFDISPLAY 8 FAILED: refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  -- replay: same key and payload, a different display is ignored
+  res := public.create_bank_verification_intent_v1(
+    binding_r, 'telebirr', full_hmac, 'Y2lwaGVydGV4dC1ub3QtYS1yZWFsLW9uZQ==', 'v1', 100.00, 'ETB',
+    'inbound', occurred_1, 'refd-rpc-1',
+    U&'\2022\2022\2022\2022ZZZZ');
+  reset role;
+  if res ->> 'replayed' <> 'true' then
+    raise exception 'REFDISPLAY 9 FAILED: expected a replay, got %', res;
+  end if;
+  if (select reference_display from public.bank_verification_intents where id = v_id) <> mask
+     or res -> 'intent' ->> 'referenceDisplay' <> mask then
+    raise exception 'REFDISPLAY 10 FAILED: a replay changed the stored display';
+  end if;
+  -- the get RPC (owner) reports it too
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  set local role authenticated;
+  if public.get_bank_verification_intent_v1(v_id) ->> 'referenceDisplay' is distinct from mask then
+    raise exception 'REFDISPLAY 11 FAILED: get_bank_verification_intent_v1 does not report the display';
+  end if;
+  reset role;
+
+  -- ---- (e) provenance returns it to a plain member ----------------------------
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  entry_1 := (public.post_ledger_entry_v1(group_r, 'bank-verified-refd-rpc-1', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_r, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_r, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  entry_2 := (public.post_ledger_entry_v1(group_r, 'bank-verified-refd-rpc-2', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_r, 'direction', 'debit', 'amount', '101.00'),
+                      jsonb_build_object('accountId', income_r, 'direction', 'credit', 'amount', '101.00'))) -> 'entry' ->> 'id')::uuid;
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('4',64), verified_at = now(), ledger_entry_id = entry_1
+  where id = v_id;
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('5',64), verified_at = now(), ledger_entry_id = entry_2
+  where id = v_id2;
+  perform set_config('request.jwt.claim.sub', viewer_uid, true);
+  set local role authenticated;
+  prov := public.get_ledger_entry_provenance_v1(group_r, array[entry_1, entry_2]);
+  reset role;
+  if jsonb_array_length(prov) <> 2 then
+    raise exception 'REFDISPLAY 12 FAILED: expected two provenance rows, got %', prov;
+  end if;
+  if (select r ->> 'referenceMasked' from jsonb_array_elements(prov) r where (r ->> 'entryId')::uuid = entry_1) is distinct from mask then
+    raise exception 'REFDISPLAY 13 FAILED: the member did not receive the masked reference: %', prov;
+  end if;
+  if (select r -> 'referenceMasked' from jsonb_array_elements(prov) r where (r ->> 'entryId')::uuid = entry_2) <> 'null'::jsonb then
+    raise exception 'REFDISPLAY 14 FAILED: a verified intent with no display did not yield null: %', prov;
+  end if;
+  if prov::text like '%' || full_ref || '%' or prov::text like '%' || full_hmac || '%'
+     or prov::text like '%Y2lwaGVydGV4dC1ub3QtYS1yZWFsLW9uZQ%' or prov::text like '%ABCD%' then
+    raise exception 'REFDISPLAY 15 FAILED: provenance leaks reference material: %', prov;
+  end if;
+  if res::text like '%' || full_ref || '%' then
+    raise exception 'REFDISPLAY 16 FAILED: the intent response contains the full reference';
+  end if;
+
+  -- ---- (f) backfill helpers: service_role only, shape-checked, never overwrite ----
+  if has_function_privilege('authenticated', 'public.list_bank_reference_display_backfill_v1(uuid, integer)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.list_bank_reference_display_backfill_v1(uuid, integer)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.set_bank_reference_display_v1(uuid, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.set_bank_reference_display_v1(uuid, text)', 'EXECUTE') then
+    raise exception 'REFDISPLAY 17 FAILED: a backfill helper is executable by authenticated or anon';
+  end if;
+  if not has_function_privilege('service_role', 'public.list_bank_reference_display_backfill_v1(uuid, integer)', 'EXECUTE')
+     or not has_function_privilege('service_role', 'public.set_bank_reference_display_v1(uuid, text)', 'EXECUTE') then
+    raise exception 'REFDISPLAY 18 FAILED: service_role cannot execute a backfill helper';
+  end if;
+  perform set_config('request.jwt.claim.sub', '', true);
+  set local role service_role;
+  -- the pending list holds exactly the rows with no display, with the five sealed-reference fields
+  res := public.list_bank_reference_display_backfill_v1(null, 500);
+  if exists (select 1 from jsonb_array_elements(res) r where (r ->> 'verificationId')::uuid = v_id) then
+    raise exception 'REFDISPLAY 19 FAILED: a row that already has a display was listed';
+  end if;
+  if not exists (select 1 from jsonb_array_elements(res) r where (r ->> 'verificationId')::uuid = v_id2) then
+    raise exception 'REFDISPLAY 20 FAILED: a row without a display was not listed';
+  end if;
+  if (select array_agg(k order by k) from jsonb_object_keys((select r from jsonb_array_elements(res) r limit 1)) k)
+     is distinct from array['ciphertext','hmac','keyVersion','provider','verificationId'] then
+    raise exception 'REFDISPLAY 21 FAILED: unexpected fields in the pending list: %', res -> 0;
+  end if;
+  -- limit is honoured, keyset paging moves forward, and nonsense limits are clamped, not errors
+  if jsonb_array_length(public.list_bank_reference_display_backfill_v1(null, 1)) <> 1
+     or jsonb_array_length(public.list_bank_reference_display_backfill_v1(null, 0)) <> 1
+     or jsonb_array_length(public.list_bank_reference_display_backfill_v1(null, null)) < 1 then
+    raise exception 'REFDISPLAY 22 FAILED: the limit was not honoured or clamped';
+  end if;
+  if jsonb_array_length(public.list_bank_reference_display_backfill_v1('ffffffff-ffff-4fff-8fff-ffffffffffff', 10)) <> 0 then
+    raise exception 'REFDISPLAY 23 FAILED: paging past the last id returned rows';
+  end if;
+  -- the setter writes a mask once, never overwrites, refuses anything unmasked
+  if public.set_bank_reference_display_v1(v_id2, U&'\2022\2022\2022\2022ABCD') is not true then
+    raise exception 'REFDISPLAY 24 FAILED: the setter did not write to a row with no display';
+  end if;
+  if public.set_bank_reference_display_v1(v_id2, U&'\2022\2022\2022\2022WXYZ') is not false then
+    raise exception 'REFDISPLAY 25 FAILED: the setter overwrote an existing display';
+  end if;
+  if public.set_bank_reference_display_v1(gen_random_uuid(), mask) is not false then
+    raise exception 'REFDISPLAY 26 FAILED: the setter reported a write for an unknown id';
+  end if;
+  begin
+    perform public.set_bank_reference_display_v1(v_id2, full_ref);
+    raise exception 'REFDISPLAY 27 FAILED: the setter accepted a full reference';
+  exception when others then
+    if sqlerrm like 'REFDISPLAY%' then raise; end if;
+    if sqlerrm not like '%bank_invalid_request%' then
+      raise exception 'REFDISPLAY 27 FAILED: refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  begin
+    perform public.set_bank_reference_display_v1(v_id2, null);
+    raise exception 'REFDISPLAY 28 FAILED: the setter accepted null';
+  exception when others then
+    if sqlerrm like 'REFDISPLAY%' then raise; end if;
+  end;
+  reset role;
+  if (select reference_display from public.bank_verification_intents where id = v_id2) <> U&'\2022\2022\2022\2022ABCD' then
+    raise exception 'REFDISPLAY 29 FAILED: the stored display is not the one written first';
+  end if;
+  -- and now the backfilled row shows up in provenance for a member
+  perform set_config('request.jwt.claim.sub', viewer_uid, true);
+  set local role authenticated;
+  prov := public.get_ledger_entry_provenance_v1(group_r, array[entry_2]);
+  reset role;
+  if prov -> 0 ->> 'referenceMasked' is distinct from U&'\2022\2022\2022\2022ABCD' then
+    raise exception 'REFDISPLAY 30 FAILED: a backfilled display is not visible through provenance: %', prov;
+  end if;
+end;
+$refd$;
+rollback;
+select 'ALL BANK REFERENCE DISPLAY CHECKS PASSED' as result;
+
+-- ---------------------------------------------------------------------------
+-- Member attire (20261009100000_member_attire.sql)
+--
+-- A member chooses their own avatar attire (none | gabi | netela); group members
+-- read each other's choice through list_group_members_v1. Checks that (a) the
+-- default is none, (b) a member sets only their OWN value - the function has no
+-- user argument and the identity is auth.uid() - and the other member's value
+-- does not move, (c) every active member reads everyone's value through the
+-- members list, which keeps exactly its documented keys plus attire, (d) setting
+-- the same value again reports changed = false, (e) an unknown value or null is
+-- refused as ledger_invalid_request, and the table CHECK refuses one written
+-- directly, (f) an outsider, an anonymous caller and an inactive member can
+-- neither set nor (outsider) read, with ledger_forbidden, and (g) anon cannot
+-- execute the setter. Runs in a transaction that is rolled back.
+-- ---------------------------------------------------------------------------
+reset role;
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+
+do $attire$
+declare
+  owner_uid  constant text := '11111111-1111-4111-8111-111111111111';
+  viewer_uid constant text := '33333333-3333-4333-8333-333333333333';
+  outsider   constant text := '44444444-4444-4444-8444-444444444444';
+  group_a    uuid;
+  tenant_a   uuid;
+  res        jsonb;
+  members    jsonb;
+begin
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  group_a := (public.sened_ledger_provision_group_v1('Attire equb') ->> 'groupId')::uuid;
+  select tenant_id into tenant_a from public.ledger_groups where id = group_a;
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role)
+  values (group_a, tenant_a, viewer_uid::uuid, 'member');
+
+  -- (a) default none, and the function takes no user argument
+  if exists (select 1 from public.ledger_group_memberships where group_id = group_a and attire <> 'none') then
+    raise exception 'ATTIRE 1 FAILED: the default is not none';
+  end if;
+  if (select proargnames from pg_proc where proname = 'sened_ledger_set_member_attire_v1')
+     is distinct from array['requested_group_id','requested_attire'] then
+    raise exception 'ATTIRE 2 FAILED: the setter takes an unexpected argument';
+  end if;
+
+  -- (b) the owner sets their own; the member's stays none
+  set local role authenticated;
+  res := public.sened_ledger_set_member_attire_v1(group_a, 'gabi');
+  if res ->> 'attire' <> 'gabi' or (res ->> 'changed')::boolean is not true or (res ->> 'groupId')::uuid <> group_a then
+    raise exception 'ATTIRE 3 FAILED: unexpected result %', res;
+  end if;
+  res := public.sened_ledger_set_member_attire_v1(group_a, 'gabi');
+  if (res ->> 'changed')::boolean is not false then
+    raise exception 'ATTIRE 4 FAILED: setting the same value reported a change: %', res;
+  end if;
+  reset role;
+  if (select attire from public.ledger_group_memberships where group_id = group_a and user_id = owner_uid::uuid) <> 'gabi'
+     or (select attire from public.ledger_group_memberships where group_id = group_a and user_id = viewer_uid::uuid) <> 'none' then
+    raise exception 'ATTIRE 5 FAILED: the owner''s choice moved the wrong row';
+  end if;
+
+  -- (c) the member reads the owner's value through the members list, and sets their own
+  perform set_config('request.jwt.claim.sub', viewer_uid, true);
+  set local role authenticated;
+  members := public.list_group_members_v1(group_a);
+  if (select r ->> 'attire' from jsonb_array_elements(members) r where r ->> 'userId' = owner_uid) <> 'gabi'
+     or (select r ->> 'attire' from jsonb_array_elements(members) r where r ->> 'userId' = viewer_uid) <> 'none' then
+    raise exception 'ATTIRE 6 FAILED: the members list does not carry each member''s attire: %', members;
+  end if;
+  if (select array_agg(k order by k) from jsonb_object_keys(members -> 0) k)
+     is distinct from array['attire','email','joinedAt','role','userId'] then
+    raise exception 'ATTIRE 7 FAILED: unexpected member keys %', members -> 0;
+  end if;
+  res := public.sened_ledger_set_member_attire_v1(group_a, 'netela');
+  if res ->> 'attire' <> 'netela' then
+    raise exception 'ATTIRE 8 FAILED: the member could not set their own attire: %', res;
+  end if;
+  reset role;
+  if (select attire from public.ledger_group_memberships where group_id = group_a and user_id = owner_uid::uuid) <> 'gabi' then
+    raise exception 'ATTIRE 9 FAILED: a member changed the owner''s attire';
+  end if;
+
+  -- (e) invalid values
+  set local role authenticated;
+  begin
+    perform public.sened_ledger_set_member_attire_v1(group_a, 'female');
+    raise exception 'ATTIRE 10 FAILED: an unknown attire was accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform public.sened_ledger_set_member_attire_v1(group_a, null);
+    raise exception 'ATTIRE 11 FAILED: null was accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  begin
+    perform public.sened_ledger_set_member_attire_v1(null, 'gabi');
+    raise exception 'ATTIRE 12 FAILED: a null group was accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  reset role;
+  begin
+    update public.ledger_group_memberships set attire = 'male' where group_id = group_a and user_id = viewer_uid::uuid;
+    raise exception 'ATTIRE 13 FAILED: the table accepted an unknown attire';
+  exception when check_violation then null;
+  end;
+
+  -- (f) an outsider can neither read nor write, whether or not the group exists
+  perform set_config('request.jwt.claim.sub', outsider, true);
+  set local role authenticated;
+  begin
+    perform public.sened_ledger_set_member_attire_v1(group_a, 'gabi');
+    raise exception 'ATTIRE 14 FAILED: an outsider set attire in the group';
+  exception when sqlstate '42501' then null;
+  end;
+  begin
+    perform public.sened_ledger_set_member_attire_v1('eeeeeeee-0000-4000-8000-00000000dead', 'gabi');
+    raise exception 'ATTIRE 15 FAILED: an unknown group did not raise forbidden';
+  exception when sqlstate '42501' then null;
+  end;
+  begin
+    perform public.list_group_members_v1(group_a);
+    raise exception 'ATTIRE 16 FAILED: an outsider read the members list';
+  exception when sqlstate '42501' then null;
+  end;
+  reset role;
+  perform set_config('request.jwt.claim.sub', '', true);
+  set local role authenticated;
+  begin
+    perform public.sened_ledger_set_member_attire_v1(group_a, 'gabi');
+    raise exception 'ATTIRE 17 FAILED: an anonymous caller set attire';
+  exception when sqlstate '42501' then null;
+  end;
+  reset role;
+
+  -- an inactive member is refused too, and keeps the value they had
+  update public.ledger_group_memberships set status = 'inactive' where group_id = group_a and user_id = viewer_uid::uuid;
+  perform set_config('request.jwt.claim.sub', viewer_uid, true);
+  set local role authenticated;
+  begin
+    perform public.sened_ledger_set_member_attire_v1(group_a, 'none');
+    raise exception 'ATTIRE 18 FAILED: an inactive member set attire';
+  exception when sqlstate '42501' then null;
+  end;
+  reset role;
+  if (select attire from public.ledger_group_memberships where group_id = group_a and user_id = viewer_uid::uuid) <> 'netela' then
+    raise exception 'ATTIRE 19 FAILED: an inactive member''s value changed';
+  end if;
+
+  -- (g) grants
+  if has_function_privilege('anon', 'public.sened_ledger_set_member_attire_v1(uuid, text)', 'EXECUTE')
+     or has_function_privilege('public', 'public.sened_ledger_set_member_attire_v1(uuid, text)', 'EXECUTE') then
+    raise exception 'ATTIRE 20 FAILED: anon or PUBLIC can execute the setter';
+  end if;
+  if not has_function_privilege('authenticated', 'public.sened_ledger_set_member_attire_v1(uuid, text)', 'EXECUTE') then
+    raise exception 'ATTIRE 21 FAILED: authenticated cannot execute the setter';
+  end if;
+end;
+$attire$;
+rollback;
+select 'ALL MEMBER ATTIRE CHECKS PASSED' as result;

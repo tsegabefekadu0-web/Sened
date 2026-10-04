@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { isMaskedReference } from "../banking/referenceMask";
 import { LedgerError } from "./errors";
 import { formatEtbAmount } from "./money";
 import { isUuid } from "./rules";
@@ -44,9 +45,14 @@ export interface PublicLedgerPosting {
  * Read from `bank_verification_intents` through the SECURITY DEFINER function
  * `get_ledger_entry_provenance_v1`, which any active member of the group may
  * call and which returns only these fields. `memberUserId` is the member whose
- * receipt was verified (not the actor who recorded the entry). There is
- * deliberately no reference field: the stored provider reference is only
- * ciphertext and HMACs, and nothing derived from it is safe to show.
+ * receipt was verified (not the actor who recorded the entry).
+ *
+ * `referenceMasked` is the only form of the bank reference that ever leaves the
+ * database: four bullets and the last 1-4 characters (`••••2F42`, rule in
+ * `banking/referenceMask.ts`), stored at intent creation. `null` for a
+ * verification recorded before it existed and not yet backfilled. The reader
+ * accepts nothing else: a value that is not exactly the masked shape is an
+ * integrity failure, never passed on.
  */
 export interface PublicLedgerProvenance {
   readonly kind: "bank_verification";
@@ -54,6 +60,7 @@ export interface PublicLedgerProvenance {
   readonly verifiedAt: string;
   readonly verificationId: string;
   readonly memberUserId: string;
+  readonly referenceMasked: string | null;
 }
 
 /** What the browser sees. No tenant id, request fingerprint or idempotency key. */
@@ -346,6 +353,12 @@ function parseProvenance(value: unknown): PublicLedgerProvenance & { readonly en
   if (!Number.isFinite(Date.parse(verifiedAt))) {
     throw integrity("Ledger read returned an invalid provenance time");
   }
+  // Absent (a database one migration behind) and null both mean "no reference
+  // shown"; anything else must be exactly the masked shape.
+  const referenceMasked = value.referenceMasked ?? null;
+  if (referenceMasked !== null && !isMaskedReference(referenceMasked)) {
+    throw integrity("Ledger read returned an invalid masked reference");
+  }
   // Only the named fields are copied: whatever else a row carried is dropped.
   return {
     entryId: uuid(value, "entryId"),
@@ -353,7 +366,8 @@ function parseProvenance(value: unknown): PublicLedgerProvenance & { readonly en
     provider: provider as BankProvider,
     verifiedAt,
     verificationId: uuid(value, "verificationId"),
-    memberUserId: uuid(value, "memberUserId")
+    memberUserId: uuid(value, "memberUserId"),
+    referenceMasked
   };
 }
 

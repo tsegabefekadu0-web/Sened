@@ -6,6 +6,13 @@ import { authedFetch, NotSignedInError, type AuthedFetchDeps } from "@/lib/auth/
  * has to look at a status code, and "could not look" never renders as "nothing".
  */
 
+export type MemberAttire = "none" | "gabi" | "netela";
+
+function toAttire(value: unknown): MemberAttire | null {
+  if (value === undefined || value === null) return "none";
+  return value === "none" || value === "gabi" || value === "netela" ? value : null;
+}
+
 export type FailureStatus = "unauthorized" | "forbidden" | "rate-limited" | "error";
 
 function failureFor(status: number): FailureStatus {
@@ -218,6 +225,8 @@ export interface MemberRow {
   readonly role: "owner" | "treasurer" | "member";
   readonly joinedAt: string;
   readonly email: string | null;
+  /** The member's own avatar choice; `none` when never chosen. */
+  readonly attire: MemberAttire;
 }
 
 export type LoadMembersOutcome =
@@ -243,11 +252,15 @@ export async function loadMembers(groupId: string, deps: AuthedFetchDeps = {}): 
       ) {
         return { status: "error" };
       }
+      // Anything but a known value fails the read: a guess here would draw the wrong shawl.
+      const attire = toAttire(entry.attire);
+      if (attire === null) return { status: "error" };
       members.push({
         userId: entry.userId,
         role: entry.role,
         joinedAt: entry.joinedAt,
-        email: typeof entry.email === "string" ? entry.email : null
+        email: typeof entry.email === "string" ? entry.email : null,
+        attire
       });
     }
     return { status: "ready", members };
@@ -259,7 +272,16 @@ export async function loadMembers(groupId: string, deps: AuthedFetchDeps = {}): 
 // -- which group -----------------------------------------------------------
 
 export type MyGroupOutcome =
-  | { readonly status: "ready"; readonly groupId: string; readonly name: string; readonly role: "owner" | "treasurer" | "member" }
+  | {
+      readonly status: "ready";
+      readonly groupId: string;
+      readonly name: string;
+      readonly role: "owner" | "treasurer" | "member";
+      /** The caller's own avatar attire in this group. */
+      readonly attire: MemberAttire;
+      /** The caller's own user id, for previewing their avatar frame; null if the server did not say. */
+      readonly userId: string | null;
+    }
   | { readonly status: "no-group" | "multiple-groups" }
   | { readonly status: FailureStatus };
 
@@ -280,7 +302,42 @@ export async function loadMyGroup(deps: AuthedFetchDeps = {}): Promise<MyGroupOu
     ) {
       return { status: "error" };
     }
-    return { status: "ready", groupId: group.groupId, name: group.name, role: group.role };
+    const attire = toAttire(group.attire);
+    if (attire === null) return { status: "error" };
+    return { status: "ready", groupId: group.groupId, name: group.name, role: group.role, attire, userId: typeof group.userId === "string" ? group.userId : null };
+  } catch (error) {
+    return caught(error);
+  }
+}
+
+// -- the member's own attire -------------------------------------------------
+
+export type SaveAttireOutcome =
+  | { readonly status: "saved"; readonly attire: MemberAttire }
+  | { readonly status: FailureStatus | "invalid" | "unavailable" };
+
+/**
+ * Save the signed-in member's own avatar attire. The body carries the group and
+ * the value only; whose attire it is comes from the session on the server.
+ */
+export async function saveMyAttire(
+  input: { readonly groupId: string; readonly attire: MemberAttire },
+  deps: AuthedFetchDeps = {}
+): Promise<SaveAttireOutcome> {
+  try {
+    const response = await authedFetch(
+      "/api/ledger/member-attire",
+      { method: "PUT", body: JSON.stringify(input) },
+      deps
+    );
+    if (response.status === 200) {
+      const body = (await response.json().catch(() => null)) as { attire?: unknown } | null;
+      const attire = body ? toAttire(body.attire) : null;
+      return attire === null || body?.attire === undefined ? { status: "error" } : { status: "saved", attire };
+    }
+    if (response.status === 400) return { status: "invalid" };
+    if (response.status === 503) return { status: "unavailable" };
+    return { status: failureFor(response.status) };
   } catch (error) {
     return caught(error);
   }

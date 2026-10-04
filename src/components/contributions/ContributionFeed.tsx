@@ -2,8 +2,11 @@
 
 import React, { useMemo, useState } from "react";
 import Image from "next/image";
-import { Check, Clock, FileText, ShieldCheck, User, X } from "lucide-react";
+import { Check, Clock, FileText, ShieldCheck, X } from "lucide-react";
 
+import { MemberAvatar } from "@/components/cultural/MemberAvatar";
+import { isMaskedReference } from "@/lib/banking/referenceMask";
+import type { MemberAttire } from "@/lib/memberAvatarStyle";
 import { createTranslator, type Locale } from "@/lib/i18n";
 import { formatEtbGrouped } from "@/lib/ledger/money";
 
@@ -56,7 +59,25 @@ export interface MemberContribution {
    * naming a payer for an unverified one would be a claim nothing backs.
    */
   memberLabel?: string;
+  /**
+   * The paying member's opaque id, from the verification's own user. Seeds the
+   * avatar's Tibeb frame (deterministic, never derived from `name`). Absent when
+   * the payer is unknown: the neutral default frame is drawn.
+   */
+  memberId?: string;
+  /** The shawl this member chose for their avatar. No profile field exists yet, so nothing sets it today. */
+  attire?: MemberAttire;
+  /**
+   * Masked bank reference (`••••2F42`) from the verification. Shown on the
+   * verified badge only, and only if it is exactly the masked shape.
+   */
+  referenceMasked?: string;
 }
+
+const ATTIRE_KEY: Readonly<Record<MemberAttire, string>> = {
+  gabi: "shell.feed.attireGabi",
+  netela: "shell.feed.attireNetela"
+};
 
 const CHANNEL_KEY: Readonly<Record<NonNullable<MemberContribution["channel"]>, string>> = {
   telebirr: "shell.feed.channelTelebirr",
@@ -78,6 +99,11 @@ function isVerified(contribution: MemberContribution): boolean {
     typeof contribution.verifiedBy === "string" &&
     contribution.verifiedBy.trim().length > 0
   );
+}
+
+/** The masked reference to show: only on a verified row, and only in the masked shape. */
+function shownReference(contribution: MemberContribution): string | null {
+  return isVerified(contribution) && isMaskedReference(contribution.referenceMasked) ? contribution.referenceMasked : null;
 }
 
 export function ContributionFeed({
@@ -126,30 +152,36 @@ export function ContributionFeed({
                 onClick={() => openReceipt(c)}
                 className="flex items-center justify-between gap-3.5 cursor-pointer group active:scale-[0.99] transition-transform"
               >
-                {/* Left: Authentic Portrait Photo */}
-                <div className="relative w-[70px] h-[76px] rounded-[16px] overflow-hidden shrink-0 shadow-sm border border-[#DECDBB] bg-[#EFE6D9]">
-                  {c.avatar ? (
-                    <Image
-                      src={c.avatar}
-                      alt={c.name}
-                      fill
-                      sizes="70px"
-                      className="object-cover"
-                      priority
-                    />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center text-[#9C8B7A]" aria-hidden="true">
-                      <User className="w-8 h-8" />
-                    </div>
-                  )}
-                </div>
+                {/* Left: portrait in a Tibeb border (frame chosen from the member id) */}
+                <MemberAvatar
+                  memberId={c.memberId}
+                  name={c.name}
+                  photo={c.avatar}
+                  attire={c.attire}
+                  attireLabel={c.attire ? t(ATTIRE_KEY[c.attire] as never) : undefined}
+                />
 
                 {/* Middle: Trust badge + Name + Reference */}
                 <div className="flex-1 min-w-0 pr-1">
                   {verified ? (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#138A4B] text-white text-[11px] font-semibold shadow-xs">
                       <Check className="w-3 h-3 stroke-[3]" />
-                      {channelLabel(c)}
+                      <span>{channelLabel(c)}</span>{" "}
+                      <span>{t("shell.feed.verifiedWord")}</span>
+                      {shownReference(c) ? (
+                        <>
+                          {" "}
+                          <span aria-hidden="true">·</span>{" "}
+                          {/* Bullets read badly aloud, so the visible mask is hidden from
+                              assistive tech and a plain-text equivalent is offered instead. */}
+                          <span className="font-mono tracking-tight" data-testid="feed-reference-masked" aria-hidden="true">
+                            {shownReference(c)}
+                          </span>{" "}
+                          <span className="sr-only">
+                            {t("shell.feed.referenceEnding", { last: shownReference(c)!.replace(/^\u2022+/, "") })}
+                          </span>
+                        </>
+                      ) : null}
                     </span>
                   ) : c.source === "ledger" ? (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-[11px] font-semibold">
@@ -251,7 +283,7 @@ export function ContributionFeed({
               <div className="flex justify-between gap-4">
                 <span className="text-[#7A6B60]">{t("shell.feed.reference")}:</span>
                 <span className="font-mono font-semibold text-[#1F1714] text-right break-all">
-                  {selected.transactionId ?? "—"}
+                  {shownReference(selected) ?? selected.transactionId ?? "—"}
                 </span>
               </div>
               {isVerified(selected) ? (

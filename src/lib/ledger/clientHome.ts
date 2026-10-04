@@ -2,6 +2,7 @@ import type { AuthedFetchDeps } from "@/lib/auth/authedFetch";
 import { fetchLedgerBalances, readEntriesPage, readMyGroup, type WireEntry } from "./clientRead";
 import { STANDARD_ACCOUNTS } from "./accounts";
 import { LEDGER_ENTRY_TYPES, type LedgerEntryType } from "./types";
+import { isMaskedReference } from "@/lib/banking/referenceMask";
 import { loadMembers } from "./clientInvites";
 import { summarizeContributions, type EntryProvenance, type HomeLedgerSummary, type SummaryEntry } from "./homeSummary";
 import { formatEtbMinorUnits, toEtbMinorUnits } from "./money";
@@ -18,6 +19,12 @@ export type HomeLedgerResult =
        * Empty when nothing has provenance or the members could not be read.
        */
       readonly memberLabels: Readonly<Record<string, string | null>>;
+      /**
+       * Each named member's own avatar attire (a display preference every member
+       * may see), keyed by user id. A member the members API did not return is
+       * absent: no attire is guessed.
+       */
+      readonly memberAttire: Readonly<Record<string, "gabi" | "netela" | "none">>;
       /**
        * True when older entries than the contributions listed exist. The pot
        * balance still covers the whole ledger (it is computed by the server);
@@ -63,7 +70,10 @@ export function toEntryProvenance(value: unknown): EntryProvenance | null {
     provider: raw.provider,
     verifiedAt: raw.verifiedAt,
     verificationId: raw.verificationId,
-    memberUserId: raw.memberUserId
+    memberUserId: raw.memberUserId,
+    // Re-checked here as well: anything but the masked shape is dropped, so a
+    // full reference could not reach the screen even if a response carried it.
+    referenceMasked: isMaskedReference(raw.referenceMasked) ? raw.referenceMasked : null
   };
 }
 
@@ -206,36 +216,42 @@ export async function loadHomeLedger(deps: AuthedFetchDeps = {}): Promise<HomeLe
     status: "ready",
     summary,
     feedTruncated: page.hasMore,
-    memberLabels: await readMemberLabels(mine.groupId, summary, deps)
+    ...(await readMembers(mine.groupId, summary, deps))
   };
 }
 
 /**
- * Names for the members whose receipts were verified. Best effort: if the
- * members cannot be read the contributions are still shown as verified (that
- * comes from the ledger read), just with the anonymous label. The members API
- * decides what a caller may see of a member; nothing is added here.
+ * Names and avatar attire for the members whose receipts were verified. Best
+ * effort: if the members cannot be read the contributions are still shown as
+ * verified (that comes from the ledger read), just with the anonymous label and
+ * no shawl. The members API decides what a caller may see of a member; nothing
+ * is added here.
  */
-async function readMemberLabels(
+async function readMembers(
   groupId: string,
   summary: HomeLedgerSummary,
   deps: AuthedFetchDeps
-): Promise<Readonly<Record<string, string | null>>> {
+): Promise<{
+  readonly memberLabels: Readonly<Record<string, string | null>>;
+  readonly memberAttire: Readonly<Record<string, "gabi" | "netela" | "none">>;
+}> {
   const wanted = new Set(
     summary.contributions.flatMap((contribution) => (contribution.provenance ? [contribution.provenance.memberUserId] : []))
   );
   if (wanted.size === 0) {
-    return {};
+    return { memberLabels: {}, memberAttire: {} };
   }
   const outcome = await loadMembers(groupId, deps);
   if (outcome.status !== "ready") {
-    return {};
+    return { memberLabels: {}, memberAttire: {} };
   }
-  const labels: Record<string, string | null> = {};
+  const memberLabels: Record<string, string | null> = {};
+  const memberAttire: Record<string, "gabi" | "netela" | "none"> = {};
   for (const member of outcome.members) {
     if (wanted.has(member.userId)) {
-      labels[member.userId] = member.email;
+      memberLabels[member.userId] = member.email;
+      memberAttire[member.userId] = member.attire;
     }
   }
-  return labels;
+  return { memberLabels, memberAttire };
 }

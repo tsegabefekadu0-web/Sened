@@ -10,6 +10,7 @@ import { ContributionFeed, type MemberContribution } from "@/components/contribu
 import { BottomVoiceNav } from "@/components/navigation/BottomVoiceNav";
 import { VoiceModal } from "@/components/voice/VoiceModal";
 import { AudioDigestModal } from "@/components/voice/AudioDigestModal";
+import { ProfilePanel } from "@/components/shell/ProfilePanel";
 import { TabPanel } from "@/components/shell/TabPanel";
 import { createTranslator, type Locale, type MessageKey } from "@/lib/i18n";
 import { useSession } from "@/lib/auth/useSession";
@@ -71,6 +72,7 @@ const SPOKEN_NOTE_LOCALE_FOR: Readonly<Record<string, SpokenNoteLocale>> = {
 const referenceContributions: MemberContribution[] = [
   {
     id: "1",
+    memberId: "sample-member-1",
     name: "Ethiopian elders, Members",
     avatar: "/avatars/elder_photo.png",
     secondaryAvatar: "/avatars/man_photo.png",
@@ -80,6 +82,7 @@ const referenceContributions: MemberContribution[] = [
   },
   {
     id: "2",
+    memberId: "sample-member-2",
     name: "Gabi Member",
     avatar: "/avatars/woman_photo.png",
     channel: "cbe",
@@ -133,6 +136,7 @@ export default function SenedHome() {
 
   // Signed out shows the labelled sample; signed in shows the ledger or nothing.
   const memberLabels = home.kind === "live" && home.result.status === "ready" ? home.result.memberLabels : null;
+  const memberAttire = home.kind === "live" && home.result.status === "ready" ? home.result.memberAttire ?? null : null;
   const ledgerRows = useMemo<MemberContribution[]>(
     () =>
       (ledger?.contributions ?? []).map((contribution) => {
@@ -158,11 +162,17 @@ export default function SenedHome() {
           status: "VERIFIED" as const,
           verifiedBy: provider,
           verifiedAt: new Date(proof.verifiedAt).toLocaleString(locale === "am" ? "am-ET" : "en-US"),
+          memberId: proof.memberUserId,
+          // The payer's own choice, from the members read. `none` and unknown draw no shawl.
+          ...(memberAttire?.[proof.memberUserId] === "gabi" || memberAttire?.[proof.memberUserId] === "netela"
+            ? { attire: memberAttire[proof.memberUserId] as "gabi" | "netela" }
+            : {}),
+          ...(proof.referenceMasked ? { referenceMasked: proof.referenceMasked } : {}),
           memberLabel:
             memberLabels?.[proof.memberUserId] ?? t("members.anonymous", { id: proof.memberUserId.slice(0, 8) })
         };
       }),
-    [ledger, memberLabels, t, locale]
+    [ledger, memberLabels, memberAttire, t, locale]
   );
   const contributions = [
     ...localNotes,
@@ -285,7 +295,10 @@ export default function SenedHome() {
           onVoiceClick={() => setIsVoiceModalOpen(true)}
         />
 
-        {activeTab !== "home" && (
+        {activeTab === "profile" && signedIn && (
+          <ProfilePanel onBack={() => setActiveTab("home")} locale={locale} />
+        )}
+        {activeTab !== "home" && !(activeTab === "profile" && signedIn) && (
           <TabPanel
             tab={activeTab}
             onBack={() => setActiveTab("home")}

@@ -137,8 +137,9 @@ Rules the server must honour, in priority order:
    re-verify later. This is a **tested** branch, not a comment.
 4. **`pull` returns a contiguous, hash-linked slice** in ascending sequence. Each
    entry also carries read-only `provenance` (`null`, or the bank verification that
-   posted it: provider, time, verification id and the member whose receipt it was;
-   never a reference). It is not part of the hash and the client does not store or
+   posted it: provider, time, verification id, the member whose receipt it was and
+   `referenceMasked`, `••••` plus the last 1-4 characters of the bank reference or
+   `null`; never the full reference). It is not part of the hash and the client does not store or
    rely on it for chain verification.
 5. **A result for an unknown `mutationId` is rejected**, not silently ignored.
 6. Status mapping the client already implements: 401 → `SYNC_UNAUTHENTICATED`,

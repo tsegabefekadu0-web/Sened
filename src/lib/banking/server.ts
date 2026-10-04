@@ -192,7 +192,8 @@ export class SupabaseBankVerificationRepository implements BankVerificationRepos
       p_currency: input.currency,
       p_direction: input.direction,
       p_occurred_at: input.occurredAt,
-      p_idempotency_key: input.idempotencyKey
+      p_idempotency_key: input.idempotencyKey,
+      p_reference_display: input.referenceDisplay ?? null
     });
     if (error) {
       throw mapSupabaseError(error);

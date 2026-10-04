@@ -32,6 +32,8 @@ export interface EntryProvenance {
   readonly verifiedAt: string;
   readonly verificationId: string;
   readonly memberUserId: string;
+  /** `••••2F42`, or `null` when none is on record. Only ever the masked shape. */
+  readonly referenceMasked: string | null;
 }
 
 export interface SummaryEntry {

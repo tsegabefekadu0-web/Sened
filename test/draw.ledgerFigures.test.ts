@@ -17,7 +17,7 @@ const contribution = (
   occurredAt,
   amount,
   provenance: payer
-    ? { provider: "telebirr", verifiedAt: occurredAt, verificationId: `ffffffff-ffff-4fff-8fff-${sequence.padStart(12, "0")}`, memberUserId: payer }
+    ? { provider: "telebirr", verifiedAt: occurredAt, verificationId: `ffffffff-ffff-4fff-8fff-${sequence.padStart(12, "0")}`, memberUserId: payer, referenceMasked: null }
     : null
 });
 

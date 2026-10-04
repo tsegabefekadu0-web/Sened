@@ -14,6 +14,8 @@ export const RATE_LIMITED = new Set([
   "/api/ledger/entries",
   "/api/ledger/balances",
   "/api/ledger/member-roles",
+  // A member's own avatar attire: a small write, read back through the members list.
+  "/api/ledger/member-attire",
   // Invite links: create/list share one path (the method picks the rule),
   // redeem and revoke are writes, the member list is a read.
   "/api/ledger/invites",
@@ -106,7 +108,7 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
   if (pathname === "/api/ledger/members" || pathname === "/api/ledger/balances") {
     return READ_RULE;
   }
-  if (pathname === "/api/bank-verifications" || pathname === "/api/ledger/member-roles") {
+  if (pathname === "/api/bank-verifications" || pathname === "/api/ledger/member-roles" || pathname === "/api/ledger/member-attire") {
     return WRITE_RULE;
   }
   if (isBankVerificationReadPath(pathname)) {

@@ -137,14 +137,16 @@ describe("a ledger contribution is verified only when it carries bank provenance
     expect(paidBy[0]).toHaveTextContent("Paid by: Member 33333333");
   });
 
-  it("shows the detail of a verified ledger row without any bank reference", async () => {
+  it("shows the detail of a verified ledger row, saying only the last characters of the reference are shown", async () => {
     const user = userEvent.setup();
     render(<ContributionFeed locale="en" contributions={[LEDGER_BANK]} />);
     await user.click(screen.getByText("Contribution #8"));
 
     expect(screen.getByText("Verified bank settlement")).toBeInTheDocument();
     expect(screen.getByText("10/2/2026, 9:00:05 AM")).toBeInTheDocument();
-    expect(screen.getByText(/The bank reference itself is not shown/)).toBeInTheDocument();
+    expect(screen.getByText(/Only the last characters of the bank reference are shown/)).toBeInTheDocument();
+    // This row carries no masked reference, so none is invented.
+    expect(screen.queryByText(/\u2022/)).not.toBeInTheDocument();
   });
 
   it("still fails closed: a ledger row marked verified with no verifier is recorded, and names no payer", () => {

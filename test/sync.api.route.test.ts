@@ -382,7 +382,8 @@ describe("POST /api/sync — pull", () => {
       provider: "cbe",
       verifiedAt: "2026-09-25T10:30:05.000Z",
       verificationId,
-      memberUserId: payerId
+      memberUserId: payerId,
+      referenceMasked: null
     });
     expect(body.entries[0].provenance).toBeNull();
     expect(JSON.stringify(body)).not.toContain("d".repeat(64));

@@ -22,6 +22,7 @@ vi.mock("@/components/voice/VoiceModal", () => ({
 
 import SenedHome from "@/app/page";
 import { translate, type MessageKey } from "@/lib/i18n";
+import { pickTibebFrame } from "@/lib/memberAvatarStyle";
 
 const am = (key: MessageKey, vars: Record<string, string | number> = {}) => translate("am", key, vars);
 const SIGNED_IN = { status: "signed-in", accessToken: "tok", email: "t@example.com" };
@@ -30,13 +31,14 @@ type TestContribution = {
   id: string;
   sequence: string;
   amount: string;
-  provenance?: { provider: "telebirr" | "cbe" | "awash"; verifiedAt: string; verificationId: string; memberUserId: string };
+  provenance?: { provider: "telebirr" | "cbe" | "awash"; verifiedAt: string; verificationId: string; memberUserId: string; referenceMasked?: string | null };
 };
 
 function ready(
   potBalance: string,
   contributions: TestContribution[],
-  memberLabels: Record<string, string | null> = {}
+  memberLabels: Record<string, string | null> = {},
+  memberAttire: Record<string, "none" | "gabi" | "netela"> = {}
 ) {
   return {
     status: "ready",
@@ -45,6 +47,7 @@ function ready(
       contributions: contributions.map((c) => ({ provenance: null, ...c, occurredAt: "2026-09-01T09:00:00.000Z" }))
     },
     memberLabels,
+    memberAttire,
     feedTruncated: false
   };
 }
@@ -110,6 +113,80 @@ describe("home screen: signed in shows the group ledger", () => {
     // The digest speaks no verified count: it has nothing to count honestly.
     const script = await digestText();
     expect(script).not.toMatch(/verified|የተረጋገጡ/i);
+  });
+
+  it("shows the masked bank reference on the verified badge and frames the avatar from the payer's id", async () => {
+    const PAYER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    hoisted.load.mockResolvedValue(
+      ready(
+        "300.00",
+        [
+          {
+            id: "e2",
+            sequence: "8",
+            amount: "250.00",
+            provenance: {
+              provider: "telebirr",
+              verifiedAt: "2026-09-01T09:00:05.000Z",
+              verificationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              memberUserId: PAYER,
+              referenceMasked: "\u2022\u2022\u2022\u20222F42"
+            }
+          },
+          { id: "e1", sequence: "7", amount: "50.00" }
+        ],
+        { [PAYER]: null }
+      )
+    );
+    render(<SenedHome />);
+    await screen.findByText("300.00");
+    expect(screen.getByTestId("feed-reference-masked")).toHaveTextContent("\u2022\u2022\u2022\u20222F42");
+    expect(screen.getAllByTestId("feed-reference-masked")).toHaveLength(1);
+    const frames = screen.getAllByTestId("member-avatar");
+    expect(frames[0]).toHaveAttribute("data-frame", pickTibebFrame(PAYER));
+    // The unverified row's payer is unknown: the neutral default frame.
+    expect(frames[1]).toHaveAttribute("data-frame", "diamond");
+  });
+
+  it("draws the payer's own chosen shawl on a verified row, and none for a payer who chose none", async () => {
+    const A = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const B = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const C = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const proof = (memberUserId: string, n: number) => ({
+      provider: "telebirr" as const,
+      verifiedAt: "2026-09-01T09:00:05.000Z",
+      verificationId: `aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa${n}`,
+      memberUserId
+    });
+    hoisted.load.mockResolvedValue(
+      ready(
+        "300.00",
+        [
+          { id: "e3", sequence: "9", amount: "10.00", provenance: proof(A, 1) },
+          { id: "e2", sequence: "8", amount: "10.00", provenance: proof(B, 2) },
+          { id: "e1", sequence: "7", amount: "10.00", provenance: proof(C, 3) }
+        ],
+        { [A]: null, [B]: null, [C]: null },
+        // C is absent from the members read: nothing is guessed for them.
+        { [A]: "gabi", [B]: "none" }
+      )
+    );
+    render(<SenedHome />);
+    await screen.findByText("300.00");
+    const avatars = screen.getAllByTestId("member-avatar");
+    expect(avatars.map((node) => node.getAttribute("data-attire"))).toEqual(["gabi", "none", "none"]);
+    expect(screen.getAllByRole("img", { name: /wearing a gabi|ጋቢ ለብሰዋል/ })).toHaveLength(1);
+  });
+
+  it("opens a real profile panel from the Profile slot when signed in", async () => {
+    const user = userEvent.setup();
+    hoisted.load.mockResolvedValue(ready("300.00", []));
+    render(<SenedHome />);
+    await screen.findByText("300.00");
+    await user.click(screen.getByRole("button", { name: am("shell.nav.profile") }));
+    expect(screen.getByRole("region", { name: am("tab.panels.profile") })).toBeInTheDocument();
+    // Not the placeholder.
+    expect(screen.queryByText(am("tab.panels.pending"))).not.toBeInTheDocument();
   });
 
   it("names the payer by email when the members API already showed it", async () => {

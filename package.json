@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
+    "backfill:reference-display": "vite-node scripts/backfill-reference-display.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",

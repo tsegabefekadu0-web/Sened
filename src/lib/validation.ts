@@ -133,6 +133,19 @@ export const ledgerMemberRoleRequestSchema = z
   .strict();
 
 /**
+ * A member's own avatar attire. The body names the group and the value only: the
+ * member is whoever the session says, never a field here, and `.strict()` turns
+ * a `userId` smuggled into the body into a 400 rather than ignoring it.
+ */
+export const MEMBER_ATTIRE_VALUES = ["none", "gabi", "netela"] as const;
+export const ledgerMemberAttireRequestSchema = z
+  .object({
+    groupId: uuidSchema,
+    attire: z.enum(MEMBER_ATTIRE_VALUES)
+  })
+  .strict();
+
+/**
  * Invite links. All strict. Expiry is capped at 30 days and uses at 50, which
  * the SQL enforces again; a wrong value is a 400 here rather than a database
  * error. The token schema is a shape check only (the database decides whether

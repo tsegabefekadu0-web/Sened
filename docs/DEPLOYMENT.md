@@ -156,6 +156,8 @@ is an unauthenticated JSON endpoint that also proves API routes are live.
 - [ ] **Offline sync:** on `/offline`, go offline, queue a draft, reconnect and confirm it syncs via `/api/sync` and is recorded once.
 - [ ] **Governance:** `/governance` renders recommendations; citation chips show the bundled list, and "confirmed" appears only when the ScholarXIV variables are set.
 - [ ] **Bank verification** (if enabled): a verification attempt reaches links.et or fails closed with a clear message; no secrets appear in responses or logs.
+- [ ] **Avatar attire** (migration `20261009100000`): signed in, the Profile slot lists No shawl / Gabi / Netela; choosing one saves (`PUT /api/ledger/member-attire` returns 200) and other members see it on that member's verified contributions.
+- [ ] **Masked reference** (if bank verification is enabled): a verified contribution's badge reads `<Provider> Verified · ••••XXXX`. For verifications from before migration `20261008100000`, run the backfill (section 6b) once; until then they show the badge without a reference.
 - [ ] **Reconciliation drain** (if bank verification is enabled): the scheduler is configured (section 6a), `POST /api/reconciliation/drain` with the secret returns 200, and without it returns 401.
 
 ## 6a. Scheduling the reconciliation drain
@@ -257,6 +259,59 @@ non-200s. Remove the schedule with `select cron.unschedule('sened-reconciliation
 
 - Without the header: `401`. With `RECONCILIATION_CRON_SECRET` unset on the server: `503`.
 - With the secret and an empty queue: `200` with all counts `0`.
+
+## 6b. Backfilling masked bank references (one-off, after migration `20261008100000`)
+
+The verified badge on the home feed shows the last characters of the bank
+reference (`Telebirr Verified · ••••2F42`). New verifications store that masked
+form when they are created. Verifications created **before** the migration have
+none, and SQL cannot derive it (the reference is stored encrypted), so their
+entries show no reference until this script has run once. Nothing breaks if you
+never run it; those rows just stay as they are.
+
+**Order:** apply migration `20261008100000_bank_reference_display.sql` first,
+then deploy the application, then run the script. (The migration replaces
+`create_bank_verification_intent_v1` with an 11-argument version whose last
+argument is optional, so old and new code both work against it.)
+
+```
+# dry run (the default): reads, decrypts, counts, writes nothing
+npx vite-node scripts/backfill-reference-display.ts
+
+# write
+npx vite-node scripts/backfill-reference-display.ts --apply
+#   --batch-size N   rows per database read, 1-500 (default 100)
+#   --max-rows N     stop after N rows this run (default 1000); run again for the rest
+```
+
+`npm run backfill:reference-display -- --apply` is the same command.
+
+- **Where to run it:** on a machine you trust with the production secrets (the
+  container host or your own shell), from the repo root with `npm ci` done. It
+  needs `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+  `BANK_REFERENCE_ENCRYPTION_KEY`, `BANK_REFERENCE_HMAC_KEY` and, if you set
+  one, `BANK_REFERENCE_KEY_VERSION`. It reads sealed references through two
+  `service_role`-only functions (`list_bank_reference_display_backfill_v1`,
+  `set_bank_reference_display_v1`); no other role can call them.
+- **Idempotent:** only rows with no display are read, and a display is never
+  overwritten, so it is safe to stop, re-run, or run twice. The second run
+  reports `scanned: 0` (plus any rows that cannot be masked, see below).
+- **Never logs a reference.** Output is counts and verification ids. The JSON
+  summary has `scanned`, `updated` (or `wouldUpdate` in a dry run),
+  `alreadySet`, `unmaskable`, `otherKeyVersion`, `failed` and `truncated`.
+- **Rows it leaves alone:** `unmaskable` (a one-character reference, or one
+  outside printable ASCII: nothing safe to show), `otherKeyVersion` (sealed under
+  a key version other than `BANK_REFERENCE_KEY_VERSION`; run again with that
+  key), and `failed` (could not be decrypted: wrong key or tampering; ids are
+  printed to stderr and the exit code is 1). Those entries keep showing no
+  reference.
+- **Check it:** the final summary, then open the home screen: a verified
+  contribution from before the migration now shows `••••` plus its last
+  characters.
+- **Scratch first:** like the migration harness, try it against a copy before
+  production. The unit tests (`test/banking.reference-backfill.test.ts`) cover
+  the algorithm with fakes; the database functions are covered by
+  `scripts/verify-migrations.sql`.
 
 ## 7. End-to-end tests (Playwright)
 

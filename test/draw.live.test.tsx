@@ -15,6 +15,11 @@ vi.mock("@supabase/supabase-js", () => ({
   }))
 }));
 vi.mock("@/lib/auth/useSession", () => ({ useSession: () => hoisted.session }));
+const triggerHaptic = vi.hoisted(() => vi.fn(() => true));
+vi.mock("@/lib/draw/haptics", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/draw/haptics")>()),
+  triggerHaptic
+}));
 
 import DrawPage from "@/app/draw/page";
 import { LiveDraw } from "@/components/draw/LiveDraw";
@@ -213,6 +218,7 @@ function renderAs(server: Server, userId: string, locale: "en" | "am" = "en") {
 }
 
 beforeEach(() => {
+  triggerHaptic.mockClear();
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://demo.supabase.co");
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon-key");
   globalThis.localStorage?.clear();
@@ -785,6 +791,82 @@ describe("signed out", () => {
     expect(screen.queryByTestId("draw-demo-banner")).toBeNull();
     // No browser session in this test, so the live board refuses honestly.
     expect(await screen.findByTestId("draw-live-refusal")).toBeInTheDocument();
+  });
+});
+
+describe("haptics follow the live ceremony", () => {
+  const buzzes = () => triggerHaptic.mock.calls.map((call) => (call as unknown as [string])[0]);
+
+  it("buzzes at seal, commit, release, reveal and the verified winner, and nowhere else", async () => {
+    const user = userEvent.setup();
+    const server = createServer("treasurer");
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+    await openTheDraw(user);
+    expect(buzzes()).toEqual([]);
+
+    renderAs(server, MEMBER_B);
+    await user.click(await screen.findByTestId("seal-button"));
+    await screen.findByTestId("my-seal");
+    expect(buzzes()).toEqual(["commitSealed"]);
+
+    renderAs(server, TREASURER);
+    await screen.findByTestId("seal-progress");
+    await user.click(screen.getByTestId("commit-button"));
+    await screen.findByTestId("reveal-form");
+    expect(buzzes()).toEqual(["commitSealed", "commitSealed"]);
+
+    renderAs(server, MEMBER_B);
+    await user.click(await screen.findByTestId("release-button"));
+    await screen.findByTestId("release-done");
+    expect(buzzes()).toEqual(["commitSealed", "commitSealed", "revealStep"]);
+
+    renderAs(server, TREASURER);
+    await screen.findByTestId("nonce-progress");
+    await user.click(screen.getByTestId("reveal-button"));
+    await screen.findByTestId("compare-result");
+    await waitFor(() => expect(buzzes()).toContain("winnerRevealed"));
+    expect(buzzes()).toEqual(["commitSealed", "commitSealed", "revealStep", "revealStep", "winnerRevealed"]);
+  });
+
+  it("does not buzz when someone merely opens a draw that was already revealed", async () => {
+    const server = createServer("member");
+    await revealedDraw(server);
+    renderAs(server, MEMBER_C);
+    expect(await screen.findByTestId("compare-result")).toHaveTextContent("agree");
+    expect(buzzes()).toEqual([]);
+  });
+
+  it("buzzes the tamper pattern, not the winner one, when this device disagrees with the server", async () => {
+    const user = userEvent.setup();
+    const server = createServer("owner", {
+      tamper: (path, body) => {
+        if (path !== "/api/draw/verify") return body;
+        const transcript = body.transcript as Record<string, unknown>;
+        return { ...body, transcript: { ...transcript, seed: "a-different-seed-0123456789-zzz" } };
+      }
+    });
+    await committedDraw(server);
+    renderAs(server, TREASURER);
+    await user.click(await screen.findByTestId("reveal-button"));
+    expect(await screen.findByTestId("compare-result")).toHaveTextContent("DISAGREE");
+    await waitFor(() => expect(buzzes()).toContain("tamperDetected"));
+    expect(buzzes()).toEqual(["revealStep", "tamperDetected"]);
+  });
+
+  it("buzzes a member who refreshes into a reveal that just happened, once", async () => {
+    const user = userEvent.setup();
+    const server = createServer("member");
+    const made = await committedDraw(server);
+    renderAs(server, MEMBER_C);
+    await screen.findByTestId("draw-live");
+    await server.service.reveal({ drawId: made.drawId, seed: TREASURER_SEED }, { userId: TREASURER });
+    await user.click(await screen.findByRole("button", { name: "Refresh" }));
+    await screen.findByTestId("compare-result");
+    await waitFor(() => expect(buzzes()).toEqual(["winnerRevealed"]));
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByTestId("compare-result");
+    expect(buzzes()).toEqual(["winnerRevealed"]);
   });
 });
 

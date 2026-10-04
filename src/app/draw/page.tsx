@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 
 import { DrawBoard } from "@/components/draw/DrawBoard";
+import { HapticsToggle } from "@/components/draw/HapticsToggle";
 import { LiveDraw } from "@/components/draw/LiveDraw";
 import { MeskelCross } from "@/components/cultural/CulturalIcons";
 import type { Locale } from "@/components/draw/copy";
@@ -39,6 +40,8 @@ export default function DrawPage() {
             {locale === "am" ? "EN" : "አማ"}
           </button>
         </header>
+
+        <HapticsToggle locale={locale} />
 
         {session.status === "signed-in" ? (
           <LiveDraw locale={locale} accessToken={session.accessToken} />

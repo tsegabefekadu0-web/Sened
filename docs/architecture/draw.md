@@ -439,6 +439,30 @@ CSS animations, and `usePrefersReducedMotion` additionally branches so the
 reduced-motion experience is a *static but complete* draw rather than a frozen
 animation. A member still learns who won.
 
+### Haptic feedback
+
+`src/lib/draw/haptics.ts` wraps `navigator.vibrate` with one named pattern per
+ceremony moment: `commitSealed` (one firm 40 ms stamp), `revealStep` (a 15 ms
+tick), `winnerRevealed` (a rising flourish) and `tamperDetected` (three long,
+evenly spaced pulses, deliberately unlike the celebration). It is browser-only
+and feature-detected.
+
+- **Not on iOS.** Safari, and every browser on iOS (all WebKit), has no Vibration
+  API, so iPhone and iPad users feel nothing. It is a silent no-op there, and the
+  switch on `/draw` is disabled and says so. Nothing stands in for it.
+- **Off under reduced motion**, checked at the moment of each buzz, and off if the
+  user switches it off (`HapticsToggle`, stored in `localStorage` under
+  `sened.draw.haptics`; default on; storage failures fall back to on).
+- **Only after the user acts.** Browsers need a prior user gesture. The demo buzzes
+  from its commit and reveal clicks; the live screen buzzes after a successful
+  seal, commit, release or reveal, and the winner or tamper pattern fires from
+  this device's own recomputation (`verifyInBrowser`), only for a draw whose
+  reveal the user just moved forward (reveal, or a refresh that picks it up).
+  Opening an already-revealed draw does not vibrate. A device/server disagreement
+  or a seed that fails the commitment (`COMMITMENT_MISMATCH`) is the tamper pattern.
+- The winner moment's visual counterpart already existed: confetti and the pulsing
+  basket in `MesobCeremony`, both off under reduced motion.
+
 ### The tamper switch
 
 The ceremony has a labelled checkbox that flips one character of the seed. This

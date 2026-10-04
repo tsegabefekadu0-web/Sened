@@ -3,7 +3,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { toVerificationTranscript, webDrawHasher } from "@/lib/draw/canonical";
+import { isDrawError } from "@/lib/draw/errors";
 import { createCommitment, openReveal, sealMemberContribution, verifyRound } from "@/lib/draw/engine";
+import { triggerHaptic } from "@/lib/draw/haptics";
 import { excludePriorWinners } from "@/lib/draw/rotation";
 import { formatEtbDisplay } from "@/lib/ledger/money";
 import type {
@@ -164,6 +166,7 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
       setSealedSeed(seed);
       setSealedMember({ contribution, nonce: memberNonce });
       setPhase("sealed");
+      triggerHaptic("commitSealed");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setPhase("idle");
@@ -187,14 +190,19 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
         setReveal(opened.reveal);
         setRisk(opened.risk);
         setPhase("revealed");
+        triggerHaptic("revealStep");
 
         setIsVerifying(true);
         const asRound: DrawRound = { ...source, state: "revealed", reveal: opened.reveal, payout: null };
         const checked = await verifyRound(asRound, {}, webDrawHasher);
         setVerification(checked);
+        triggerHaptic(checked.verified ? "winnerRevealed" : "tamperDetected");
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
         setPhase("sealed");
+        // The engine refuses a seed that does not open the commitment: that
+        // refusal is the tamper being caught. Any other failure is not.
+        if (isDrawError(caught) && caught.code === "COMMITMENT_MISMATCH") triggerHaptic("tamperDetected");
       } finally {
         setIsVerifying(false);
       }
@@ -205,6 +213,7 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
   const revealSeed = useCallback(async () => {
     if (commitment === null || sealedSeed === null || sealedMember === null) return;
     setPhase(reducedMotion ? "revealed" : "shaking");
+    triggerHaptic("revealStep");
     // The tamper switch flips one character. Nothing in the pipeline can tell it
     // was flipped — the commitment check is what catches it, and that is the
     // whole demonstration.

@@ -39,6 +39,7 @@ import {
   type WireVerify
 } from "@/lib/draw/clientDraw";
 import { loadCycleLedgerFigures, type LedgerFiguresResult } from "@/lib/draw/ledgerFigures";
+import { triggerHaptic } from "@/lib/draw/haptics";
 import type { DrawCycleRecord, DrawListEntry, DrawSessionView } from "@/lib/draw/types";
 import type { MessageKey } from "@/lib/i18n";
 import { formatEtbDisplay, formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
@@ -162,6 +163,13 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
 
   /** Guards against an older response overwriting a newer selection. */
   const sequence = useRef(0);
+
+  /**
+   * The draw whose outcome should buzz when this device finishes verifying it.
+   * Set only by a click that moves the ceremony forward, so opening a draw that
+   * was already revealed never vibrates.
+   */
+  const announceOutcomeFor = useRef<string | null>(null);
 
   const group = load.kind === "ready" ? load.group : null;
   const isTreasurer = group !== null && canRunTreasurerSteps(group.role);
@@ -331,9 +339,23 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cycleStart]);
 
+  // The winner moment, or the tamper moment: this device's own recomputation.
+  useEffect(() => {
+    if (check === null || !check.revealed || wire === null) return;
+    if (announceOutcomeFor.current !== wire.round.drawId) return;
+    announceOutcomeFor.current = null;
+    triggerHaptic(check.trusted ? "winnerRevealed" : "tamperDetected");
+  }, [check, wire]);
+
   const refresh = () =>
     run("refresh", async () => {
       if (group === null) return;
+      // A member who refreshes into a reveal that just happened gets the outcome
+      // buzz; one who refreshes an already-revealed draw does not.
+      const open = drawId === null ? undefined : detail?.draws.find((entry) => entry.drawId === drawId);
+      if (open !== undefined && open.state !== "revealed" && open.state !== "paid") {
+        announceOutcomeFor.current = open.drawId;
+      }
       if (cycleId === null) return loadCycles(group.groupId);
       await loadCycle(cycleId, drawId);
     });
@@ -416,6 +438,7 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
         setMySeal(previous);
         return fail(result);
       }
+      triggerHaptic("commitSealed");
       await reloadSelected();
     });
 
@@ -424,6 +447,7 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
       if (session === null || mySeal === null) return;
       const result = await submitNonce({ drawId: session.drawId, nonce: mySeal.nonce }, deps);
       if (!result.ok) return fail(result);
+      triggerHaptic("revealStep");
       await reloadSelected();
     });
 
@@ -456,6 +480,7 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
         deps
       );
       if (!result.ok) return fail(result);
+      triggerHaptic("commitSealed");
       const committed = { ...current, committed: true };
       writeDraft(session.drawId, committed);
       setDraft(committed);
@@ -471,6 +496,9 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
         deps
       );
       if (!result.ok) return fail(result);
+      triggerHaptic("revealStep");
+      // The outcome buzz fires once this device has verified (see the effect above).
+      announceOutcomeFor.current = session.drawId;
       // The seed is public now; there is nothing left to protect on this device.
       const done = { ...draft, seed: "", revealed: true };
       writeDraft(session.drawId, done);

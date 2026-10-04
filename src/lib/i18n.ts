@@ -519,6 +519,11 @@ export const en = {
   "draw.participants": "Participants",
   "draw.currency": "ETB",
   "draw.localNote": "This demonstration runs entirely on your device using WebCrypto for SHA-256. Verifying the draw does not depend on the server.",
+  "draw.haptics.label": "Vibration feedback",
+  "draw.haptics.on": "On",
+  "draw.haptics.off": "Off",
+  "draw.haptics.unsupported": "This browser has no vibration support, so there is nothing to switch on. iPhones and iPads (Safari and every other iOS browser) cannot vibrate from a web page.",
+  "draw.haptics.reduced": "Paused: your device asks for reduced motion, so the draw will not vibrate.",
   // ── A1 · Gen A shell (M1) ──────────────────────────────────────────────────
   // The mobile shell used to hard-code Ge'ez and never call t(), which is a
   // standing §12.6 violation on the first surface a reviewer sees. These are the
@@ -1455,6 +1460,11 @@ const am: Record<MessageKey, string> = {
   "draw.participants": "ተሳታፊዎች",
   "draw.currency": "ብር",
   "draw.localNote": "ይህ ማሳያ በስልክህ ላይ ብቻ ይሠራል — SHA-256 በስልክህ WebCrypto እንደሚሰራ ነው። ለማስተካከል አገልግሎቱ ላይ አይተማርንም።",
+  "draw.haptics.label": "የንዝረት ምልክት",
+  "draw.haptics.on": "በርቷል",
+  "draw.haptics.off": "ጠፍቷል",
+  "draw.haptics.unsupported": "ይህ አሳሽ ንዝረትን አይደግፍም፤ ስለዚህ የሚበራ ነገር የለም። አይፎን እና አይፓድ (ሳፋሪም ሆነ ሌሎች የiOS አሳሾች) ከድረ-ገጽ መንዘር አይችሉም።",
+  "draw.haptics.reduced": "ቆሟል፤ መሣሪያዎ የተቀነሰ እንቅስቃሴ ስለጠየቀ እጣው አይንዝርም።",
   // ── A1 · Gen A shell (M1) ──────────────────────────────────────────────────
   // The mobile shell used to hard-code Ge'ez and never call t(), which is a
   // standing §12.6 violation on the first surface a reviewer sees. These are the

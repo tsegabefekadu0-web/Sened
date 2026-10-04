@@ -287,8 +287,17 @@ describe("signed in: cycles", () => {
     expect(screen.getByTestId("cycle-terms")).toHaveTextContent("0 of 3 drawn, 0 paid");
     // Only the terms the treasurer chose went out; no pot, no group size.
     const sent = server.bodies.find((entry) => entry.path === "/api/draw/cycles")!.body;
-    expect(Object.keys(sent).sort()).toEqual(["contributionAmount", "groupId", "idempotencyKey", "name", "reserveRatioBps", "totalRounds"]);
-    expect(sent).toMatchObject({ contributionAmount: "1000.00", totalRounds: 3, reserveRatioBps: 1000 });
+    expect(Object.keys(sent).sort()).toEqual([
+      "contributionAmount",
+      "contributionGate",
+      "groupId",
+      "idempotencyKey",
+      "name",
+      "reserveRatioBps",
+      "totalRounds"
+    ]);
+    // The form's default policy is `off`: nothing changes for a group that does not choose.
+    expect(sent).toMatchObject({ contributionAmount: "1000.00", totalRounds: 3, reserveRatioBps: 1000, contributionGate: "off" });
   });
 
   it("refuses rounds beyond the number of members before asking the server", async () => {
@@ -320,11 +329,13 @@ describe("signed in: cycles", () => {
     expect(list).toHaveTextContent("Round 1 · sealing");
     // Contributions recorded since the cycle started: the two after it, not the one before.
     await waitFor(() => expect(screen.getByTestId("ledger-recorded")).toHaveTextContent("Br 3,000.00 ETB in 2 contribution entries"));
-    // Neither entry carries bank provenance, so nobody is credited and the note says why.
+    // Neither entry carries bank provenance, so the entries are counted as unattributed. Who paid
+    // which round is the grid's job now: the ledger panel no longer lists members.
     expect(screen.queryByTestId("ledger-paid-members")).toBeNull();
-    expect(screen.getByTestId("ledger-no-verified")).toHaveTextContent("no member can be shown as having paid");
+    expect(screen.queryByTestId("ledger-no-verified")).toBeNull();
     expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("2 entries (Br 3,000.00 ETB) are not attributed to any member");
-    expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("does not record which round an entry belongs to");
+    expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("not one round");
+    expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("grid above");
     expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("does not mean they have not paid");
     // Members are listed at the configured amount and never marked paid.
     expect(document.querySelector('[data-draw-panel="roster"]')!.textContent).toContain("Br 1,000.00 expected");
@@ -336,48 +347,28 @@ describe("signed in: cycles", () => {
   });
 });
 
-describe("signed in: who has paid, from bank-verified entries", () => {
-  it("credits the member whose receipt was verified, leaves the rest unattributed, and does not call anyone unpaid", async () => {
-    const user = userEvent.setup();
-    const server = createServer("treasurer", { bankPaid: true });
-    renderAs(server, TREASURER);
-    await createTheCycle(user);
+describe("signed in: the ledger panel after the grid took over who-paid", () => {
+  it("counts bank-verified and cash entries in the window but never lists a member as paid (the grid does that, per round)", async () => {
+    for (const opts of [{ bankPaid: true }, { cashPaid: true }]) {
+      const user = userEvent.setup();
+      const server = createServer("treasurer", opts);
+      renderAs(server, TREASURER);
+      await createTheCycle(user);
 
-    renderAs(server, MEMBER_C);
-    const paid = await screen.findByTestId("ledger-paid-members");
-    const rows = within(paid).getAllByTestId("ledger-paid-member");
-    expect(rows).toHaveLength(1);
-    // MEMBER_B has no email in the members list, so the anonymous label is used.
-    expect(rows[0]).toHaveTextContent("Member 33333333");
-    expect(rows[0]).toHaveTextContent("Br 1,000.00 ETB in 1 entries (1 bank-verified, 0 recorded by the treasurer)");
-    expect(within(rows[0]!).queryByTestId("ledger-treasurer-mark")).toBeNull();
-    // The other in-window entry (Br 2,000.00) has no bank verification.
-    expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("1 entries (Br 2,000.00 ETB)");
-    expect(screen.queryByTestId("ledger-no-verified")).toBeNull();
-    const text = document.querySelector('[data-draw-panel="ledger"]')!.textContent ?? "";
-    expect(text).not.toMatch(/unpaid|in default|overdue/i);
-    // Reading the figures never contacts anything but the two read routes.
-    expect(server.calls.filter((call) => call.includes("/api/ledger"))).not.toContain("POST /api/ledger/entries");
-  });
-});
-
-describe("signed in: who has paid, from the treasurer's record for cash entries", () => {
-  it("credits the member the treasurer named, marked as recorded by the treasurer and never as bank-verified", async () => {
-    const user = userEvent.setup();
-    const server = createServer("treasurer", { cashPaid: true });
-    renderAs(server, TREASURER);
-    await createTheCycle(user);
-
-    renderAs(server, MEMBER_C);
-    const paid = await screen.findByTestId("ledger-paid-members");
-    const rows = within(paid).getAllByTestId("ledger-paid-member");
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toHaveTextContent("Member 33333333");
-    expect(rows[0]).toHaveTextContent("Br 1,000.00 ETB in 1 entries (0 bank-verified, 1 recorded by the treasurer)");
-    expect(within(rows[0]!).getByTestId("ledger-treasurer-mark")).toHaveTextContent("recorded by the treasurer, not bank-verified");
-    // The other in-window entry is still nobody's.
-    expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("1 entries (Br 2,000.00 ETB) are not attributed to any member");
-    expect(screen.queryByTestId("ledger-no-verified")).toBeNull();
+      renderAs(server, MEMBER_C);
+      await screen.findByTestId("ledger-recorded");
+      await waitFor(() => expect(screen.getByTestId("ledger-recorded")).toHaveTextContent("Br 3,000.00 ETB in 2 contribution entries"));
+      // The per-member "paid since the cycle began" list is gone: it said nothing about a round.
+      expect(screen.queryByTestId("ledger-paid-members")).toBeNull();
+      expect(screen.queryByTestId("ledger-paid-member")).toBeNull();
+      expect(screen.queryByTestId("ledger-treasurer-mark")).toBeNull();
+      expect(screen.queryByTestId("ledger-no-verified")).toBeNull();
+      // The entry no member is credited for is still counted, so the treasurer knows what to attribute.
+      expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("1 entries (Br 2,000.00 ETB) are not attributed to any member");
+      const text = document.querySelector('[data-draw-panel="ledger"]')!.textContent ?? "";
+      expect(text).not.toMatch(/unpaid|in default|overdue/i);
+      expect(server.calls.filter((call) => call.includes("/api/ledger"))).not.toContain("POST /api/ledger/entries");
+    }
   });
 });
 

@@ -50,6 +50,10 @@ export const RATE_LIMITED = new Set([
   // decline / release / supersede for a guarantee. Advisory only; nothing moves money.
   "/api/draw/collateral",
   "/api/draw/guarantees",
+  // Per-round contributions for every member (a derived read), and the owner/treasurer's
+  // change of a cycle's contribution gate (an append-only audit event).
+  "/api/draw/contributions",
+  "/api/draw/gate",
   // A4: Wave 2's sync route. The branch in `resolveRateLimit` already existed
   // and was unreachable until this entry existed.
   "/api/sync",
@@ -152,11 +156,12 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
     pathname === "/api/draw/draws" ||
     pathname === "/api/draw/seals" ||
     pathname === "/api/draw/nonces" ||
-    pathname === "/api/draw/guarantees"
+    pathname === "/api/draw/guarantees" ||
+    pathname === "/api/draw/gate"
   ) {
     return WRITE_RULE;
   }
-  if (pathname === "/api/draw/collateral") {
+  if (pathname === "/api/draw/collateral" || pathname === "/api/draw/contributions") {
     return READ_RULE;
   }
   if (isDrawCyclePath(pathname) || isDrawSessionPath(pathname)) {

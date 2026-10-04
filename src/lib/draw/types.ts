@@ -57,6 +57,11 @@ export const DRAW_ERROR_CODES = [
   "NONCE_TOO_EARLY",
   /** Every round of the cycle has been drawn, or the cycle is closed. */
   "CYCLE_COMPLETE",
+  /**
+   * The cycle's contribution gate is `block` and an active member has a flagged
+   * round before the one being opened, and no override reason was given.
+   */
+  "CONTRIBUTION_GATE_BLOCKED",
   "IDEMPOTENCY_CONFLICT",
   "UNIFORMITY_EXHAUSTED",
   "UNAVAILABLE",
@@ -316,6 +321,36 @@ export function isDrawLifecycleState(value: unknown): value is DrawLifecycleStat
   return typeof value === "string" && (DRAW_LIFECYCLE_STATES as readonly string[]).includes(value);
 }
 
+/**
+ * The per-cycle contribution gate (`docs/architecture/draw.md` §18).
+ *
+ *   off    opening a draw never looks at contributions (every cycle created before the gate existed);
+ *   warn   the screen lists the flagged rounds and asks for a confirmation; the server allows it;
+ *   block  the server refuses to open a draw while an active member has a flagged round before
+ *          the round being opened, unless an owner/treasurer gives a reason, which is recorded.
+ */
+export const DRAW_CONTRIBUTION_GATES = ["off", "warn", "block"] as const;
+export type DrawContributionGate = (typeof DRAW_CONTRIBUTION_GATES)[number];
+
+export function isDrawContributionGate(value: unknown): value is DrawContributionGate {
+  return typeof value === "string" && (DRAW_CONTRIBUTION_GATES as readonly string[]).includes(value);
+}
+
+/** One (member, round) a gate looked at and found flagged. */
+export interface DrawGateFlag {
+  readonly memberId: string;
+  readonly round: number;
+}
+
+/** What opening a draw found when it looked at contributions (absent when no new draw was opened). */
+export interface DrawOpenGate {
+  readonly policy: DrawContributionGate;
+  /** The flagged (member, round) pairs before the round that was opened. Empty under `off`. */
+  readonly flagged: readonly DrawGateFlag[];
+  /** An owner/treasurer's recorded reason let the draw open despite `flagged`. */
+  readonly overridden: boolean;
+}
+
 /** A draw cycle as the database defines it. Amounts are ETB strings with two decimals. */
 export interface DrawCycleRecord {
   readonly cycleId: string;
@@ -334,6 +369,8 @@ export interface DrawCycleRecord {
   readonly roundsPaid: number;
   /** The round the next draw would be, or null when every round has been drawn. */
   readonly nextRound: number | null;
+  /** The effective contribution gate: the latest policy change, else the policy chosen at creation. */
+  readonly contributionGate: DrawContributionGate;
 }
 
 /** One draw in a cycle's listing. */

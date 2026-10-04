@@ -248,17 +248,39 @@ export const drawCycleCreateRequestSchema = z
       .datetime({ offset: true })
       .transform((value) => new Date(value).toISOString())
       .optional(),
-    idempotencyKey: drawIdempotencyKeySchema
+    idempotencyKey: drawIdempotencyKeySchema,
+    /** The cycle's contribution gate (§18); `off` when absent. */
+    contributionGate: z.enum(["off", "warn", "block"]).optional()
   })
   .strict();
+
+/** A reason for an override or a policy change: 10..1000 characters once trimmed. */
+const gateReasonSchema = z.string().trim().min(10).max(1000);
 
 export const drawOpenRequestSchema = z
   .object({
     cycleId: uuidSchema,
     round: z.number().int().min(1).max(1000).optional(),
-    idempotencyKey: drawIdempotencyKeySchema
+    idempotencyKey: drawIdempotencyKeySchema,
+    /**
+     * Only meaningful under a `block` gate: an owner/treasurer's recorded reason for
+     * opening the draw although an active member has a flagged earlier round.
+     */
+    overrideReason: gateReasonSchema.optional()
   })
   .strict();
+
+/** `POST /api/draw/gate`: owner/treasurer changes a cycle's contribution gate, with a reason. */
+export const drawGateRequestSchema = z
+  .object({
+    cycleId: uuidSchema,
+    gate: z.enum(["off", "warn", "block"]),
+    reason: gateReasonSchema
+  })
+  .strict();
+
+/** `GET /api/draw/contributions?cycleId=`: the members x rounds grid. */
+export const drawContributionsQuerySchema = z.object({ cycleId: uuidSchema }).strict();
 
 export const drawSealRequestSchema = z
   .object({ drawId: uuidSchema, sealed: drawHex64Schema })

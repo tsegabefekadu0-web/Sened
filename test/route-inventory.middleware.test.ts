@@ -288,3 +288,29 @@ describe("the attribution and collateral routes are metered", () => {
     expect(attribution.headers.get("X-RateLimit-Limit")).toBe(String(WRITE_RULE.limit));
   });
 });
+
+describe("the contribution grid and gate routes are metered", () => {
+  it("registers both literal buckets", () => {
+    for (const path of ["/api/draw/contributions", "/api/draw/gate"]) {
+      expect(RATE_LIMITED.has(path), path).toBe(true);
+      expect(isRateLimitedPath(path), path).toBe(true);
+    }
+  });
+
+  it("charges the policy change the write rule and the derived grid the read rule", () => {
+    expect(resolveRateLimit("/api/draw/gate", "POST")).toEqual(WRITE_RULE);
+    expect(resolveRateLimit("/api/draw/contributions", "GET")).toEqual(READ_RULE);
+  });
+
+  it("answers with the headers that match the route and throttles a hammering caller", () => {
+    const read = middleware(
+      new NextRequest(`http://localhost/api/draw/contributions?cycleId=${cycleId}`, { method: "GET", headers: { authorization: "Bearer grid" } })
+    );
+    expect(read.headers.get("X-RateLimit-Limit")).toBe(String(READ_RULE.limit));
+    let last: Response | null = null;
+    for (let call = 0; call <= WRITE_RULE.limit; call += 1) {
+      last = middleware(new NextRequest("http://localhost/api/draw/gate", { method: "POST", headers: { authorization: "Bearer gate" } }));
+    }
+    expect(last?.status).toBe(429);
+  });
+});

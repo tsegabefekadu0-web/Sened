@@ -6,6 +6,7 @@ import {
   drawCycleCreateRequestSchema,
   drawCycleIdSchema,
   drawCycleListQuerySchema,
+  drawGateRequestSchema,
   drawNonceRequestSchema,
   drawOpenRequestSchema,
   drawSealRequestSchema,
@@ -152,6 +153,17 @@ function publicTranscript(round: Parameters<typeof toVerificationTranscript>[0])
 function mapError(error: unknown): Response {
   if (!isDrawError(error)) {
     return jsonError("draw_failed", 502);
+  }
+  if (error.code === "CONTRIBUTION_GATE_BLOCKED") {
+    // Who is flagged for which round travels with the refusal so the screen can say it.
+    return Response.json(
+      {
+        error: error.code.toLowerCase(),
+        message: error.message,
+        flagged: (error.flagged ?? []).map((flag) => ({ memberId: flag.memberId, round: flag.round }))
+      },
+      { status: drawErrorStatus(error.code), headers: { "Cache-Control": "no-store" } }
+    );
   }
   return jsonError(error.code.toLowerCase(), drawErrorStatus(error.code), error.message);
 }
@@ -381,7 +393,8 @@ function publicCycle(cycle: DrawCycleRecord): Record<string, unknown> {
     createdAt: cycle.createdAt,
     roundsRevealed: cycle.roundsRevealed,
     roundsPaid: cycle.roundsPaid,
-    nextRound: cycle.nextRound
+    nextRound: cycle.nextRound,
+    contributionGate: cycle.contributionGate
   };
 }
 
@@ -459,6 +472,32 @@ export function createCycleCreateHandler(
   };
 }
 
+/**
+ * Owner or treasurer changes a cycle's contribution gate (`off` | `warn` | `block`). A reason of
+ * 10..1000 characters is required and recorded with who and when, append-only. Asking for the policy
+ * already in force is a 200 replay and records nothing.
+ */
+export function createGateSetHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request) => Promise<Response> {
+  return async function post(request: Request): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const payload = await readJsonBody(request);
+    if (!payload.ok) return payload.response;
+    const parsed = parse(drawGateRequestSchema, payload.body);
+    if (!parsed.ok) return jsonError("invalid_request", 400, parsed.message);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const result = await serviceFactory(supabase).setContributionGate(parsed.data, auth.context);
+      return jsonOk({ cycle: publicCycle(result.cycle), replayed: result.replayed }, 200);
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
 /** Any member lists their group's cycles. */
 export function createCycleListHandler(
   serviceFactory: DrawServiceFactory = productionFactory
@@ -514,7 +553,21 @@ export function createDrawOpenHandler(
     if (!supabase) return jsonError("not_configured", 503);
     try {
       const result = await serviceFactory(supabase).openDraw(parsed.data, auth.context);
-      return jsonOk({ session: publicSession(result.session), replayed: result.replayed }, result.replayed ? 200 : 201);
+      return jsonOk(
+        {
+          session: publicSession(result.session),
+          replayed: result.replayed,
+          // Present only when a new draw was opened: what the gate looked at.
+          contributionGate: result.gate
+            ? {
+                policy: result.gate.policy,
+                flagged: result.gate.flagged.map((flag) => ({ memberId: flag.memberId, round: flag.round })),
+                overridden: result.gate.overridden
+              }
+            : null
+        },
+        result.replayed ? 200 : 201
+      );
     } catch (error) {
       return mapError(error);
     }

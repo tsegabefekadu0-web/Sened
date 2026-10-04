@@ -4,11 +4,14 @@ import type { DrawActorContext, DrawRepository } from "./repository";
 import {
   DRAW_CURRENT_PROTOCOL_VERSION,
   type DrawCommitment,
+  type DrawContributionGate,
   type DrawCycleRecord,
+  type DrawGateFlag,
   type DrawHasher,
   type DrawLifecycleState,
   type DrawListEntry,
   type DrawMemberNonce,
+  type DrawOpenGate,
   type DrawPayout,
   type DrawReveal,
   type DrawRound,
@@ -52,6 +55,32 @@ export interface InMemoryDrawRepositoryOptions {
    */
   readonly allowSessionlessCommit?: boolean;
   readonly idFactory?: () => string;
+  /**
+   * Stands in for the ledger-derived grid the database consults when a draw is opened under a
+   * `warn` or `block` gate: the flagged (active member, round) pairs strictly before `beforeRound`.
+   * The default finds none. The double has no ledger; `scripts/verify-migrations.sql` proves the
+   * real derivation.
+   */
+  readonly contributionFlags?: (cycleId: string, beforeRound: number) => readonly DrawGateFlag[];
+}
+
+/** One recorded override, as the database's append-only table holds it. */
+export interface InMemoryGateOverride {
+  readonly cycleId: string;
+  readonly round: number;
+  readonly drawId: string;
+  readonly actorId: string;
+  readonly reason: string;
+  readonly flagged: readonly DrawGateFlag[];
+}
+
+/** One recorded policy change. */
+export interface InMemoryGateEvent {
+  readonly cycleId: string;
+  readonly from: DrawContributionGate;
+  readonly to: DrawContributionGate;
+  readonly actorId: string;
+  readonly reason: string;
 }
 
 interface CycleRow {
@@ -65,6 +94,8 @@ interface CycleRow {
   readonly startedAt: string;
   readonly createdAt: string;
   readonly idempotencyKey: string;
+  /** The policy chosen at creation; the effective one is the latest event. */
+  readonly initialGate: DrawContributionGate;
 }
 
 interface SessionRow {
@@ -112,13 +143,35 @@ export class InMemoryDrawRepository implements DrawRepository {
   private readonly hasher: DrawHasher;
   private readonly allowSessionlessCommit: boolean;
   private readonly idFactory: () => string;
+  private readonly contributionFlags: (cycleId: string, beforeRound: number) => readonly DrawGateFlag[];
+  private readonly gateEventLog: InMemoryGateEvent[] = [];
+  private readonly gateOverrideLog: InMemoryGateOverride[] = [];
 
   constructor(options: InMemoryDrawRepositoryOptions = {}) {
+    this.contributionFlags = options.contributionFlags ?? (() => []);
     this.clock = options.clock ?? (() => new Date());
     this.hasher = options.hasher ?? webDrawHasher;
     this.allowSessionlessCommit = options.allowSessionlessCommit ?? false;
     this.idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
     this.groups = new Map((options.groups ?? []).map((group) => [group.groupId, group.members]));
+  }
+
+  /** The recorded policy changes, oldest first. Append-only. */
+  gateEvents(): readonly InMemoryGateEvent[] {
+    return [...this.gateEventLog];
+  }
+
+  /** The recorded overrides, oldest first. Append-only. */
+  gateOverrides(): readonly InMemoryGateOverride[] {
+    return [...this.gateOverrideLog];
+  }
+
+  private effectiveGate(row: CycleRow): DrawContributionGate {
+    let gate = row.initialGate;
+    for (const event of this.gateEventLog) {
+      if (event.cycleId === row.cycleId) gate = event.to;
+    }
+    return gate;
   }
 
   /** Add or replace a group's membership (tests that join a member mid-cycle). */
@@ -197,7 +250,8 @@ export class InMemoryDrawRepository implements DrawRepository {
       createdAt: row.createdAt,
       roundsRevealed: revealed.size,
       roundsPaid: paid.size,
-      nextRound: revealed.size < row.totalRounds ? revealed.size + 1 : null
+      nextRound: revealed.size < row.totalRounds ? revealed.size + 1 : null,
+      contributionGate: this.effectiveGate(row)
     };
   }
 
@@ -230,10 +284,15 @@ export class InMemoryDrawRepository implements DrawRepository {
       readonly reserveRatioBps: number;
       readonly startedAt?: string;
       readonly idempotencyKey: string;
+      readonly contributionGate?: DrawContributionGate;
     },
     context: DrawActorContext
   ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
     if (!this.isManager(input.groupId, context.userId)) this.forbid();
+    const gate = input.contributionGate ?? "off";
+    if (gate !== "off" && gate !== "warn" && gate !== "block") {
+      throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+    }
     const name = input.name.trim();
     let contributionMinor: bigint;
     try {
@@ -267,7 +326,8 @@ export class InMemoryDrawRepository implements DrawRepository {
         existing.name !== name ||
         existing.contributionAmount !== formatEtbMinorUnits(contributionMinor) ||
         existing.totalRounds !== input.totalRounds ||
-        existing.reserveRatioBps !== input.reserveRatioBps
+        existing.reserveRatioBps !== input.reserveRatioBps ||
+        existing.initialGate !== gate
       ) {
         throw new DrawError("IDEMPOTENCY_CONFLICT", "draw_idempotency_conflict");
       }
@@ -285,11 +345,29 @@ export class InMemoryDrawRepository implements DrawRepository {
       reserveRatioBps: input.reserveRatioBps,
       startedAt: input.startedAt ?? now,
       createdAt: now,
-      idempotencyKey: input.idempotencyKey
+      idempotencyKey: input.idempotencyKey,
+      initialGate: gate
     };
     this.cycles.set(row.cycleId, row);
     this.cycleKeys.set(keyed, row.cycleId);
     return { cycle: this.cycleRecord(row), replayed: false };
+  }
+
+  async setContributionGate(
+    input: { readonly cycleId: string; readonly gate: DrawContributionGate; readonly reason: string },
+    context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
+    const row = this.cycles.get(input.cycleId.toLowerCase());
+    if (row === undefined || !this.isManager(row.groupId, context.userId)) this.forbid();
+    const cycle = row as CycleRow;
+    const reason = input.reason.trim();
+    if ((input.gate !== "off" && input.gate !== "warn" && input.gate !== "block") || reason.length < 10 || reason.length > 1000) {
+      throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+    }
+    const current = this.effectiveGate(cycle);
+    if (current === input.gate) return { cycle: this.cycleRecord(cycle), replayed: true };
+    this.gateEventLog.push({ cycleId: cycle.cycleId, from: current, to: input.gate, actorId: context.userId, reason });
+    return { cycle: this.cycleRecord(cycle), replayed: false };
   }
 
   async listCycles(groupId: string, context: DrawActorContext): Promise<readonly DrawCycleRecord[]> {
@@ -388,13 +466,22 @@ export class InMemoryDrawRepository implements DrawRepository {
   }
 
   async openDraw(
-    input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
+    input: {
+      readonly cycleId: string;
+      readonly round?: number;
+      readonly idempotencyKey: string;
+      readonly overrideReason?: string;
+    },
     context: DrawActorContext
-  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean }> {
+  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean; readonly gate: DrawOpenGate | null }> {
     const cycle = this.cycles.get(input.cycleId.toLowerCase());
     if (cycle === undefined || !this.isManager(cycle.groupId, context.userId)) this.forbid();
     const row = cycle as CycleRow;
     if (!KEY_PATTERN.test(input.idempotencyKey)) throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+    const override = input.overrideReason === undefined ? null : input.overrideReason.trim();
+    if (override !== null && (override.length < 10 || override.length > 1000)) {
+      throw new DrawError("INVALID_REQUEST", "draw_override_reason_invalid");
+    }
 
     const keyed = `${row.groupId}:${input.idempotencyKey}`;
     const existingId = this.sessionKeys.get(keyed);
@@ -403,7 +490,7 @@ export class InMemoryDrawRepository implements DrawRepository {
       if (existing.cycleId !== row.cycleId || (input.round !== undefined && existing.round !== input.round)) {
         throw new DrawError("IDEMPOTENCY_CONFLICT", "draw_idempotency_conflict");
       }
-      return { session: this.view(existing), replayed: true };
+      return { session: this.view(existing), replayed: true, gate: null };
     }
 
     const revealed = this.revealedRounds(row.cycleId);
@@ -417,7 +504,15 @@ export class InMemoryDrawRepository implements DrawRepository {
     const live = Array.from(this.sessions.values())
       .filter((session) => session.cycleId === row.cycleId && session.round === next && !this.commitments.has(session.drawId))
       .sort((left, right) => right.order - left.order)[0];
-    if (live !== undefined) return { session: this.view(live), replayed: true };
+    if (live !== undefined) return { session: this.view(live), replayed: true, gate: null };
+
+    // The gate looks at contributions only when a NEW draw would be opened.
+    const policy = this.effectiveGate(row);
+    const flagged = policy === "off" ? [] : this.contributionFlags(row.cycleId, next);
+    const overridden = policy === "block" && flagged.length > 0;
+    if (overridden && override === null) {
+      throw new DrawError("CONTRIBUTION_GATE_BLOCKED", "draw_contribution_gate_blocked", undefined, flagged);
+    }
 
     const session: SessionRow = {
       drawId: this.idFactory(),
@@ -431,7 +526,17 @@ export class InMemoryDrawRepository implements DrawRepository {
     };
     this.sessions.set(session.drawId, session);
     this.sessionKeys.set(keyed, session.drawId);
-    return { session: this.view(session), replayed: false };
+    if (overridden && override !== null) {
+      this.gateOverrideLog.push({
+        cycleId: row.cycleId,
+        round: next,
+        drawId: session.drawId,
+        actorId: context.userId,
+        reason: override,
+        flagged
+      });
+    }
+    return { session: this.view(session), replayed: false, gate: { policy, flagged, overridden } satisfies DrawOpenGate };
   }
 
   async getSession(drawId: string, context: DrawActorContext): Promise<DrawSessionView> {

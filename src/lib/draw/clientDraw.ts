@@ -17,11 +17,16 @@ import type { MessageKey } from "@/lib/i18n";
 import { webDrawHasher, type DrawVerificationTranscript } from "./canonical";
 import { sealMemberContribution, verifyTranscript } from "./engine";
 import { parseCycleCollateral, parseGuarantee, type CycleCollateral, type Guarantee } from "./collateral";
+import { parseCycleContributions, type CycleContributions } from "./contributions";
 import { assessDrawRisk, planReserve } from "./risk";
 import {
+  isDrawContributionGate,
   isDrawLifecycleState,
   isDrawProtocolVersion,
+  type DrawContributionGate,
   type DrawCycleRecord,
+  type DrawGateFlag,
+  type DrawOpenGate,
   type DrawListEntry,
   type DrawMemberNonce,
   type DrawRiskAssessment,
@@ -108,6 +113,8 @@ export interface DrawFailure {
   readonly code: string;
   /** The server's own message, shown as detail next to the translated one. */
   readonly message: string | null;
+  /** Only for `contribution_gate_blocked`: who is flagged for which round. */
+  readonly flagged?: readonly DrawGateFlag[];
 }
 
 export type DrawResult<T> = { readonly ok: true; readonly status: number; readonly data: T } | DrawFailure;
@@ -128,6 +135,7 @@ const ERROR_KEYS: Readonly<Record<string, MessageKey>> = {
   already_revealed: "drawLive.error.alreadyRevealed",
   idempotency_conflict: "drawLive.error.conflict",
   repeat_winner: "drawLive.error.repeatWinner",
+  contribution_gate_blocked: "drawLive.error.gateBlocked",
   not_eligible: "drawLive.error.notEligible",
   nonce_too_early: "drawLive.error.nonceTooEarly",
   cycle_complete: "drawLive.error.cycleComplete",
@@ -164,6 +172,18 @@ export function drawErrorKey(failure: Pick<DrawFailure, "code" | "status">): Mes
   return "drawLive.error.generic";
 }
 
+function parseFlags(value: unknown): readonly DrawGateFlag[] | null {
+  if (!Array.isArray(value)) return null;
+  const flags: DrawGateFlag[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const row = entry as Record<string, unknown>;
+    if (typeof row.memberId !== "string" || typeof row.round !== "number" || !Number.isInteger(row.round)) return null;
+    flags.push({ memberId: row.memberId, round: row.round });
+  }
+  return flags;
+}
+
 async function call(
   path: string,
   init: RequestInit,
@@ -180,11 +200,13 @@ async function call(
   }
   const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok) {
+    const flagged = parseFlags(body?.flagged);
     return {
       ok: false,
       status: response.status,
       code: typeof body?.error === "string" ? body.error : "unknown",
-      message: typeof body?.message === "string" ? body.message : null
+      message: typeof body?.message === "string" ? body.message : null,
+      ...(flagged === null ? {} : { flagged })
     };
   }
   if (body === null || typeof body !== "object") {
@@ -352,8 +374,21 @@ function isCycle(value: unknown): value is DrawCycleRecord {
     isString(row.startedAt) &&
     typeof row.roundsRevealed === "number" &&
     typeof row.roundsPaid === "number" &&
-    (row.nextRound === null || typeof row.nextRound === "number")
+    (row.nextRound === null || typeof row.nextRound === "number") &&
+    // A server that predates the gate sends none: that is `off` (see `withGate`), not a malformed cycle.
+    (row.contributionGate === undefined || isDrawContributionGate(row.contributionGate))
   );
+}
+
+/** A cycle as the server sent it, with `contributionGate` filled in as `off` when an older server omitted it. */
+function withGate(cycle: DrawCycleRecord): DrawCycleRecord {
+  return isDrawContributionGate((cycle as { readonly contributionGate?: unknown }).contributionGate)
+    ? cycle
+    : { ...cycle, contributionGate: "off" };
+}
+
+function withSessionGate(session: DrawSessionView): DrawSessionView {
+  return { ...session, cycle: withGate(session.cycle) };
 }
 
 function isListEntry(value: unknown): value is DrawListEntry {
@@ -395,7 +430,7 @@ export async function listCycles(groupId: string, deps: AuthedFetchDeps = {}): P
   if (!result.ok) return result;
   const { cycles } = result.data;
   if (!Array.isArray(cycles) || !cycles.every(isCycle)) return badResponse(result.status);
-  return { ok: true, status: result.status, data: cycles };
+  return { ok: true, status: result.status, data: cycles.map(withGate) };
 }
 
 export interface CreateCycleInput {
@@ -405,6 +440,8 @@ export interface CreateCycleInput {
   readonly totalRounds: number;
   readonly reserveRatioBps: number;
   readonly idempotencyKey: string;
+  /** Chosen once, here: `off` when absent. Changed later with `setContributionGate`. */
+  readonly contributionGate?: DrawContributionGate;
 }
 
 /** `POST /api/draw/cycles` — owner or treasurer. The server computes the pot. */
@@ -415,7 +452,7 @@ export async function createCycle(
   const result = await call("/api/draw/cycles", { method: "POST", body: JSON.stringify(input) }, deps);
   if (!result.ok) return result;
   if (!isCycle(result.data.cycle)) return badResponse(result.status);
-  return { ok: true, status: result.status, data: { cycle: result.data.cycle, replayed: result.data.replayed === true } };
+  return { ok: true, status: result.status, data: { cycle: withGate(result.data.cycle), replayed: result.data.replayed === true } };
 }
 
 /** `GET /api/draw/cycles/[cycleId]` — any member: the cycle and every draw in it. */
@@ -427,7 +464,7 @@ export async function readCycle(
   if (!result.ok) return result;
   const { cycle, draws } = result.data;
   if (!isCycle(cycle) || !Array.isArray(draws) || !draws.every(isListEntry)) return badResponse(result.status);
-  return { ok: true, status: result.status, data: { cycle, draws } };
+  return { ok: true, status: result.status, data: { cycle: withGate(cycle), draws } };
 }
 
 /**
@@ -472,15 +509,67 @@ export async function sendGuarantee(
   return { ok: true, status: result.status, data: { guarantee, replayed: result.data.replayed === true } };
 }
 
-/** `POST /api/draw/draws` — owner or treasurer. The server creates the draw id. */
-export async function openDraw(
-  input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
+/**
+ * `GET /api/draw/contributions?cycleId=` — any member: the DERIVED grid of every member by every
+ * round (`met` / `flagged` / `not_due`), the cycle's effective contribution gate, its policy
+ * changes and the overrides that opened a draw despite a flag.
+ */
+export async function readContributions(cycleId: string, deps: AuthedFetchDeps = {}): Promise<DrawResult<CycleContributions>> {
+  const result = await call(`/api/draw/contributions?cycleId=${encodeURIComponent(cycleId)}`, { method: "GET" }, deps);
+  if (!result.ok) return result;
+  const contributions = parseCycleContributions(result.data.contributions);
+  if (contributions === null) return badResponse(result.status);
+  return { ok: true, status: result.status, data: contributions };
+}
+
+/**
+ * `POST /api/draw/gate` — owner or treasurer changes the cycle's contribution gate, with a reason
+ * (10..1000 characters) that is recorded with who and when. Asking for the policy in force is a replay.
+ */
+export async function setContributionGate(
+  input: { readonly cycleId: string; readonly gate: DrawContributionGate; readonly reason: string },
   deps: AuthedFetchDeps = {}
-): Promise<DrawResult<{ readonly session: DrawSessionView; readonly replayed: boolean }>> {
+): Promise<DrawResult<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }>> {
+  const result = await call("/api/draw/gate", { method: "POST", body: JSON.stringify(input) }, deps);
+  if (!result.ok) return result;
+  if (!isCycle(result.data.cycle)) return badResponse(result.status);
+  return { ok: true, status: result.status, data: { cycle: withGate(result.data.cycle), replayed: result.data.replayed === true } };
+}
+
+function readOpenGate(value: unknown): DrawOpenGate | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  const flagged = parseFlags(row.flagged);
+  if (!isDrawContributionGate(row.policy) || typeof row.overridden !== "boolean" || flagged === null) return null;
+  return { policy: row.policy, flagged, overridden: row.overridden };
+}
+
+/**
+ * `POST /api/draw/draws` — owner or treasurer. The server creates the draw id. Under a `block` gate
+ * with a flagged earlier round the server answers 409 `contribution_gate_blocked` (with `flagged`)
+ * unless `overrideReason` is given, which it records.
+ */
+export async function openDraw(
+  input: {
+    readonly cycleId: string;
+    readonly round?: number;
+    readonly idempotencyKey: string;
+    readonly overrideReason?: string;
+  },
+  deps: AuthedFetchDeps = {}
+): Promise<DrawResult<{ readonly session: DrawSessionView; readonly replayed: boolean; readonly gate: DrawOpenGate | null }>> {
   const result = await call("/api/draw/draws", { method: "POST", body: JSON.stringify(input) }, deps);
   if (!result.ok) return result;
   if (!isSession(result.data.session)) return badResponse(result.status);
-  return { ok: true, status: result.status, data: { session: result.data.session, replayed: result.data.replayed === true } };
+  return {
+    ok: true,
+    status: result.status,
+    data: {
+      session: withSessionGate(result.data.session),
+      replayed: result.data.replayed === true,
+      gate: readOpenGate(result.data.contributionGate)
+    }
+  };
 }
 
 /** `GET /api/draw/draws/[drawId]` — any member: seal hashes and who has released (never a nonce). */
@@ -488,7 +577,7 @@ export async function readSession(drawId: string, deps: AuthedFetchDeps = {}): P
   const result = await call(`/api/draw/draws/${encodeURIComponent(drawId)}`, { method: "GET" }, deps);
   if (!result.ok) return result;
   if (!isSession(result.data.session)) return badResponse(result.status);
-  return { ok: true, status: result.status, data: result.data.session };
+  return { ok: true, status: result.status, data: withSessionGate(result.data.session) };
 }
 
 /** `POST /api/draw/seals` — the signed-in member seals for themselves. No member id is sent. */

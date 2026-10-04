@@ -495,10 +495,10 @@ mode only, behind a demo banner; see §14 for the signed-in flow.
 
 | Route | Who | Notes |
 |---|---|---|
-| `POST /api/draw/cycles` | owner / treasurer | creates a cycle; the pot is computed by the database |
+| `POST /api/draw/cycles` | owner / treasurer | creates a cycle; the pot is computed by the database; `contributionGate?` (`off` default) is the contribution gate policy (§18.2) |
 | `GET /api/draw/cycles?groupId=` | any member | the group's cycles |
 | `GET /api/draw/cycles/[cycleId]` | any member | the cycle and every draw in it, with each draw's state |
-| `POST /api/draw/draws` | owner / treasurer | opens a draw (the server creates its id) for sealing |
+| `POST /api/draw/draws` | owner / treasurer | opens a draw (the server creates its id) for sealing; `overrideReason?` (10..1000 characters) is the recorded reason to open despite a `block` gate (§18.2), which otherwise answers 409 `contribution_gate_blocked` with `flagged: [{ memberId, round }]` |
 | `GET /api/draw/draws/[drawId]` | any member | a draw in progress: seal hashes, and per member only whether a nonce was released |
 | `POST /api/draw/seals` | any eligible member, **for themselves** | `{ drawId, sealed }`; no member id |
 | `POST /api/draw/nonces` | any sealed member, **for themselves** | `{ drawId, nonce }`; only after the commit; never echoed |
@@ -509,6 +509,8 @@ mode only, behind a demo banner; see §14 for the signed-in flow.
 | `POST /api/draw/payouts` | owner / treasurer | posts through `LedgerService.append` |
 | `GET /api/draw/collateral?cycleId=` | any member | the derived collateral view (§17): winners, later rounds with `met` / `flagged` / `not_due`, guarantees, reserve retained |
 | `POST /api/draw/guarantees` | see §17.5 | `{ action: "propose" \| "accept" \| "decline" \| "release" \| "supersede", ... }`; accept and decline only by the guarantor |
+| `GET /api/draw/contributions?cycleId=` | any member | the derived members x rounds grid (§18): `met` / `flagged` / `not_due` for every member and round, the effective gate, its changes and overrides |
+| `POST /api/draw/gate` | owner / treasurer | `{ cycleId, gate: "off" \| "warn" \| "block", reason }` (§18.2); the reason is 10..1000 characters and recorded |
 
 `/verify` and the round read are authenticated but **not** role-gated. A member
 who cannot open the ledger still has to be able to check the draw; that is the
@@ -541,7 +543,9 @@ so the method picks).
 `draw.collateral.api.route.test.ts`, `draw.collateral.ui.test.tsx`,
 `draw.collateral.client.test.ts`, `ledger.attribution.rpc-contract.test.ts`,
 `ledger.attribution.api.route.test.ts`, `ledger.clientAttribution.test.ts`,
-`contribution-feed.attribution.test.tsx`, `home.attribution.test.tsx`). The SQL itself is proven by
+`contribution-feed.attribution.test.tsx`, `home.attribution.test.tsx`, and for §18 `draw.contributions.test.ts`,
+`draw.contributions.client.test.ts`, `draw.contributions.rpc-contract.test.ts`,
+`draw.contributions.ui.test.tsx`, `draw.gate.service.test.ts`, `draw.gate.api.route.test.ts`). The SQL itself is proven by
 `scripts/verify-migrations.sql` against a real Postgres 16, not by vitest. Counts
 are in the report that accompanied the change; run `npx vitest run` for the current
 total.
@@ -660,13 +664,16 @@ at the service level.
   (§16.5). An entry with no bank provenance (cash, a manual entry) can now be
   attributed to the member who paid by an owner or treasurer, as an append-only
   record beside the entry that is labelled as the treasurer's record and never as
-  verified (§17.1). Per-round status is derived for each winner's later rounds
-  (§17.3). Still open: entries carry no cycle or round id of their own, so for
-  anyone who is not a winner there is no per-round figure (only the window "since
-  the cycle started"), and a payer the treasurer never recorded stays unattributed.
+  verified (§17.1). Per-round status is derived for every member and every round
+  (§17.3, §18.1). Still open: entries carry no cycle or round id of their own, so a
+  round is assigned by the treasurer's explicit cycle+round attribution or by order
+  (§18.1), never by something the payer wrote; a payer the treasurer never recorded
+  stays unattributed (and flagged); there is no `partial` status (§18.1).
 - **Collateral beyond a record.** Guarantees are advisory (§17): nothing debits a
-  guarantor or moves money, and the database does not stop the next round from
-  being drawn while a winner is flagged. Enforcement is the group's decision.
+  guarantor or moves money. Whether a flagged round stops the next draw is now the
+  cycle's contribution gate (§18.2), off unless the owner or treasurer chooses
+  `warn` or `block`; the gate is checked when a draw is opened, not when it is
+  committed, and a flag that appears after the draw was opened is not re-checked.
 - **Closing a cycle.** `draw_cycles.closed_at` exists but the table is append-only
   and there is no closing RPC; a cycle is complete when every round is drawn.
 - **Draws committed before M4.4** have no stored nonces. They can be read and
@@ -808,6 +815,12 @@ window is "since the cycle started": the cycle has no cadence and entries have n
 round id, so there is no per-round period, and a member who is not listed has no
 bank-verified entry in the window, which is not the same as unpaid. Member labels are
 the members API's own (email for the owner, "Member xxxxxxxx" otherwise).
+
+**Update (§18).** The per-member list described above ("who has paid", since the
+cycle started) is superseded by the members x rounds grid (§18), which answers it per
+round; `/draw`'s ledger panel now keeps only the totals and the count of entries nobody
+has attributed. `cycleLedgerFigures` still computes the per-member split (it is tested),
+but the screen no longer shows it.
 
 **Update (M4.2 completion, §17.1).** Provenance is now one of two sources of an
 `attribution` on each entry; the figures credit `attribution.memberUserId`, count
@@ -1053,6 +1066,11 @@ whose previous round had been revealed *before the entry was recorded* (so a pay
 made before the previous reveal cannot pay a later round, and a payment from before the
 win pays nothing); one entry pays one round.
 
+**Update (§18).** This derivation is now one SQL function for every member and every
+round (`sened_draw_cycle_member_rounds`); `get_draw_cycle_collateral_v1` is built on it and
+its output is unchanged (the harness compares it with a verbatim copy of the old
+derivation). The paragraph above still describes a winner's later rounds exactly.
+
 `flagged` is a flag, not a verdict. It says the ledger cannot show the contribution,
 not that the member did not pay: they may have paid in a way not yet recorded, and the
 flag clears by itself the moment an attributed entry exists (or returns if that entry
@@ -1100,8 +1118,9 @@ events table through its guarantee's group).
 
 ### 17.6 Advisory, and what it does not do
 
-Nothing here debits a guarantor, moves money, writes the ledger or a posting, or
-blocks a draw (a test asserts the ledger head and entry count are unchanged by every
+Nothing here debits a guarantor, moves money or writes the ledger or a posting. By
+itself it blocks no draw: only the optional contribution gate (§18.2), which a cycle
+opts into, ever holds one (a test asserts the ledger head and entry count are unchanged by every
 guarantee operation, and the contract test asserts the SQL never writes `ledger_*`).
 The reserve is still a heuristic (§7), not a proven equilibrium model; the guarantee is
 a social record, not collateral that can be seized. A member who pays by a route that
@@ -1112,3 +1131,146 @@ is never attributed will be flagged until someone records it.
 Apply the migration together with the application release: `GET /api/ledger/entries`
 and the `/api/sync` pull call `get_ledger_entry_attributions_v1`, so a release against a
 database without the migration fails those reads.
+
+
+## 18. Per-round contributions for everyone, and the contribution gate
+
+`supabase/migrations/20261011100000_contribution_grid_and_gate.sql`, proven by the
+"GRID", "COLLATERAL-GRID" and "GATE" checks in `scripts/verify-migrations.sql` (success
+marker `ALL CONTRIBUTION GRID AND GATE CHECKS PASSED`, also required by
+`scripts/verify-migrations.ps1`). New file only; existing cycles are `off`.
+
+### 18.1 The grid: every member, every round
+
+`get_draw_cycle_contributions_v1(cycle)` (any active member, `sened_ledger_can_access_group`;
+an unknown cycle and one in another group read the same) returns a members x rounds grid.
+Nothing in it is stored: it is derived on every read by `sened_draw_cycle_member_rounds`, the
+§17.3 derivation generalised from "a winner's later rounds" to every (member, round).
+
+**Who is in the grid:** the group's active members, plus anyone who won a round of the cycle
+(a winner who has left still owes the cycle; they are marked inactive and the gate ignores them).
+
+**Status of (member, round):**
+
+| status | meaning |
+|---|---|
+| `met` | a qualifying contribution is assigned to the round |
+| `flagged` | not met, and the round is **due** |
+| `not_due` | not met, and the round is not due |
+
+**There is no `partial`.** An amount under the cycle's contribution never qualified (§17.3), and
+counting it would need a policy nobody has decided: does 150 against 100 pay one round and a half?
+does 60 plus 40 pay a round? So an entry that falls short is simply not counted, the round stays
+flagged until a full payment is attributed, **one qualifying entry pays one round**, and an
+overpayment does not carry over. The screen says so under the grid.
+
+**Due, for every member alike:** *round r is due once the draw for round r has been opened* (a
+`draw_sessions` row, or a legacy commitment, exists for it). That is the rule the collateral view
+already used for a winner's later rounds, now applied to all rounds and all members. It is not
+"once round r-1 is revealed": a draw can be opened only after the previous round is revealed, so
+the two coincide in time, but opening is the event the database can see, and it is the moment the
+treasurer has decided the round starts.
+
+**Qualifying contribution:** unchanged from §17.3 (not reversed; attributed to the member by bank
+provenance, else the current treasurer record; at least the cycle's contribution into `POT_CASH`;
+recorded on or after the cycle's start; not attributed to another cycle).
+
+**Assignment:** an entry whose attribution names this cycle **and** round pays that round (even one
+not yet due, which is then `met`). Otherwise, by order: the member's remaining entries, oldest first,
+each fill the earliest unmet **due** round whose previous round had been revealed *before the entry
+was recorded* (round 1 has no previous round, so only the cycle's start applies).
+
+**Winners, and why nothing about collateral changed.** For a member who won at round `w` (revealed
+at `W`) the entries are split at `W`: an entry recorded **after** `W` can only pay rounds after `w`,
+by exactly the old rule; an entry recorded **at or before** `W` can only pay rounds up to and
+including `w`. So a payment made after a member's win is never taken by one of their earlier rounds;
+a late payment for an earlier flagged round needs an explicit cycle+round attribution. The
+alternative (let it take the earliest unmet round) would have moved a winner's post-win rounds from
+`met` to `flagged` whenever an earlier round was unpaid, and would flap, because which round an entry
+pays would depend on whether a later round had been opened yet. `get_draw_cycle_collateral_v1` is
+rebuilt on the shared function and its output is unchanged: the harness compares it, for every
+winner on a multi-round timeline, with a verbatim copy of the pre-migration derivation, and the
+existing COLLATERAL 1-51 checks pass untouched.
+
+The result is `{ cycleId, groupId, totalRounds, contributionAmount, startedAt, contributionGate,
+nextRound, flaggedCount, rounds: [{ round, dueAt, revealedAt }], members: [{ memberId, active,
+winRound, cells: [{ round, status, entryId, source }] }], gateEvents, overrides }`;
+`flaggedCount` counts flagged cells of active members. Client-side, `parseCycleContributions`
+re-validates it (a met cell names its entry and source, the others name neither; there is exactly
+one cell per round) and `flaggedBefore` / `previewGate` compute what the gate will see.
+
+**`/draw`** shows it as `ContributionGrid`, right under the cycle card: a real table (caption,
+column headers "Round n", row headers), the member column sticky, **scrolling sideways inside its own
+region only** (the page never does), each cell saying `Met` / `Flagged` / `Not yet due` in words
+with a decorative glyph, a met cell saying whether the payer is bank-verified or recorded by the
+treasurer, and the winner's round and "no longer active" marked on the row. English and Amharic
+(`contributions.*`). The ledger panel keeps its totals and the count of entries nobody attributed;
+the old per-member "paid since the cycle began" list is gone because the grid answers it per round.
+
+### 18.2 The gate: a flagged round and the next draw
+
+`draw_cycles.contribution_gate` is `off` (default; every existing cycle), `warn` or `block`, chosen
+in the cycle form (`create_draw_cycle_v1` gains a trailing `p_contribution_gate text default 'off'`).
+`draw_cycles` is append-only, so the column is the **initial** policy; the **effective** policy is the
+latest row of the append-only `draw_cycle_gate_events` (who, when, from, to, a 10..1000 character
+reason), written by `set_draw_cycle_contribution_gate_v1` (owner/treasurer; the policy already in
+force is a replay and records nothing). It is shown on the cycle card and changed from the grid panel.
+
+**Enforcement point: `open_draw_v1`**, when a *new* draw session would be created for round R. The
+gate input is every **active** member's `flagged` cell for a round **before R** (R itself is not
+looked at: it has only just become due).
+
+| policy | at open |
+|---|---|
+| `off` | nothing is computed |
+| `warn` | allowed; the flagged pairs are returned (`contributionGate.flagged`), and `/draw` lists them and requires the owner/treasurer to tick a confirmation before the button works |
+| `block` | refused with `draw_contribution_gate_blocked` (`P0001`, DETAIL = a JSON array of `{ memberId, round }`; HTTP 409 `contribution_gate_blocked` with `flagged`), unless `p_override_reason` (10..1000 characters, trimmed) is supplied |
+
+An override is written in the same transaction as the session to the append-only
+`draw_contribution_gate_overrides`: who, when, the reason, the round opened, the draw, and **exactly
+which flagged (member, round) pairs were overridden**; members read it (`overrides` in the grid
+response, and a "Policy changes and overrides" list on `/draw`). Only an owner or treasurer reaches
+this code at all (the role is checked first, so a plain member, an outsider and an anonymous caller
+are refused before the reason is considered); a supplied reason must be 10..1000 characters even if it
+turns out not to be needed (`draw_override_reason_invalid`), and one that is not needed (`off`, `warn`,
+nothing flagged) is not recorded.
+
+**Why open and not commit.** Opening is the decision point: it is when round R becomes due (the flag
+clock starts), when members start sealing, and when the treasurer commits to running the ceremony.
+Refusing at commit would let the owner open the ceremony, gather every member's seal and only then
+find the block; one override record per opened draw is also a cleaner audit than one per commit retry.
+Replays by idempotency key and the continuation of a draw that is already sealing for the round return
+the existing session and are not gated again (nothing new is opened). **Residual:** a flag that
+appears *after* a draw was opened (say a payment is reversed) is not re-checked at commit, and a
+policy switched to `block` while a draw is already sealing does not stop that draw; the grid keeps
+showing the flag. `commit_draw_from_seals_v1` is unchanged.
+
+**`/draw` opening a draw:** under `warn` or `block`, when something earlier is flagged, a notice
+(`role="alert"` for block) says how many rounds, lists each member and their flagged rounds, and holds
+the button until the confirmation (warn) or a reason of at least 10 characters (block) is given; the
+button then reads "Open round R with this reason". If the grid was stale and the server refuses
+anyway, the refusal is shown in words and the grid is read again.
+
+### 18.3 Who can call what
+
+| RPC | Caller | Identity |
+|---|---|---|
+| `get_draw_cycle_contributions_v1` | any active member | `sened_ledger_can_access_group` |
+| `set_draw_cycle_contribution_gate_v1` | owner or treasurer | `auth.uid()` via `sened_ledger_can_manage_group` |
+| `create_draw_cycle_v1`, `open_draw_v1` | owner or treasurer | as before; the new parameters are optional |
+| `get_draw_cycle_collateral_v1` | any active member | unchanged |
+
+`create_draw_cycle_v1` and `open_draw_v1` change arity, so the old signatures are **dropped** before
+the new ones are created (the same device the bank and commit migrations used; a second overload
+would make the PostgREST call ambiguous). The helpers (`sened_draw_cycle_member_rounds`,
+`sened_draw_cycle_gate_flags`, `sened_draw_cycle_gate`) are granted to nobody. Both audit tables
+have RLS on, every privilege revoked, `select` granted back through a group-access policy, and
+update, delete and truncate refused by triggers (`gate_history_immutable`). Nothing here writes the
+ledger.
+
+### 18.4 Deploy order
+
+Apply the migration together with the application release. The new application sends
+`p_contribution_gate` and `p_override_reason` and reads `/api/draw/contributions`; the previous
+application calls the old arities, which no longer exist. A client that reads a cycle from a server
+without the migration treats the missing `contributionGate` as `off`.

@@ -40,6 +40,7 @@ const cycle: DrawCycleRecord = {
   reserveRatioBps: 1000,
   startedAt: "2026-10-01T10:00:00.000Z",
   closedAt: null,
+  contributionGate: "off",
   createdAt: "2026-10-01T10:00:00.000Z",
   roundsRevealed: 0,
   roundsPaid: 0,

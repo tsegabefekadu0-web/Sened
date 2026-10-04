@@ -1,10 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { DrawError, isDrawError } from "./errors";
-import { isDrawLifecycleState, isDrawProtocolVersion, type DrawErrorCode } from "./types";
+import { isDrawContributionGate, isDrawLifecycleState, isDrawProtocolVersion, type DrawErrorCode } from "./types";
 import type {
   DrawCommitment,
+  DrawContributionGate,
   DrawCycleRecord,
+  DrawGateFlag,
+  DrawOpenGate,
   DrawListEntry,
   DrawMemberNonce,
   DrawPayout,
@@ -62,7 +65,17 @@ export interface DrawRepository {
       readonly reserveRatioBps: number;
       readonly startedAt?: string;
       readonly idempotencyKey: string;
+      /** Defaults to `off`. */
+      readonly contributionGate?: DrawContributionGate;
     },
+    context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }>;
+  /**
+   * Owner or treasurer. Change the cycle's contribution gate. Recorded as an append-only
+   * event with a reason (10..1000 characters); asking for the policy already in force is a replay.
+   */
+  setContributionGate(
+    input: { readonly cycleId: string; readonly gate: DrawContributionGate; readonly reason: string },
     context: DrawActorContext
   ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }>;
   /** Any member of the group. */
@@ -72,11 +85,20 @@ export interface DrawRepository {
     cycleId: string,
     context: DrawActorContext
   ): Promise<{ readonly cycle: DrawCycleRecord; readonly draws: readonly DrawListEntry[] }>;
-  /** Owner or treasurer. The server creates the draw id; the draw starts in `sealing`. */
+  /**
+   * Owner or treasurer. The server creates the draw id; the draw starts in `sealing`.
+   * Under a `block` gate the database refuses (`CONTRIBUTION_GATE_BLOCKED`, carrying who is
+   * flagged for which round) unless `overrideReason` (10..1000 characters) is given, which it records.
+   */
   openDraw(
-    input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
+    input: {
+      readonly cycleId: string;
+      readonly round?: number;
+      readonly idempotencyKey: string;
+      readonly overrideReason?: string;
+    },
     context: DrawActorContext
-  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean }>;
+  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean; readonly gate: DrawOpenGate | null }>;
   /** Any member of the group: seal hashes, and per member only whether a nonce was released. */
   getSession(drawId: string, context: DrawActorContext): Promise<DrawSessionView>;
   /** The signed-in member seals for themselves, while the draw is sealing. */
@@ -104,13 +126,42 @@ export interface DrawRepository {
 export { InMemoryDrawRepository } from "./memoryRepository";
 export type { InMemoryDrawRepositoryOptions, InMemoryGroup } from "./memoryRepository";
 
-function mapSupabaseError(error: { readonly code?: string; readonly message?: string } | null): DrawError {
+/** The `[{ memberId, round }]` the database puts in the DETAIL of a gate refusal; anything else is dropped. */
+function parseGateFlags(details: unknown): readonly DrawGateFlag[] {
+  let value: unknown = details;
+  if (typeof details === "string") {
+    try {
+      value = JSON.parse(details) as unknown;
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(value)) return [];
+  const flags: DrawGateFlag[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const row = entry as Record<string, unknown>;
+    if (typeof row.memberId === "string" && typeof row.round === "number" && Number.isInteger(row.round)) {
+      flags.push({ memberId: row.memberId, round: row.round });
+    }
+  }
+  return flags;
+}
+
+function mapSupabaseError(
+  error: { readonly code?: string; readonly message?: string; readonly details?: string | null } | null
+): DrawError {
   const message = error?.message ?? "draw_storage_failure";
   const tableMissing = error?.code === "PGRST202" || error?.code === "42P01";
   const unavailable = error?.code === "57014" || tableMissing;
 
   if (message === "draw_group_not_found" || message === "draw_not_found") return new DrawError("NOT_FOUND", message);
-  if (message === "draw_invalid_request") return new DrawError("INVALID_REQUEST", message);
+  if (message === "draw_invalid_request" || message === "draw_override_reason_invalid") {
+    return new DrawError("INVALID_REQUEST", message);
+  }
+  if (message === "draw_contribution_gate_blocked") {
+    return new DrawError("CONTRIBUTION_GATE_BLOCKED", message, undefined, parseGateFlags(error?.details));
+  }
   if (message === "draw_already_committed") return new DrawError("ALREADY_COMMITTED", message);
   if (message === "draw_not_eligible") return new DrawError("NOT_ELIGIBLE", message);
   if (message === "draw_nonce_too_early") return new DrawError("NONCE_TOO_EARLY", message);
@@ -214,8 +265,17 @@ function parseCycle(value: unknown): DrawCycleRecord {
     createdAt: str(row.createdAt, "cycle"),
     roundsRevealed: int(row.roundsRevealed, "cycle"),
     roundsPaid: int(row.roundsPaid, "cycle"),
-    nextRound: typeof row.nextRound === "number" ? row.nextRound : null
+    nextRound: typeof row.nextRound === "number" ? row.nextRound : null,
+    // A database without the gate migration has no such key: that is `off`.
+    contributionGate: isDrawContributionGate(row.contributionGate) ? row.contributionGate : "off"
   };
+}
+
+function parseOpenGate(value: unknown): DrawOpenGate | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  if (!isDrawContributionGate(row.policy) || typeof row.overridden !== "boolean") return null;
+  return { policy: row.policy, flagged: parseGateFlags(row.flagged), overridden: row.overridden };
 }
 
 function parseListEntry(value: unknown): DrawListEntry {
@@ -402,6 +462,7 @@ export class SupabaseDrawRepository implements DrawRepository {
       readonly reserveRatioBps: number;
       readonly startedAt?: string;
       readonly idempotencyKey: string;
+      readonly contributionGate?: DrawContributionGate;
     },
     _context: DrawActorContext
   ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
@@ -412,12 +473,30 @@ export class SupabaseDrawRepository implements DrawRepository {
       p_total_rounds: input.totalRounds,
       p_reserve_ratio_bps: input.reserveRatioBps,
       p_started_at: input.startedAt ?? null,
-      p_idempotency_key: input.idempotencyKey
+      p_idempotency_key: input.idempotencyKey,
+      p_contribution_gate: input.contributionGate ?? "off"
     });
     if (error) throw mapSupabaseError(error);
     const payload = data as { readonly cycle?: unknown; readonly replayed?: unknown } | null;
     if (typeof payload?.replayed !== "boolean") {
       throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed cycle result");
+    }
+    return { cycle: parseCycle(payload.cycle), replayed: payload.replayed };
+  }
+
+  async setContributionGate(
+    input: { readonly cycleId: string; readonly gate: DrawContributionGate; readonly reason: string },
+    _context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
+    const { data, error } = await this.client.rpc("set_draw_cycle_contribution_gate_v1", {
+      p_cycle_id: input.cycleId,
+      p_gate: input.gate,
+      p_reason: input.reason
+    });
+    if (error) throw mapSupabaseError(error);
+    const payload = data as { readonly cycle?: unknown; readonly replayed?: unknown } | null;
+    if (typeof payload?.replayed !== "boolean") {
+      throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed gate result");
     }
     return { cycle: parseCycle(payload.cycle), replayed: payload.replayed };
   }
@@ -443,20 +522,26 @@ export class SupabaseDrawRepository implements DrawRepository {
   }
 
   async openDraw(
-    input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
+    input: {
+      readonly cycleId: string;
+      readonly round?: number;
+      readonly idempotencyKey: string;
+      readonly overrideReason?: string;
+    },
     _context: DrawActorContext
-  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean }> {
+  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean; readonly gate: DrawOpenGate | null }> {
     const { data, error } = await this.client.rpc("open_draw_v1", {
       p_cycle_id: input.cycleId,
       p_round: input.round ?? null,
-      p_idempotency_key: input.idempotencyKey
+      p_idempotency_key: input.idempotencyKey,
+      p_override_reason: input.overrideReason ?? null
     });
     if (error) throw mapSupabaseError(error);
-    const payload = data as { readonly session?: unknown; readonly replayed?: unknown } | null;
+    const payload = data as { readonly session?: unknown; readonly replayed?: unknown; readonly contributionGate?: unknown } | null;
     if (typeof payload?.replayed !== "boolean") {
       throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed draw");
     }
-    return { session: parseSession(payload.session), replayed: payload.replayed };
+    return { session: parseSession(payload.session), replayed: payload.replayed, gate: parseOpenGate(payload.contributionGate) };
   }
 
   async getSession(drawId: string, _context: DrawActorContext): Promise<DrawSessionView> {
@@ -544,6 +629,8 @@ export function drawErrorStatus(code: DrawErrorCode): number {
     case "ALREADY_COMMITTED":
     case "ALREADY_REVEALED":
     case "IDEMPOTENCY_CONFLICT":
+    // The request is fine; the cycle's own policy holds the draw until the rounds are met or overridden.
+    case "CONTRIBUTION_GATE_BLOCKED":
       return 409;
     case "INVALID_REQUEST":
     case "INVALID_AMOUNT":

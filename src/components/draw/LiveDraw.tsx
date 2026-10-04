@@ -16,6 +16,7 @@ import {
   postPayout,
   randomHex,
   readCollateral,
+  readContributions,
   readCycle,
   readDraft,
   readDrawGroup,
@@ -25,6 +26,7 @@ import {
   sealForDraw,
   sealStanding,
   sendGuarantee,
+  setContributionGate,
   submitNonce,
   submitSeal,
   userIdFromAccessToken,
@@ -44,13 +46,16 @@ import {
 import { loadCycleLedgerFigures, type LedgerFiguresResult } from "@/lib/draw/ledgerFigures";
 import { triggerHaptic } from "@/lib/draw/haptics";
 import { useActiveGroupPreference } from "@/lib/groups/useActiveGroup";
-import type { DrawCycleRecord, DrawListEntry, DrawSessionView } from "@/lib/draw/types";
-import type { MessageKey } from "@/lib/i18n";
+import { previewGate } from "@/lib/draw/contributions";
+import { DRAW_CONTRIBUTION_GATES } from "@/lib/draw/types";
+import type { DrawContributionGate, DrawCycleRecord, DrawGateFlag, DrawListEntry, DrawSessionView } from "@/lib/draw/types";
+import { translate, type MessageKey } from "@/lib/i18n";
 import { formatEtbDisplay, formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
 
 import { usePrefersReducedMotion } from "./DrawBoard";
 import { MesobCeremony, type CeremonyPhase } from "./MesobCeremony";
 import { CollateralPanel, type CollateralOutcome, type CollateralState } from "./CollateralPanel";
+import { ContributionGrid, type ContributionsState, type GateOutcome } from "./ContributionGrid";
 import { RiskPanel } from "./RiskPanel";
 import { VerifyPanel } from "./VerifyPanel";
 import { liveCopy, t as drawCopy, type DrawLiveKey, type Locale } from "./copy";
@@ -120,6 +125,17 @@ function pickDraw(draws: readonly DrawListEntry[]): DrawListEntry | null {
   return live ?? draws[draws.length - 1] ?? null;
 }
 
+/** Flagged rounds grouped by member, members in order of first appearance, rounds ascending. */
+function flaggedByMember(flags: readonly DrawGateFlag[]): readonly (readonly [string, readonly number[]])[] {
+  const byMember = new Map<string, number[]>();
+  for (const flag of flags) {
+    const rounds = byMember.get(flag.memberId) ?? [];
+    rounds.push(flag.round);
+    byMember.set(flag.memberId, rounds);
+  }
+  return [...byMember.entries()].map(([memberId, rounds]) => [memberId, rounds.sort((left, right) => left - right)] as const);
+}
+
 /**
  * The signed-in draw: the real flow, through `/api/draw/*`.
  *
@@ -177,6 +193,13 @@ function LiveDrawBody({
   const [collateral, setCollateral] = useState<CollateralState>({ kind: "loading" });
   /** Bumped after a guarantee command so the derived view is read again. */
   const [collateralTick, setCollateralTick] = useState(0);
+  const [contributions, setContributions] = useState<ContributionsState>({ kind: "loading" });
+  /** Bumped after a gate change or a refused open so the grid is read again. */
+  const [contributionsTick, setContributionsTick] = useState(0);
+  /** `warn`: the owner/treasurer ticked "I have seen the flagged rounds". */
+  const [gateConfirm, setGateConfirm] = useState(false);
+  /** `block`: the reason for opening despite the flagged rounds. */
+  const [overrideReason, setOverrideReason] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
 
@@ -184,6 +207,7 @@ function LiveDrawBody({
   const [contribution, setContribution] = useState("");
   const [totalRounds, setTotalRounds] = useState("");
   const [reservePercent, setReservePercent] = useState("10");
+  const [cycleGate, setCycleGate] = useState<DrawContributionGate>("off");
   const cycleKey = useRef(newKey("cycle-create"));
 
   const [confirmPayout, setConfirmPayout] = useState(false);
@@ -389,6 +413,45 @@ function LiveDrawBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collateralKey]);
 
+  // The derived members x rounds grid for the selected cycle: re-read whenever the cycle's draws move
+  // (a draw opened or revealed changes what is due), after a gate change and after a refused open.
+  // Nothing is cached or stored: the database derives it each time.
+  const contributionsKey =
+    detail === null
+      ? null
+      : `${detail.cycle.cycleId}:${detail.draws.map((entry) => `${entry.drawId}${entry.state}`).join(",")}:${contributionsTick}`;
+  useEffect(() => {
+    setGateConfirm(false);
+    if (contributionsKey === null || detail === null) {
+      setContributions({ kind: "loading" });
+      return;
+    }
+    let active = true;
+    void readContributions(detail.cycle.cycleId, deps).then((result) => {
+      if (!active) return;
+      setContributions(result.ok ? { kind: "ready", view: result.data } : { kind: "unavailable" });
+    });
+    return () => {
+      active = false;
+    };
+    // The key already covers the cycle and its draws.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contributionsKey]);
+
+  const gateCommand = useCallback(
+    async (gate: DrawContributionGate, reason: string): Promise<GateOutcome> => {
+      if (selectedCycle === null) return { ok: false, key: "drawLive.error.generic", detail: null };
+      const result = await setContributionGate({ cycleId: selectedCycle.cycleId, gate, reason }, deps);
+      if (!result.ok) return { ok: false, key: drawErrorKey(result), detail: result.message };
+      const changed = result.data.cycle;
+      setDetail((current) => (current === null || current.cycle.cycleId !== changed.cycleId ? current : { ...current, cycle: changed }));
+      setCycles((current) => (current === null ? current : current.map((entry) => (entry.cycleId === changed.cycleId ? changed : entry))));
+      setContributionsTick((value) => value + 1);
+      return { ok: true };
+    },
+    [deps, selectedCycle]
+  );
+
   const guaranteeCommand = useCallback(
     async (command: GuaranteeCommand): Promise<CollateralOutcome> => {
       const result = await sendGuarantee(command, deps);
@@ -449,7 +512,8 @@ function LiveDrawBody({
           contributionAmount: each,
           totalRounds: rounds,
           reserveRatioBps: bps,
-          idempotencyKey: cycleKey.current
+          idempotencyKey: cycleKey.current,
+          contributionGate: cycleGate
         },
         deps
       );
@@ -458,6 +522,7 @@ function LiveDrawBody({
       setCycleName("");
       setContribution("");
       setTotalRounds("");
+      setCycleGate("off");
       await loadCycles(group.groupId, result.data.cycle.cycleId);
     });
 
@@ -469,12 +534,29 @@ function LiveDrawBody({
   const openDrawAction = () =>
     run("open", async () => {
       if (selectedCycle === null) return;
+      const gate = contributions.kind === "ready" ? previewGate(contributions.view) : null;
+      const reason = overrideReason.trim();
+      if (gate !== null && gate.needsOverride && reason.length < 10) {
+        return setProblem({ key: "drawLive.gateOverrideShort" });
+      }
       // A new key each time: an abandoned draw must be replaceable by a fresh one.
       const result = await openDraw(
-        { cycleId: selectedCycle.cycleId, idempotencyKey: newKey("draw-open") },
+        {
+          cycleId: selectedCycle.cycleId,
+          idempotencyKey: newKey("draw-open"),
+          // Only sent when the gate asked for it; the database ignores a reason it does not need.
+          ...(gate !== null && gate.needsOverride ? { overrideReason: reason } : {})
+        },
         deps
       );
-      if (!result.ok) return fail(result);
+      if (!result.ok) {
+        fail(result);
+        // The gate may have changed since the grid was read: show what the server now sees.
+        if (result.code === "contribution_gate_blocked") setContributionsTick((value) => value + 1);
+        return;
+      }
+      setOverrideReason("");
+      setGateConfirm(false);
       await loadCycle(selectedCycle.cycleId, result.data.session.drawId);
     });
 
@@ -622,6 +704,13 @@ function LiveDrawBody({
       : copy.roundLabel(1, 1);
   const canPay = isTreasurer && round1 !== null && round1.state === "revealed" && check !== null && check.trusted;
   const stateLabel = (state: DrawListEntry["state"]) => t(`drawLive.lifecycle.${state}`);
+  const gatePreview = contributions.kind === "ready" ? previewGate(contributions.view) : null;
+  // The open button waits for the grid when a gate is in force, and for the owner/treasurer's
+  // confirmation (warn) or reason (block) when something earlier is flagged.
+  const openHeld =
+    (contributions.kind === "loading" && cycle !== null && cycle.contributionGate !== "off") ||
+    (gatePreview !== null && gatePreview.needsConfirm && !gateConfirm) ||
+    (gatePreview !== null && gatePreview.needsOverride && overrideReason.trim().length < 10);
   const liveSealingForNext =
     detail !== null &&
     cycle !== null &&
@@ -720,6 +809,8 @@ function LiveDrawBody({
                     <dd>{(cycle.reserveRatioBps / 100).toFixed(2)} %</dd>
                     <dt className="text-[#6F625D]">{t("drawLive.cycleStarted")}</dt>
                     <dd>{cycle.startedAt.slice(0, 10)}</dd>
+                    <dt className="text-[#6F625D]">{t("drawLive.cycleGate")}</dt>
+                    <dd data-testid="cycle-gate">{translate(locale, `contributions.gate.policy.${cycle.contributionGate}` as MessageKey)}</dd>
                   </dl>
                   {potMembers(cycle) !== null && potMembers(cycle) !== readyGroup.members.length ? (
                     <p data-testid="cycle-roster-drift" role="status" className={NOTICE}>
@@ -785,6 +876,25 @@ function LiveDrawBody({
                     />
                   </label>
                 </div>
+                <label className="block">
+                  <span className={LABEL}>{t("drawLive.gateLabel")}</span>
+                  <select
+                    className={FIELD}
+                    data-testid="cycle-gate-select"
+                    value={cycleGate}
+                    onChange={(event) => {
+                      touchCycleForm();
+                      setCycleGate(event.target.value as DrawContributionGate);
+                    }}
+                  >
+                    {DRAW_CONTRIBUTION_GATES.map((gate) => (
+                      <option key={gate} value={gate}>
+                        {t(`drawLive.gateOption.${gate}`)}
+                      </option>
+                    ))}
+                  </select>
+                  <span className={HINT}>{t("drawLive.gateHint")}</span>
+                </label>
                 {normaliseAmount(contribution) !== null ? (
                   <p data-testid="cycle-pot-preview" className="text-[12px] font-semibold text-[#1C1410]">
                     {t("drawLive.cyclePotPreview", {
@@ -807,6 +917,17 @@ function LiveDrawBody({
           ) : null}
         </section>
 
+        {cycle !== null && detail !== null ? (
+          <ContributionGrid
+            locale={locale}
+            state={contributions}
+            myUserId={myUserId}
+            isTreasurer={isTreasurer}
+            labelFor={labelFor}
+            onSetGate={gateCommand}
+          />
+        ) : null}
+
         {cycle !== null ? (
           <section className={CARD} aria-label={t("drawLive.ledgerTitle")} data-draw-panel="ledger" data-testid="ledger-figures">
             <h3 className={HEADING}>{t("drawLive.ledgerTitle")}</h3>
@@ -822,43 +943,6 @@ function LiveDrawBody({
                     date: cycle.startedAt.slice(0, 10)
                   })}
                 </p>
-                {ledger.figures.byMember.length > 0 ? (
-                  <div data-testid="ledger-paid-members" className="mt-2">
-                    <p className={HINT}>{t("drawLive.ledgerPaidTitle")}</p>
-                    <ul className="mt-1 space-y-1">
-                      {ledger.figures.byMember.map((figure) => (
-                        <li
-                          key={figure.memberUserId}
-                          data-testid="ledger-paid-member"
-                          className="flex items-center justify-between gap-2 rounded-lg bg-[#F5EFEB] px-2.5 py-1.5 text-[12px]"
-                        >
-                          <span className="min-w-0 truncate font-semibold">
-                            {labelFor(figure.memberUserId)}
-                            {figure.memberUserId === myUserId ? ` ${t("drawLive.you")}` : ""}
-                          </span>
-                          <span className="shrink-0 text-right text-[11px] text-[#6F625D]">
-                            {t("drawLive.ledgerPaidRow", {
-                              total: formatEtbDisplay(figure.total),
-                              currency: copy.currency,
-                              count: figure.count,
-                              verified: figure.verifiedCount,
-                              treasurer: figure.treasurerCount
-                            })}
-                            {figure.treasurerCount > 0 && figure.verifiedCount === 0 ? (
-                              <span data-testid="ledger-treasurer-mark" className="block font-semibold text-[#6B5433]">
-                                {t("drawLive.ledgerTreasurerMark")}
-                              </span>
-                            ) : null}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : ledger.figures.count > 0 ? (
-                  <p data-testid="ledger-no-verified" className={HINT}>
-                    {t("drawLive.ledgerNoVerified")}
-                  </p>
-                ) : null}
                 {ledger.figures.unattributedCount > 0 ? (
                   <p data-testid="ledger-unattributed-entries" className={HINT}>
                     {t("drawLive.ledgerUnattributed", {
@@ -948,8 +1032,66 @@ function LiveDrawBody({
             {isTreasurer && cycle.nextRound !== null && !liveSealingForNext ? (
               <>
                 <p className={HINT}>{t("drawLive.openDetail")}</p>
-                <button type="button" data-testid="open-draw" className={`${BUTTON} mt-2`} disabled={busy !== null} onClick={() => void openDrawAction()}>
-                  {busy === "open" ? t("drawLive.working") : t("drawLive.openAction", { round: cycle.nextRound })}
+                {gatePreview !== null && gatePreview.flagged.length > 0 && gatePreview.round !== null ? (
+                  <div
+                    data-testid="open-gate"
+                    data-gate-policy={gatePreview.policy}
+                    role={gatePreview.needsOverride ? "alert" : "status"}
+                    className={NOTICE}
+                  >
+                    <p className="font-bold">
+                      {t(gatePreview.needsOverride ? "drawLive.gateBlockedTitle" : "drawLive.gateWarnTitle")}
+                    </p>
+                    <p className="mt-1 font-normal">
+                      {t(gatePreview.needsOverride ? "drawLive.gateBlockedBody" : "drawLive.gateWarnBody", {
+                        count: gatePreview.flagged.length,
+                        round: gatePreview.round
+                      })}
+                    </p>
+                    <ul data-testid="open-gate-flagged" className="mt-1 list-disc pl-4 font-normal">
+                      {flaggedByMember(gatePreview.flagged).map(([memberId, rounds]) => (
+                        <li key={memberId}>{t("drawLive.gateFlaggedRow", { member: labelFor(memberId), rounds: rounds.join(", ") })}</li>
+                      ))}
+                    </ul>
+                    {gatePreview.needsConfirm ? (
+                      <label className="mt-2 flex items-start gap-2 font-normal">
+                        <input
+                          type="checkbox"
+                          data-testid="open-gate-confirm"
+                          checked={gateConfirm}
+                          onChange={(event) => setGateConfirm(event.target.checked)}
+                          className="mt-0.5 h-4 w-4 accent-[#C6532B]"
+                        />
+                        <span>{t("drawLive.gateWarnConfirm")}</span>
+                      </label>
+                    ) : (
+                      <label className="mt-2 block font-normal">
+                        <span className={LABEL}>{t("drawLive.gateOverrideReason")}</span>
+                        <textarea
+                          data-testid="open-gate-reason"
+                          className={FIELD}
+                          rows={2}
+                          maxLength={1000}
+                          value={overrideReason}
+                          onChange={(event) => setOverrideReason(event.target.value)}
+                        />
+                        <span className={HINT}>{t("drawLive.gateOverrideNote")}</span>
+                      </label>
+                    )}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  data-testid="open-draw"
+                  className={`${BUTTON} mt-2`}
+                  disabled={busy !== null || openHeld}
+                  onClick={() => void openDrawAction()}
+                >
+                  {busy === "open"
+                    ? t("drawLive.working")
+                    : gatePreview?.needsOverride
+                      ? t("drawLive.gateOverrideAction", { round: cycle.nextRound })
+                      : t("drawLive.openAction", { round: cycle.nextRound })}
                 </button>
               </>
             ) : null}

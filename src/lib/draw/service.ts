@@ -12,11 +12,13 @@ import {
 } from "./rotation";
 import { mapDrawError, type DrawActorContext, type DrawRepository } from "./repository";
 import type {
+  DrawContributionGate,
   DrawCycleRecord,
   DrawHasher,
   DrawListEntry,
   DrawMember,
   DrawMemberNonce,
+  DrawOpenGate,
   DrawRiskAssessment,
   DrawRound,
   DrawSessionView,
@@ -379,11 +381,24 @@ export class DrawService {
       readonly reserveRatioBps: number;
       readonly startedAt?: string;
       readonly idempotencyKey: string;
+      readonly contributionGate?: DrawContributionGate;
     },
     context: DrawActorContext
   ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
     try {
       return await this.repository.createCycle(input, context);
+    } catch (error) {
+      throw mapDrawError(error);
+    }
+  }
+
+  /** Owner or treasurer (decided by the database): change the cycle's contribution gate, with a reason. */
+  async setContributionGate(
+    input: { readonly cycleId: string; readonly gate: DrawContributionGate; readonly reason: string },
+    context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
+    try {
+      return await this.repository.setContributionGate(input, context);
     } catch (error) {
       throw mapDrawError(error);
     }
@@ -410,9 +425,14 @@ export class DrawService {
 
   /** Owner or treasurer. The draw id is created by the server. */
   async openDraw(
-    input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
+    input: {
+      readonly cycleId: string;
+      readonly round?: number;
+      readonly idempotencyKey: string;
+      readonly overrideReason?: string;
+    },
     context: DrawActorContext
-  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean }> {
+  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean; readonly gate: DrawOpenGate | null }> {
     try {
       return await this.repository.openDraw(input, context);
     } catch (error) {

@@ -3134,10 +3134,10 @@ declare
   fn text;
 begin
   foreach fn in array array[
-    'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text)',
+    'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text)',
     'public.list_draw_cycles_v1(uuid)',
     'public.get_draw_cycle_v1(uuid)',
-    'public.open_draw_v1(uuid, integer, text)',
+    'public.open_draw_v1(uuid, integer, text, text)',
     'public.get_draw_session_v1(uuid)',
     'public.submit_draw_seal_v1(uuid, text)',
     'public.submit_draw_nonce_v1(uuid, text)',
@@ -5094,5 +5094,789 @@ begin
   end if;
 end;
 $attr$;
+
+-- ---------------------------------------------------------------------------
+-- CONTRIBUTION GRID AND GATE (migration 20261011100000)
+--
+-- GRID. get_draw_cycle_contributions_v1 derives met / flagged / not_due for EVERY
+-- member and EVERY round, on read, with the same qualifying-contribution rules as the
+-- collateral view. Checks: nothing is due before a draw is opened; a non-winner's
+-- rounds are met / flagged / not_due as documented; a bank-verified payment counts by
+-- provenance; an amount under the share does not; late payments clear the earliest
+-- unmet round of a non-winner; an explicit cycle+round attribution assigns its round
+-- (even one not due); another cycle's attribution is ignored; a reversal clears `met`;
+-- a winner's post-win payment never clears a pre-win round (explicit attribution does);
+-- and a winner's output in get_draw_cycle_collateral_v1 equals both the grid and a
+-- verbatim copy of the pre-migration derivation.
+--
+-- GATE. off / warn / block at creation (default off, also for rows that predate the
+-- column); a change by owner/treasurer only, with a reason, as an append-only event;
+-- open_draw_v1 refuses under `block` while an active member has a flagged round before
+-- the round being opened, unless an owner/treasurer gives a 10..1000 character reason,
+-- which is recorded (who, when, reason, which rounds) append-only; `warn` allows;
+-- `off` computes nothing; an outsider and a plain member are refused everywhere;
+-- the tables are append-only and read-only to clients.
+-- ---------------------------------------------------------------------------
+-- The attribution checks above ended with `set constraints all immediate`; ledger entries and
+-- their postings are written in separate statements, so deferral is restored for this section.
+set constraints all deferred;
+
+create or replace function pg_temp.grid_cell(p_res jsonb, p_member uuid, p_round integer)
+returns text
+language sql
+as $$
+  select c ->> 'status'
+  from jsonb_array_elements(p_res -> 'members') m, jsonb_array_elements(m -> 'cells') c
+  where m ->> 'memberId' = p_member::text and (c ->> 'round')::int = p_round;
+$$;
+
+create or replace function pg_temp.grid_cell_json(p_res jsonb, p_member uuid, p_round integer)
+returns jsonb
+language sql
+as $$
+  select c
+  from jsonb_array_elements(p_res -> 'members') m, jsonb_array_elements(m -> 'cells') c
+  where m ->> 'memberId' = p_member::text and (c ->> 'round')::int = p_round;
+$$;
+
+-- All of one member's statuses as 'met,flagged,not_due,...' in round order.
+create or replace function pg_temp.grid_row(p_res jsonb, p_member uuid)
+returns text
+language sql
+as $$
+  select string_agg(c ->> 'status', ',' order by (c ->> 'round')::int)
+  from jsonb_array_elements(p_res -> 'members') m, jsonb_array_elements(m -> 'cells') c
+  where m ->> 'memberId' = p_member::text;
+$$;
+
+-- Post a contribution as `p_owner` and (optionally) attribute it to `p_member`.
+create or replace function pg_temp.fx_pay(
+  p_owner uuid, p_group uuid, p_key text, p_amount text, p_cash uuid, p_income uuid,
+  p_member uuid default null, p_cycle uuid default null, p_round integer default null
+)
+returns uuid
+language plpgsql
+as $$
+declare
+  entry_uuid uuid;
+begin
+  perform set_config('request.jwt.claim.sub', p_owner::text, true);
+  entry_uuid := (public.post_ledger_entry_v1(p_group, p_key, now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', p_cash, 'direction', 'debit', 'amount', p_amount),
+                      jsonb_build_object('accountId', p_income, 'direction', 'credit', 'amount', p_amount))) -> 'entry' ->> 'id')::uuid;
+  if p_member is not null then
+    perform public.record_ledger_entry_attribution_v1(p_group, entry_uuid, p_member, p_cycle, p_round);
+  end if;
+  return entry_uuid;
+end;
+$$;
+
+create or replace function pg_temp.fx_reverse(p_owner uuid, p_group uuid, p_key text, p_entry uuid, p_amount text, p_cash uuid, p_income uuid)
+returns void
+language plpgsql
+as $$
+begin
+  perform set_config('request.jwt.claim.sub', p_owner::text, true);
+  perform public.post_ledger_entry_v1(p_group, p_key, now(), 'correction', p_entry,
+    'Reversing this payment, recorded in error.',
+    jsonb_build_array(jsonb_build_object('accountId', p_cash, 'direction', 'credit', 'amount', p_amount),
+                      jsonb_build_object('accountId', p_income, 'direction', 'debit', 'amount', p_amount)));
+end;
+$$;
+
+-- Like expect_error, but returns the DETAIL of the error (as jsonb when it parses).
+create or replace function pg_temp.expect_error_detail(p_uid text, p_sql text, p_msg text, p_state text)
+returns jsonb
+language plpgsql
+as $$
+declare
+  got_msg text;
+  got_state text;
+  got_detail text;
+begin
+  perform set_config('request.jwt.claim.sub', coalesce(p_uid, ''), true);
+  begin
+    set local role authenticated;
+    execute p_sql;
+    reset role;
+    raise exception 'no error' using errcode = 'XX999';
+  exception when others then
+    get stacked diagnostics got_detail = pg_exception_detail;
+    got_msg := sqlerrm;
+    got_state := sqlstate;
+  end;
+  reset role;
+  if got_state = 'XX999' then
+    raise exception 'EXPECT FAILED: no error from [%], wanted % %', p_sql, p_state, p_msg;
+  end if;
+  if got_msg <> p_msg or got_state <> p_state then
+    raise exception 'EXPECT FAILED: [%] wanted % %, got % %', p_sql, p_state, p_msg, got_state, got_msg;
+  end if;
+  return got_detail::jsonb;
+end;
+$$;
+
+-- A verbatim copy of the pre-migration derivation of one winner's owed rounds
+-- (get_draw_cycle_collateral_v1 as of 20261010100000), for the unchanged-output check.
+create or replace function pg_temp.legacy_owed(p_cycle_id uuid, p_member uuid, p_win_round integer, p_total integer)
+returns jsonb
+language plpgsql
+as $$
+declare
+  owed jsonb := '[]'::jsonb;
+  used uuid[] := array[]::uuid[];
+  round_no integer;
+  due_at timestamptz;
+  prev_at timestamptz;
+  found_entry uuid;
+  found_source text;
+  status text;
+begin
+  for round_no in (p_win_round + 1) .. p_total loop
+    select min(opened.at_time) into due_at
+    from (
+      select s.opened_at as at_time from public.draw_sessions s
+      where s.cycle_id = p_cycle_id and s.round = round_no
+      union all
+      select cm2.committed_at from public.draw_commitments cm2
+      where cm2.cycle_id = p_cycle_id and cm2.round = round_no
+    ) opened;
+    select min(rv2.revealed_at) into prev_at
+    from public.draw_commitments cm3
+    join public.draw_reveals rv2 on rv2.draw_id = cm3.draw_id
+    where cm3.cycle_id = p_cycle_id and cm3.round = round_no - 1;
+
+    found_entry := null;
+    found_source := null;
+    select c.entry_id, c.source into found_entry, found_source
+    from public.sened_collateral_member_entries(p_cycle_id, p_member) c
+    where c.round = round_no
+    order by c.recorded_at, c.entry_id
+    limit 1;
+    if found_entry is null and due_at is not null and prev_at is not null then
+      select c.entry_id, c.source into found_entry, found_source
+      from public.sened_collateral_member_entries(p_cycle_id, p_member) c
+      where c.round is null
+        and c.recorded_at > prev_at
+        and c.entry_id <> all (used)
+      order by c.recorded_at, c.entry_id
+      limit 1;
+      if found_entry is not null then
+        used := used || found_entry;
+      end if;
+    end if;
+    if found_entry is not null then
+      status := 'met';
+    elsif due_at is not null then
+      status := 'flagged';
+    else
+      status := 'not_due';
+    end if;
+    owed := owed || jsonb_build_array(jsonb_build_object(
+      'round', round_no,
+      'status', status,
+      'dueAt', case when due_at is null then null else public.sened_ts_iso(due_at) end,
+      'entryId', found_entry,
+      'source', found_source
+    ));
+  end loop;
+  return owed;
+end;
+$$;
+
+insert into auth.users (id, email) values
+  ('aaaaaaaa-1000-4000-8000-000000000001', 'grid-owner@example.test'),
+  ('aaaaaaaa-1000-4000-8000-000000000002', 'grid-a@example.test'),
+  ('aaaaaaaa-1000-4000-8000-000000000003', 'grid-b@example.test'),
+  ('aaaaaaaa-1000-4000-8000-000000000004', 'grid-c@example.test'),
+  ('aaaaaaaa-2000-4000-8000-000000000001', 'gate-owner@example.test'),
+  ('aaaaaaaa-2000-4000-8000-000000000002', 'gate-treasurer@example.test'),
+  ('aaaaaaaa-2000-4000-8000-000000000003', 'gate-r@example.test'),
+  ('aaaaaaaa-2000-4000-8000-000000000004', 'gate-s@example.test')
+on conflict (id) do nothing;
+
+do $grid$
+declare
+  go constant uuid := 'aaaaaaaa-1000-4000-8000-000000000001';
+  ga constant uuid := 'aaaaaaaa-1000-4000-8000-000000000002';
+  gb constant uuid := 'aaaaaaaa-1000-4000-8000-000000000003';
+  gc constant uuid := 'aaaaaaaa-1000-4000-8000-000000000004';
+  outsider constant text := '44444444-4444-4444-8444-444444444444';
+  grp uuid; tnt uuid; cash uuid; income uuid;
+  k uuid; k2 uuid;
+  binding_b uuid := 'cccccccc-0000-4000-8000-0000000000a2';
+  res jsonb; res2 jsonb; res3 jsonb;
+  w jsonb;
+  n bigint;
+  ea1 uuid; eb1 uuid; eo50 uuid; ea2 uuid; ec1 uuid; eb2 uuid; eo3 uuid; ebx uuid;
+  eo4 uuid; eo5 uuid; eo6 uuid; eb3 uuid;
+  head_a record; head_b record;
+  legacy jsonb;
+  cell jsonb;
+begin
+  -- Fixtures: group with owner O and members A, B, C (four active members).
+  perform set_config('request.jwt.claim.sub', go::text, true);
+  grp := (public.sened_ledger_provision_group_v1('Grid equb') ->> 'groupId')::uuid;
+  select tenant_id into tnt from public.ledger_groups where id = grp;
+  select id into cash from public.ledger_accounts where group_id = grp and code = 'POT_CASH';
+  select id into income from public.ledger_accounts where group_id = grp and code = 'CONTRIBUTION_INCOME';
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status) values
+    (grp, tnt, ga, 'member', 'active'),
+    (grp, tnt, gb, 'member', 'active'),
+    (grp, tnt, gc, 'member', 'active');
+
+  k := (pg_temp.call_as(go::text, format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 4, 1000, now() - interval ''1 day'', %L)', grp, 'Grid cycle', '100.00', 'grid-k')) -> 'cycle' ->> 'cycleId')::uuid;
+  k2 := (pg_temp.call_as(go::text, format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 4, 1000, now() - interval ''1 day'', %L)', grp, 'Grid other cycle', '100.00', 'grid-k2')) -> 'cycle' ->> 'cycleId')::uuid;
+
+  -- =========================================================================
+  -- GRID 1-3: nothing is due before a draw is opened; shape; access
+  -- =========================================================================
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if (select array_agg(key order by key) from jsonb_object_keys(res) key)
+     is distinct from array['contributionAmount','contributionGate','cycleId','flaggedCount','gateEvents','groupId','members','nextRound','overrides','rounds','startedAt','totalRounds'] then
+    raise exception 'GRID 1 FAILED: unexpected top-level keys %', res;
+  end if;
+  if jsonb_array_length(res -> 'members') <> 4 or jsonb_array_length(res -> 'rounds') <> 4
+     or (res ->> 'flaggedCount')::int <> 0 or (res ->> 'contributionGate') <> 'off'
+     or (res ->> 'nextRound')::int <> 1 or (res ->> 'contributionAmount') <> '100.00' or (res ->> 'totalRounds')::int <> 4
+     or jsonb_array_length(res -> 'gateEvents') <> 0 or jsonb_array_length(res -> 'overrides') <> 0 then
+    raise exception 'GRID 2 FAILED: unexpected grid before any draw is opened: %', res;
+  end if;
+  if (select count(*) from jsonb_array_elements(res -> 'members') m, jsonb_array_elements(m -> 'cells') c where c ->> 'status' <> 'not_due') <> 0
+     or (select count(*) from jsonb_array_elements(res -> 'members') m, jsonb_array_elements(m -> 'cells') c) <> 16 then
+    raise exception 'GRID 3 FAILED: a round is not "not_due" before its draw is opened: %', res;
+  end if;
+  if (select array_agg(key order by key) from jsonb_object_keys(res -> 'members' -> 0) key)
+       is distinct from array['active','cells','memberId','winRound']
+     or (select array_agg(key order by key) from jsonb_object_keys(res -> 'members' -> 0 -> 'cells' -> 0) key)
+       is distinct from array['entryId','round','source','status']
+     or (select array_agg(key order by key) from jsonb_object_keys(res -> 'rounds' -> 0) key)
+       is distinct from array['dueAt','revealedAt','round'] then
+    raise exception 'GRID 4 FAILED: unexpected member, cell or round keys: %', res;
+  end if;
+  perform pg_temp.expect_error(outsider, format('select public.get_draw_cycle_contributions_v1(%L)', k), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error('', format('select public.get_draw_cycle_contributions_v1(%L)', k), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error(go::text, format('select public.get_draw_cycle_contributions_v1(%L)', gen_random_uuid()), 'draw_forbidden', '42501');
+
+  -- =========================================================================
+  -- GRID 5-: round 1 opened. Every member owes it, winner or not.
+  -- =========================================================================
+  perform pg_temp.call_as(go::text, format('select public.open_draw_v1(%L, null, %L)', k, 'grid-open-1'));
+  res := pg_temp.call_as(ga::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if (res ->> 'flaggedCount')::int <> 4
+     or pg_temp.grid_row(res, go) <> 'flagged,not_due,not_due,not_due'
+     or pg_temp.grid_row(res, gc) <> 'flagged,not_due,not_due,not_due'
+     or (res -> 'rounds' -> 0 -> 'dueAt') = 'null'::jsonb or (res -> 'rounds' -> 1 -> 'dueAt') <> 'null'::jsonb then
+    raise exception 'GRID 5 FAILED: round 1 is not flagged for every member once its draw is open: %', res;
+  end if;
+
+  ea1 := pg_temp.fx_pay(go, grp, 'grid-ea1', '100.00', cash, income, ga);
+  eo50 := pg_temp.fx_pay(go, grp, 'grid-eo50', '50.00', cash, income, go);
+  eb1 := pg_temp.fx_pay(go, grp, 'bank-verified-grid-eb1', '100.00', cash, income);
+  insert into public.bank_account_bindings (id,user_id,tenant_id,group_id,ledger_account_id,provider,account_label,account_fingerprint_hmac,sender_fingerprint_hmac,receiver_fingerprint_hmac)
+  values (binding_b, gb, tnt, grp, cash, 'cbe', 'GB', repeat('1',64), repeat('2',64), repeat('3',64));
+  insert into public.bank_verification_intents (id,user_id,tenant_id,group_id,bank_account_binding_id,ledger_account_id,provider,provider_reference_hmac,idempotency_key,request_fingerprint,amount,direction,occurred_at)
+  values ('dddddddd-0000-4000-8000-0000000000a1', gb, tnt, grp, binding_b, cash, 'cbe', repeat('5',64), 'grid-bank-1', repeat('e',64), 100.00, 'inbound', now());
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('4',64), verified_at = now(), ledger_entry_id = eb1
+  where id = 'dddddddd-0000-4000-8000-0000000000a1';
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, ga) <> 'met,not_due,not_due,not_due'
+     or (pg_temp.grid_cell_json(res, ga, 1) ->> 'source') <> 'treasurer' or (pg_temp.grid_cell_json(res, ga, 1) ->> 'entryId')::uuid <> ea1
+     or pg_temp.grid_row(res, gb) <> 'met,not_due,not_due,not_due'
+     or (pg_temp.grid_cell_json(res, gb, 1) ->> 'source') <> 'bank_verification' or (pg_temp.grid_cell_json(res, gb, 1) ->> 'entryId')::uuid <> eb1 THEN
+    raise exception 'GRID 6 FAILED: a treasurer-attributed or a bank-verified payment did not meet round 1: %', res;
+  end if;
+  if pg_temp.grid_row(res, go) <> 'flagged,not_due,not_due,not_due' or pg_temp.grid_row(res, gc) <> 'flagged,not_due,not_due,not_due'
+     or (res ->> 'flaggedCount')::int <> 2 then
+    raise exception 'GRID 7 FAILED: an under-share payment, or no payment, did not leave round 1 flagged: %', res;
+  end if;
+
+  -- round 1 revealed: A wins
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, k, 1, ga, go);
+  perform pg_sleep(0.02);
+  perform pg_temp.call_as(go::text, format('select public.open_draw_v1(%L, 2, %L)', k, 'grid-open-2'));
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, ga) <> 'met,flagged,not_due,not_due'
+     or (select (m ->> 'winRound')::int from jsonb_array_elements(res -> 'members') m where m ->> 'memberId' = ga::text) <> 1
+     or (select m -> 'winRound' from jsonb_array_elements(res -> 'members') m where m ->> 'memberId' = gb::text) <> 'null'::jsonb
+     or (res -> 'rounds' -> 0 ->> 'revealedAt') is null or (res -> 'rounds' -> 1 -> 'revealedAt') <> 'null'::jsonb
+     or (res ->> 'nextRound')::int <> 2 then
+    raise exception 'GRID 8 FAILED: round 2 is not flagged for the winner and the others, or winRound/revealedAt are wrong: %', res;
+  end if;
+
+  -- payments after the reveal
+  ea2 := pg_temp.fx_pay(go, grp, 'grid-ea2', '100.00', cash, income, ga);
+  ec1 := pg_temp.fx_pay(go, grp, 'grid-ec1', '100.00', cash, income, gc);
+  eb2 := pg_temp.fx_pay(go, grp, 'grid-eb2', '100.00', cash, income, gb);
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, ga) <> 'met,met,not_due,not_due'
+     or (pg_temp.grid_cell_json(res, ga, 2) ->> 'entryId')::uuid <> ea2 then
+    raise exception 'GRID 9 FAILED: a winner''s post-win payment did not meet round 2: %', res;
+  end if;
+  if pg_temp.grid_row(res, gc) <> 'met,flagged,not_due,not_due'
+     or (pg_temp.grid_cell_json(res, gc, 1) ->> 'entryId')::uuid <> ec1 then
+    raise exception 'GRID 10 FAILED: a non-winner''s late payment did not clear their EARLIEST unmet round (1), leaving round 2 flagged: %', res;
+  end if;
+  if pg_temp.grid_row(res, gb) <> 'met,met,not_due,not_due'
+     or (pg_temp.grid_cell_json(res, gb, 2) ->> 'entryId')::uuid <> eb2 or (pg_temp.grid_cell_json(res, gb, 2) ->> 'source') <> 'treasurer'
+     or pg_temp.grid_row(res, go) <> 'flagged,flagged,not_due,not_due'
+     or (res ->> 'flaggedCount')::int <> 3 then
+    raise exception 'GRID 11 FAILED: round 2 statuses of B / O or the flagged count are wrong: %', res;
+  end if;
+
+  -- an explicit cycle+round attribution assigns a round that is not due yet
+  eo3 := pg_temp.fx_pay(go, grp, 'grid-eo3', '100.00', cash, income, go, k, 3);
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, go) <> 'flagged,flagged,met,not_due'
+     or (pg_temp.grid_cell_json(res, go, 3) ->> 'entryId')::uuid <> eo3 then
+    raise exception 'GRID 12 FAILED: an explicit cycle+round attribution did not assign round 3 (not yet due): %', res;
+  end if;
+  -- an attribution naming ANOTHER cycle is ignored here and counts there
+  ebx := pg_temp.fx_pay(go, grp, 'grid-ebx', '100.00', cash, income, gb, k2, 1);
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  res2 := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k2));
+  if pg_temp.grid_row(res, gb) <> 'met,met,not_due,not_due'
+     or pg_temp.grid_cell(res2, gb, 1) <> 'met' or (pg_temp.grid_cell_json(res2, gb, 1) ->> 'entryId')::uuid <> ebx
+     or pg_temp.grid_cell(res2, ga, 1) <> 'not_due' then
+    raise exception 'GRID 13 FAILED: another cycle''s attribution leaked into this cycle (or did not count in its own): % / %', res, res2;
+  end if;
+
+  -- a reversal clears `met`
+  perform pg_temp.fx_reverse(go, grp, 'grid-eb2-fix', eb2, '100.00', cash, income);
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, gb) <> 'met,flagged,not_due,not_due' or (res ->> 'flaggedCount')::int <> 4 then
+    raise exception 'GRID 14 FAILED: reversing a payment did not make its round flagged again: %', res;
+  end if;
+  eb3 := pg_temp.fx_pay(go, grp, 'grid-eb3', '100.00', cash, income, gb);
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, gb) <> 'met,met,not_due,not_due' or (pg_temp.grid_cell_json(res, gb, 2) ->> 'entryId')::uuid <> eb3 then
+    raise exception 'GRID 15 FAILED: a replacement payment did not meet the round again: %', res;
+  end if;
+
+  -- O wins round 2. Their pre-win round 1 is flagged, their win round 2 is flagged.
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, k, 2, go, go);
+  perform pg_sleep(0.02);
+  perform pg_temp.call_as(go::text, format('select public.open_draw_v1(%L, 3, %L)', k, 'grid-open-3'));
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, go) <> 'flagged,flagged,met,not_due'
+     or pg_temp.grid_row(res, ga) <> 'met,met,flagged,not_due'
+     or pg_temp.grid_row(res, gb) <> 'met,met,flagged,not_due'
+     or pg_temp.grid_row(res, gc) <> 'met,flagged,flagged,not_due' then
+    raise exception 'GRID 16 FAILED: grid after round 3 opened is wrong: %', res;
+  end if;
+
+  -- SPLIT AT THE WIN. O pays after winning: with no later round due, the payment does
+  -- NOT go back and clear their flagged round 1 or 2.
+  perform pg_sleep(0.02);
+  eo4 := pg_temp.fx_pay(go, grp, 'grid-eo4', '100.00', cash, income, go);
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, go) <> 'flagged,flagged,met,not_due' then
+    raise exception 'GRID 17 FAILED: a payment recorded after the member''s win cleared a pre-win round: %', res;
+  end if;
+  -- round 3 revealed (B wins), round 4 opened: O's eo4 was recorded before reveal 3, so it cannot pay round 4
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, k, 3, gb, go);
+  perform pg_sleep(0.02);
+  perform pg_temp.call_as(go::text, format('select public.open_draw_v1(%L, 4, %L)', k, 'grid-open-4'));
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, go) <> 'flagged,flagged,met,flagged' then
+    raise exception 'GRID 18 FAILED: a payment recorded before the previous reveal paid round 4: %', res;
+  end if;
+  eo5 := pg_temp.fx_pay(go, grp, 'grid-eo5', '100.00', cash, income, go);
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, go) <> 'flagged,flagged,met,met' or (pg_temp.grid_cell_json(res, go, 4) ->> 'entryId')::uuid <> eo5 then
+    raise exception 'GRID 19 FAILED: a post-win payment after the previous reveal did not meet round 4: %', res;
+  end if;
+  eo6 := pg_temp.fx_pay(go, grp, 'grid-eo6', '100.00', cash, income, go, k, 1);
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(res, go) <> 'met,flagged,met,met' or (pg_temp.grid_cell_json(res, go, 1) ->> 'entryId')::uuid <> eo6 then
+    raise exception 'GRID 20 FAILED: an explicit attribution did not clear a pre-win round: %', res;
+  end if;
+
+  -- =========================================================================
+  -- COLLATERAL UNCHANGED: every winner's owed rounds equal the grid's cells for the
+  -- rounds after their win AND the verbatim pre-migration derivation.
+  -- =========================================================================
+  res3 := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_collateral_v1(%L)', k));
+  res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if jsonb_array_length(res3 -> 'winners') <> 3 then
+    raise exception 'COLLATERAL-GRID 1 FAILED: expected three winners: %', res3;
+  end if;
+  for w in select x from jsonb_array_elements(res3 -> 'winners') x loop
+    legacy := pg_temp.legacy_owed(k, (w ->> 'memberId')::uuid, (w ->> 'round')::int, 4);
+    if (w -> 'owed') is distinct from legacy then
+      raise exception 'COLLATERAL-GRID 2 FAILED: the collateral view of % differs from the pre-migration derivation: % vs %', w ->> 'memberId', w -> 'owed', legacy;
+    end if;
+    for cell in select y from jsonb_array_elements(w -> 'owed') y loop
+      if (cell ->> 'status') <> pg_temp.grid_cell(res, (w ->> 'memberId')::uuid, (cell ->> 'round')::int)
+         or (cell -> 'entryId') is distinct from (pg_temp.grid_cell_json(res, (w ->> 'memberId')::uuid, (cell ->> 'round')::int) -> 'entryId')
+         or (cell -> 'source') is distinct from (pg_temp.grid_cell_json(res, (w ->> 'memberId')::uuid, (cell ->> 'round')::int) -> 'source') then
+        raise exception 'COLLATERAL-GRID 3 FAILED: the grid and the collateral view disagree on % round %: % ', w ->> 'memberId', cell ->> 'round', cell;
+      end if;
+    end loop;
+  end loop;
+
+  -- READ ONLY: reading the grid wrote nothing to the ledger
+  select last_sequence, last_hash into head_a from public.ledger_group_heads where group_id = grp;
+  perform pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  select last_sequence, last_hash into head_b from public.ledger_group_heads where group_id = grp;
+  if head_a.last_sequence <> head_b.last_sequence or head_a.last_hash <> head_b.last_hash then
+    raise exception 'GRID 21 FAILED: reading the grid moved the ledger chain';
+  end if;
+  -- cycle JSON carries the effective policy
+  if (pg_temp.call_as(gc::text, format('select public.get_draw_cycle_v1(%L)', k)) -> 'cycle' ->> 'contributionGate') <> 'off'
+     or (pg_temp.call_as(gc::text, format('select public.list_draw_cycles_v1(%L)', grp)) -> 0 ->> 'contributionGate') <> 'off' then
+    raise exception 'GRID 22 FAILED: the cycle JSON does not carry contributionGate';
+  end if;
+end;
+$grid$;
+
+do $gate$
+declare
+  gp constant uuid := 'aaaaaaaa-2000-4000-8000-000000000001'; -- owner
+  gq constant uuid := 'aaaaaaaa-2000-4000-8000-000000000002'; -- treasurer role
+  gr constant uuid := 'aaaaaaaa-2000-4000-8000-000000000003';
+  gs constant uuid := 'aaaaaaaa-2000-4000-8000-000000000004';
+  outsider constant text := '44444444-4444-4444-8444-444444444444';
+  grp uuid; tnt uuid; cash uuid; income uuid;
+  c_off uuid; c_warn uuid; c_block uuid; c_legacy uuid;
+  res jsonb; detail jsonb; sess uuid; n bigint; who uuid; r integer;
+  rows_before bigint;
+  ov record;
+  ev record;
+begin
+  perform set_config('request.jwt.claim.sub', gp::text, true);
+  grp := (public.sened_ledger_provision_group_v1('Gate equb') ->> 'groupId')::uuid;
+  select tenant_id into tnt from public.ledger_groups where id = grp;
+  select id into cash from public.ledger_accounts where group_id = grp and code = 'POT_CASH';
+  select id into income from public.ledger_accounts where group_id = grp and code = 'CONTRIBUTION_INCOME';
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status) values
+    (grp, tnt, gq, 'treasurer', 'active'),
+    (grp, tnt, gr, 'member', 'active'),
+    (grp, tnt, gs, 'member', 'active');
+
+  -- =========================================================================
+  -- GATE: choosing the policy at creation
+  -- =========================================================================
+  perform pg_temp.expect_error(gp::text, format('select public.create_draw_cycle_v1(%L,%L,%L,3,1000,now() - interval ''1 day'',%L,%L)', grp, 'x', '100.00', 'gate-bad', 'bogus'), 'draw_invalid_request', 'P0001');
+  perform pg_temp.expect_error(gr::text, format('select public.create_draw_cycle_v1(%L,%L,%L,3,1000,now() - interval ''1 day'',%L,%L)', grp, 'x', '100.00', 'gate-mem', 'block'), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error(outsider, format('select public.create_draw_cycle_v1(%L,%L,%L,3,1000,now() - interval ''1 day'',%L,%L)', grp, 'x', '100.00', 'gate-out', 'block'), 'draw_forbidden', '42501');
+  -- the seven-argument form still works and means "off"
+  res := pg_temp.call_as(gp::text, format('select public.create_draw_cycle_v1(%L,%L,%L,3,1000,now() - interval ''1 day'',%L)', grp, 'Off cycle', '100.00', 'gate-off'));
+  c_off := (res -> 'cycle' ->> 'cycleId')::uuid;
+  if res -> 'cycle' ->> 'contributionGate' <> 'off' then
+    raise exception 'GATE 1 FAILED: a cycle created without a policy is not off: %', res;
+  end if;
+  res := pg_temp.call_as(gp::text, format('select public.create_draw_cycle_v1(%L,%L,%L,3,1000,now() - interval ''1 day'',%L,%L)', grp, 'Warn cycle', '100.00', 'gate-warn', 'warn'));
+  c_warn := (res -> 'cycle' ->> 'cycleId')::uuid;
+  if res -> 'cycle' ->> 'contributionGate' <> 'warn' then raise exception 'GATE 2 FAILED: %', res; end if;
+  res := pg_temp.call_as(gq::text, format('select public.create_draw_cycle_v1(%L,%L,%L,3,1000,now() - interval ''1 day'',%L,%L)', grp, 'Block cycle', '100.00', 'gate-block', 'block'));
+  c_block := (res -> 'cycle' ->> 'cycleId')::uuid;
+  if res -> 'cycle' ->> 'contributionGate' <> 'block' or (res ->> 'replayed')::boolean then
+    raise exception 'GATE 3 FAILED: a treasurer could not create a block cycle: %', res;
+  end if;
+  res := pg_temp.call_as(gq::text, format('select public.create_draw_cycle_v1(%L,%L,%L,3,1000,now() - interval ''1 day'',%L,%L)', grp, 'Block cycle', '100.00', 'gate-block', 'block'));
+  if not (res ->> 'replayed')::boolean or (res -> 'cycle' ->> 'cycleId')::uuid <> c_block then
+    raise exception 'GATE 4 FAILED: the same creation did not replay: %', res;
+  end if;
+  perform pg_temp.expect_error(gq::text, format('select public.create_draw_cycle_v1(%L,%L,%L,3,1000,now() - interval ''1 day'',%L,%L)', grp, 'Block cycle', '100.00', 'gate-block', 'off'), 'draw_idempotency_conflict', 'P0001');
+  -- a row that predates the column (inserted without it) reads as off
+  reset role;
+  insert into public.draw_cycles (group_id, tenant_id, name, total_rounds, pot_amount, started_at)
+  values (grp, tnt, 'Legacy cycle', 2, 400.00, now() - interval '1 day')
+  returning id into c_legacy;
+  if public.sened_draw_cycle_gate(c_legacy) <> 'off' or (select contribution_gate from public.draw_cycles where id = c_legacy) <> 'off' then
+    raise exception 'GATE 5 FAILED: an existing cycle is not off';
+  end if;
+
+  -- =========================================================================
+  -- GATE: block
+  -- =========================================================================
+  res := pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, null, %L)', c_block, 'gate-block-open-1'));
+  if res -> 'contributionGate' ->> 'policy' <> 'block' or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 0
+     or (res -> 'contributionGate' ->> 'overridden')::boolean then
+    raise exception 'GATE 6 FAILED: opening round 1 (nothing before it) was gated: %', res;
+  end if;
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, c_block, 1, gr, gp);
+  perform pg_sleep(0.02);
+
+  -- blocked: every active member has no payment for round 1
+  detail := pg_temp.expect_error_detail(gp::text, format('select public.open_draw_v1(%L, 2, %L)', c_block, 'gate-block-open-2'), 'draw_contribution_gate_blocked', 'P0001');
+  if jsonb_array_length(detail) <> 4
+     or (select count(*) from jsonb_array_elements(detail) x where (x ->> 'round')::int = 1) <> 4
+     or (select array_agg(x ->> 'memberId' order by x ->> 'memberId') from jsonb_array_elements(detail) x)
+        is distinct from array[gp::text, gq::text, gr::text, gs::text] then
+    raise exception 'GATE 7 FAILED: the block does not list who/which rounds: %', detail;
+  end if;
+  select count(*) into n from public.draw_sessions where cycle_id = c_block and round = 2;
+  if n <> 0 then raise exception 'GATE 8 FAILED: a blocked open created a session'; end if;
+  -- the treasurer role is blocked the same way
+  perform pg_temp.expect_error_detail(gq::text, format('select public.open_draw_v1(%L, null, %L)', c_block, 'gate-block-open-2b'), 'draw_contribution_gate_blocked', 'P0001');
+  -- an override needs a real reason
+  perform pg_temp.expect_error(gp::text, format('select public.open_draw_v1(%L, 2, %L, %L)', c_block, 'gate-block-open-2c', 'too short'), 'draw_override_reason_invalid', 'P0001');
+  perform pg_temp.expect_error(gp::text, format('select public.open_draw_v1(%L, 2, %L, %L)', c_block, 'gate-block-open-2c', repeat('x', 1001)), 'draw_override_reason_invalid', 'P0001');
+  perform pg_temp.expect_error(gp::text, format('select public.open_draw_v1(%L, 2, %L, %L)', c_block, 'gate-block-open-2c', '          '), 'draw_override_reason_invalid', 'P0001');
+  -- an override needs the role: a plain member and an outsider are refused first
+  perform pg_temp.expect_error(gr::text, format('select public.open_draw_v1(%L, 2, %L, %L)', c_block, 'gate-block-open-2d', 'Members agreed to pay on Friday'), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error(outsider, format('select public.open_draw_v1(%L, 2, %L, %L)', c_block, 'gate-block-open-2d', 'Members agreed to pay on Friday'), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error('', format('select public.open_draw_v1(%L, 2, %L, %L)', c_block, 'gate-block-open-2d', 'Members agreed to pay on Friday'), 'draw_forbidden', '28000');
+  select count(*) into n from public.draw_contribution_gate_overrides where cycle_id = c_block;
+  if n <> 0 then raise exception 'GATE 9 FAILED: a refused override was recorded'; end if;
+
+  -- a valid override opens the draw and is recorded
+  res := pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, 2, %L, %L)', c_block, 'gate-block-open-2e', '  Members agreed to pay on Friday  '));
+  sess := (res -> 'session' ->> 'drawId')::uuid;
+  if (res ->> 'replayed')::boolean or not (res -> 'contributionGate' ->> 'overridden')::boolean
+     or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 4 then
+    raise exception 'GATE 10 FAILED: the override did not open the draw: %', res;
+  end if;
+  select * into ov from public.draw_contribution_gate_overrides where cycle_id = c_block;
+  if not found or ov.actor_id <> gp or ov.round <> 2 or ov.draw_id <> sess or ov.reason <> 'Members agreed to pay on Friday'
+     or jsonb_array_length(ov.flagged) <> 4 or ov.created_at is null or ov.group_id <> grp then
+    raise exception 'GATE 11 FAILED: the override record is wrong: %', row_to_json(ov);
+  end if;
+  -- replays and continuations do not record again
+  perform pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, 2, %L, %L)', c_block, 'gate-block-open-2e', 'Members agreed to pay on Friday'));
+  perform pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, null, %L, %L)', c_block, 'gate-block-open-2f', 'Another reason that is long enough'));
+  select count(*) into n from public.draw_contribution_gate_overrides where cycle_id = c_block;
+  if n <> 1 then raise exception 'GATE 12 FAILED: a replay or a continuation recorded another override (%)', n; end if;
+  -- members read the audit trail
+  res := pg_temp.call_as(gs::text, format('select public.get_draw_cycle_contributions_v1(%L)', c_block));
+  if jsonb_array_length(res -> 'overrides') <> 1 or res -> 'overrides' -> 0 ->> 'reason' <> 'Members agreed to pay on Friday'
+     or (res -> 'overrides' -> 0 ->> 'actorId')::uuid <> gp or (res -> 'overrides' -> 0 ->> 'round')::int <> 2
+     or jsonb_array_length(res -> 'overrides' -> 0 -> 'flagged') <> 4 or res ->> 'contributionGate' <> 'block' then
+    raise exception 'GATE 13 FAILED: the override is not readable by a member: %', res -> 'overrides';
+  end if;
+
+  -- once every round before it is met the gate does not ask for an override
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, c_block, 2, gp, gp);
+  perform pg_sleep(0.02);
+  for who in select unnest(array[gp, gq, gr, gs]) loop
+    for r in 1 .. 2 loop
+      perform pg_temp.fx_pay(gp, grp, 'gate-pay-' || who::text || '-' || r, '100.00', cash, income, who, c_block, r);
+    end loop;
+  end loop;
+  res := pg_temp.call_as(gp::text, format('select public.get_draw_cycle_contributions_v1(%L)', c_block));
+  if (res ->> 'flaggedCount')::int <> 0 then raise exception 'GATE 14 FAILED: payments did not clear the flags: %', res; end if;
+  res := pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, 3, %L)', c_block, 'gate-block-open-3'));
+  if (res -> 'contributionGate' ->> 'overridden')::boolean or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 0 then
+    raise exception 'GATE 15 FAILED: an open with every earlier round met was blocked or overridden: %', res;
+  end if;
+  select count(*) into n from public.draw_contribution_gate_overrides where cycle_id = c_block;
+  if n <> 1 then raise exception 'GATE 16 FAILED: an unnecessary override was recorded'; end if;
+
+  -- an inactive member's flag does not hold up the cycle
+  -- (checked on the warn cycle below)
+
+  -- =========================================================================
+  -- GATE: warn allows, and says what is flagged; a reason is not recorded as an override
+  -- =========================================================================
+  perform pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, null, %L)', c_warn, 'gate-warn-open-1'));
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, c_warn, 1, gs, gp);
+  perform pg_sleep(0.02);
+  res := pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, 2, %L)', c_warn, 'gate-warn-open-2'));
+  if res -> 'contributionGate' ->> 'policy' <> 'warn' or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 4
+     or (res -> 'contributionGate' ->> 'overridden')::boolean or (res ->> 'replayed')::boolean then
+    raise exception 'GATE 17 FAILED: warn did not allow the open and list the flagged rounds: %', res;
+  end if;
+  select count(*) into n from public.draw_contribution_gate_overrides where cycle_id = c_warn;
+  if n <> 0 then raise exception 'GATE 18 FAILED: warn recorded an override'; end if;
+  -- an inactive member's flag is ignored by the gate (the grid still lists them, marked inactive)
+  reset role;
+  update public.ledger_group_memberships set status = 'inactive' where group_id = grp and user_id = gq;
+  res := pg_temp.call_as(gp::text, format('select public.get_draw_cycle_contributions_v1(%L)', c_warn));
+  if (select (m ->> 'active')::boolean from jsonb_array_elements(res -> 'members') m where m ->> 'memberId' = gq::text) is not false
+     and (select count(*) from jsonb_array_elements(res -> 'members') m where m ->> 'memberId' = gq::text) <> 0 then
+    raise exception 'GATE 19 FAILED: an inactive member is shown as active: %', res;
+  end if;
+  if public.sened_draw_cycle_gate_flags(c_warn, 2) @> jsonb_build_array(jsonb_build_object('memberId', gq, 'round', 1)) then
+    raise exception 'GATE 19 FAILED: an inactive member''s flag reaches the gate';
+  end if;
+  update public.ledger_group_memberships set status = 'active' where group_id = grp and user_id = gq;
+
+  -- =========================================================================
+  -- GATE: off computes nothing
+  -- =========================================================================
+  perform pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, null, %L)', c_off, 'gate-off-open-1'));
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, c_off, 1, gr, gp);
+  perform pg_sleep(0.02);
+  res := pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, 2, %L)', c_off, 'gate-off-open-2'));
+  if res -> 'contributionGate' ->> 'policy' <> 'off' or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 0 then
+    raise exception 'GATE 20 FAILED: off computed or reported flags: %', res;
+  end if;
+
+  -- =========================================================================
+  -- GATE: changing the policy (owner/treasurer, with a reason, audited)
+  -- =========================================================================
+  perform pg_temp.expect_error(gr::text, format('select public.set_draw_cycle_contribution_gate_v1(%L,%L,%L)', c_off, 'block', 'Switching it on for everyone'), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error(outsider, format('select public.set_draw_cycle_contribution_gate_v1(%L,%L,%L)', c_off, 'block', 'Switching it on for everyone'), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error('', format('select public.set_draw_cycle_contribution_gate_v1(%L,%L,%L)', c_off, 'block', 'Switching it on for everyone'), 'draw_forbidden', '28000');
+  perform pg_temp.expect_error(gp::text, format('select public.set_draw_cycle_contribution_gate_v1(%L,%L,%L)', gen_random_uuid(), 'block', 'Switching it on for everyone'), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error(gp::text, format('select public.set_draw_cycle_contribution_gate_v1(%L,%L,%L)', c_off, 'block', 'short'), 'draw_invalid_request', 'P0001');
+  perform pg_temp.expect_error(gp::text, format('select public.set_draw_cycle_contribution_gate_v1(%L,%L,%L)', c_off, 'bogus', 'Switching it on for everyone'), 'draw_invalid_request', 'P0001');
+  perform pg_temp.expect_error(gp::text, format('select public.set_draw_cycle_contribution_gate_v1(%L,NULL,%L)', c_off, 'Switching it on for everyone'), 'draw_invalid_request', 'P0001');
+  select count(*) into n from public.draw_cycle_gate_events where cycle_id = c_off;
+  if n <> 0 then raise exception 'GATE 21 FAILED: a refused change was recorded'; end if;
+  res := pg_temp.call_as(gp::text, format('select public.set_draw_cycle_contribution_gate_v1(%L,%L,%L)', c_off, 'block', 'Switching it on for everyone'));
+  if (res ->> 'replayed')::boolean or res -> 'cycle' ->> 'contributionGate' <> 'block' then
+    raise exception 'GATE 22 FAILED: the policy did not change: %', res;
+  end if;
+  select * into ev from public.draw_cycle_gate_events where cycle_id = c_off;
+  if not found or ev.actor_id <> gp or ev.from_gate <> 'off' or ev.to_gate <> 'block' or ev.reason <> 'Switching it on for everyone' then
+    raise exception 'GATE 23 FAILED: the policy event is wrong: %', row_to_json(ev);
+  end if;
+  res := pg_temp.call_as(gp::text, format('select public.set_draw_cycle_contribution_gate_v1(%L,%L,%L)', c_off, 'block', 'Switching it on for everyone'));
+  select count(*) into n from public.draw_cycle_gate_events where cycle_id = c_off;
+  if not (res ->> 'replayed')::boolean or n <> 1 then raise exception 'GATE 24 FAILED: an unchanged policy was recorded again (%)', n; end if;
+  res := pg_temp.call_as(gr::text, format('select public.get_draw_cycle_contributions_v1(%L)', c_off));
+  if res ->> 'contributionGate' <> 'block' or jsonb_array_length(res -> 'gateEvents') <> 1
+     or res -> 'gateEvents' -> 0 ->> 'from' <> 'off' or res -> 'gateEvents' -> 0 ->> 'to' <> 'block'
+     or (res -> 'gateEvents' -> 0 ->> 'actorId')::uuid <> gp then
+    raise exception 'GATE 25 FAILED: a member cannot read the policy and its history: %', res;
+  end if;
+  -- the new policy bites on the next open
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, c_off, 2, gq, gp);
+  perform pg_sleep(0.02);
+  perform pg_temp.expect_error_detail(gp::text, format('select public.open_draw_v1(%L, 3, %L)', c_off, 'gate-off-open-3'), 'draw_contribution_gate_blocked', 'P0001');
+  -- and the treasurer role can switch it back
+  res := pg_temp.call_as(gq::text, format('select public.set_draw_cycle_contribution_gate_v1(%L,%L,%L)', c_off, 'off', 'The group decided to relax this'));
+  if res -> 'cycle' ->> 'contributionGate' <> 'off' then raise exception 'GATE 26 FAILED: %', res; end if;
+  select count(*) into n from public.draw_cycle_gate_events where cycle_id = c_off;
+  if n <> 2 then raise exception 'GATE 27 FAILED: expected two policy events, got %', n; end if;
+  perform pg_temp.call_as(gp::text, format('select public.open_draw_v1(%L, 3, %L)', c_off, 'gate-off-open-3b'));
+
+  -- =========================================================================
+  -- GATE: append-only, and clients cannot write the tables
+  -- =========================================================================
+  begin
+    update public.draw_cycle_gate_events set reason = 'edited reason here' where cycle_id = c_off;
+    raise exception 'GATE 28 FAILED: a policy event was updated';
+  exception when others then
+    if sqlerrm <> 'gate_history_immutable' then raise exception 'GATE 28 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    delete from public.draw_cycle_gate_events where cycle_id = c_off;
+    raise exception 'GATE 29 FAILED: a policy event was deleted';
+  exception when others then
+    if sqlerrm <> 'gate_history_immutable' then raise exception 'GATE 29 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    update public.draw_contribution_gate_overrides set reason = 'edited reason here' where cycle_id = c_block;
+    raise exception 'GATE 30 FAILED: an override was updated';
+  exception when others then
+    if sqlerrm <> 'gate_history_immutable' then raise exception 'GATE 30 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    delete from public.draw_contribution_gate_overrides where cycle_id = c_block;
+    raise exception 'GATE 31 FAILED: an override was deleted';
+  exception when others then
+    if sqlerrm <> 'gate_history_immutable' then raise exception 'GATE 31 FAILED: %', sqlerrm; end if;
+  end;
+  set constraints all immediate;
+  begin
+    truncate public.draw_cycle_gate_events;
+    raise exception 'GATE 32 FAILED: the events table was truncated';
+  exception when others then
+    if sqlerrm <> 'gate_history_immutable' then raise exception 'GATE 32 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    truncate public.draw_contribution_gate_overrides;
+    raise exception 'GATE 33 FAILED: the overrides table was truncated';
+  exception when others then
+    if sqlerrm <> 'gate_history_immutable' then raise exception 'GATE 33 FAILED: %', sqlerrm; end if;
+  end;
+  -- a recorded override needs a reason of its own and flagged rounds, for ANY writer
+  begin
+    insert into public.draw_contribution_gate_overrides (cycle_id, group_id, tenant_id, round, draw_id, actor_id, reason, flagged)
+    values (c_block, grp, tnt, 3, sess, gp, 'short', '[]'::jsonb);
+    raise exception 'GATE 34 FAILED: an override with no reason and no rounds was accepted';
+  exception when check_violation then null;
+  end;
+  perform set_config('request.jwt.claim.sub', gp::text, true);
+  set local role authenticated;
+  begin
+    insert into public.draw_cycle_gate_events (cycle_id, group_id, tenant_id, from_gate, to_gate, actor_id, reason)
+    values (c_off, grp, tnt, 'off', 'warn', gp, 'A direct insert by a client');
+    raise exception 'GATE 35 FAILED: authenticated wrote a policy event directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    insert into public.draw_contribution_gate_overrides (cycle_id, group_id, tenant_id, round, draw_id, actor_id, reason, flagged)
+    values (c_block, grp, tnt, 3, sess, gp, 'A direct insert by a client', '[{"memberId":"x","round":1}]'::jsonb);
+    raise exception 'GATE 36 FAILED: authenticated wrote an override directly';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    update public.draw_cycles set contribution_gate = 'off' where id = c_block;
+    raise exception 'GATE 37 FAILED: authenticated updated the policy column directly';
+  exception when insufficient_privilege then null;
+  end;
+  reset role;
+  perform set_config('request.jwt.claim.sub', gr::text, true);
+  set local role authenticated;
+  select count(*) into n from public.draw_cycle_gate_events;
+  if n < 2 then reset role; raise exception 'GATE 38 FAILED: a member cannot read the policy events (%)', n; end if;
+  select count(*) into n from public.draw_contribution_gate_overrides;
+  reset role;
+  if n < 1 then raise exception 'GATE 38 FAILED: a member cannot read the overrides (%)', n; end if;
+  perform set_config('request.jwt.claim.sub', outsider, true);
+  set local role authenticated;
+  select count(*) into n from public.draw_cycle_gate_events;
+  if n <> 0 or (select count(*) from public.draw_contribution_gate_overrides) <> 0 then
+    reset role;
+    raise exception 'GATE 39 FAILED: an outsider reads the gate tables';
+  end if;
+  reset role;
+
+  -- =========================================================================
+  -- GATE: signatures and grants (no stale overload, nothing reachable that must not be)
+  -- =========================================================================
+  if to_regprocedure('public.open_draw_v1(uuid, integer, text)') is not null
+     or to_regprocedure('public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text)') is not null then
+    raise exception 'GATE 40 FAILED: an old arity is still callable (PostgREST could not choose between overloads)';
+  end if;
+  if has_function_privilege('anon', 'public.get_draw_cycle_contributions_v1(uuid)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.set_draw_cycle_contribution_gate_v1(uuid, text, text)', 'EXECUTE')
+     or has_function_privilege('public', 'public.set_draw_cycle_contribution_gate_v1(uuid, text, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.open_draw_v1(uuid, integer, text, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_draw_cycle_member_rounds(uuid, uuid)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_draw_cycle_gate_flags(uuid, integer)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_draw_cycle_gate(uuid)', 'EXECUTE') then
+    raise exception 'GATE 41 FAILED: a function is executable by a role that must not have it';
+  end if;
+  if not has_function_privilege('authenticated', 'public.get_draw_cycle_contributions_v1(uuid)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.set_draw_cycle_contribution_gate_v1(uuid, text, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.open_draw_v1(uuid, integer, text, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.get_draw_cycle_collateral_v1(uuid)', 'EXECUTE') then
+    raise exception 'GATE 42 FAILED: authenticated cannot execute a grid or gate RPC';
+  end if;
+  if not (select relrowsecurity from pg_class where oid = 'public.draw_cycle_gate_events'::regclass)
+     or not (select relrowsecurity from pg_class where oid = 'public.draw_contribution_gate_overrides'::regclass) then
+    raise exception 'GATE 43 FAILED: a gate table has no row level security';
+  end if;
+end;
+$gate$;
 rollback;
 select 'ALL ATTRIBUTION AND COLLATERAL CHECKS PASSED' as result;
+select 'ALL CONTRIBUTION GRID AND GATE CHECKS PASSED' as result;

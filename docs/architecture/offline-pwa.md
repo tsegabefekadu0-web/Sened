@@ -36,8 +36,9 @@ Branch: `feat/agent-4-offline-pwa` · 111 tests across 3 files (`db.stores` 40,
   `UnconfiguredSyncTransport` (fail-closed) otherwise. Sync is started by the
   treasurer's buttons, not automatically on reconnect.
 - **Playwright E2E exists now** (`test/e2e/`, `playwright.config.ts`,
-  `npm run test:e2e`); the offline desk itself has component tests, not a
-  browser test of an offline reload.
+  `npm run test:e2e`), including a test that the service worker activates and
+  `/offline` loads with the network cut. The rest of the suite runs with
+  workers blocked so a cached shell cannot mask a regression.
 - **No SQL migration.** Nothing here needs a table; the server is A1's.
 
 ---
@@ -347,16 +348,44 @@ original filing and the dictionary is the source of truth.
 worker whose job is to replace itself on a new deploy should not need a build
 step to do that.
 
-> **Current state:** the worker and manifest are written and served, but no
-> code registers the worker (§12), so none of what follows is active in the
-> running app yet.
+> **Current state:** the worker is registered. `src/components/pwa/ServiceWorkerRegistration.tsx`
+> is mounted once in `src/app/layout.tsx` and calls
+> `navigator.serviceWorker.register("/sw.js", { scope: "/" })` after the page's
+> `load` event, **only** in a production build, in a secure context
+> (`window.isSecureContext`; `127.0.0.1` counts) and when `"serviceWorker" in
+> navigator`. It never registers under `next dev` or jsdom. A registration
+> failure is `console.warn`ed and otherwise ignored. A Playwright test
+> (`test/e2e/smoke.spec.ts`, "service worker and the offline shell") proves the
+> worker takes control, precaches `/offline` plus its hashed chunks, and serves
+> the offline desk with the worker's network cut.
+
+Caching strategy, per request type:
+
+| Request | Strategy |
+|---|---|
+| `/api/**`, HMR/`__nextjs`, any non-`GET`, cross-origin | Not handled — straight to the network, never stored |
+| Navigations (any page) | Network-first. Only the `/offline` document is ever cached. On network failure, `/offline` is served from cache; any other URL is **redirected** to `/offline` (Next hydrates from the URL, so serving `/offline`'s HTML at `/ledger` would mount the wrong screen). Other pages' HTML is never stored, so no stale or per-user shell can be replayed |
+| `/_next/static/**` | Cache-first (content-hashed, so immutable), capped at 200 entries |
+| `/manifest.json`, `/icons/**` | Network-first, cache fallback |
+| Everything else | Not handled |
+
+Install precaches `/offline`, the manifest and icons, then reads the hashed
+`/_next/static/**` URLs out of the `/offline` HTML and caches those too —
+otherwise the cached document would render but never hydrate. A failed precache
+does not block installation. Caches are versioned (`sened-v2-shell`,
+`sened-v2-static`); `activate` deletes every other `sened-*` cache, and only
+those. `skipWaiting` + `clients.claim` are used because navigations are
+network-first (a new worker never pins an old shell), hashed assets are keyed by
+name (old and new chunks coexist), and the worker holds no state. Background
+Sync is not used; the page drains the outbox itself, which works in every
+browser. Nothing in `src/` posts `sened:drain-outbox` to the worker yet, so the
+worker-relayed drain is wired on the receiving side only.
 
 It does three things and refuses several others:
 
-- **Precaches the offline desk shell** with `cache.addAll`, which is atomic —
-  one 404 and nothing is cached, so a half-working offline shell is never
-  presented as a working one.
-- **Serves navigations from cache** when the network is gone.
+- **Precaches the offline desk shell** (document, hashed chunks, manifest,
+  icons). A precache failure is tolerated; the runtime handlers fill the cache.
+- **Serves the offline desk** when the network is gone.
 - **Forwards `sened:drain-outbox` messages to the page.** The worker only
   relays. The queue, the backoff and the idempotency keys live in the page's
   IndexedDB, so the worker never holds a credential or a ledger payload.
@@ -497,11 +526,11 @@ mistakes:
   byte length and duration, and the caller owns blob storage.
 - **No plural forms.** The repo's `translate()` has none; §6 notes which keys
   would need them.
-- **Nothing registers the service worker.** No code calls
-  `navigator.serviceWorker.register` (verified by search of `src/`), so
-  `public/sw.js` is never installed and the shell is not cached for offline
-  loads; the page only listens for its messages. IndexedDB persistence works
-  regardless. See §7.
+- **The service worker only runs in production builds over a secure context.**
+  Under `next dev` the app has no offline shell by design. Only `/offline` (and
+  its chunks) is cached; other pages are redirected to it when offline, so the
+  rest of the app is not usable without a connection. Nothing in `src/` sends
+  `sened:drain-outbox` to the worker yet. See §7.
 - **Round trips are a single batch of 25.** A 200-member Sunday with no signal
   produces a 200-row queue that drains over several passes. Correct, but the
   treasurer should see the queue depth, which the console does.

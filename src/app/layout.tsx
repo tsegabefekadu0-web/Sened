@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { ServiceWorkerRegistration } from "@/components/pwa/ServiceWorkerRegistration";
 
 export const metadata: Metadata = {
   title: "Sened (ሰነድ) — የህብረተሰብ እቁብ እና ዕድር አስተዳዳሪ",
@@ -48,6 +49,7 @@ export default function RootLayout({
         />
       </head>
       <body className="min-h-screen bg-[#F4EEE5] font-ethiopic antialiased selection:bg-terracotta-500 selection:text-white">
+        <ServiceWorkerRegistration />
         {children}
       </body>
     </html>

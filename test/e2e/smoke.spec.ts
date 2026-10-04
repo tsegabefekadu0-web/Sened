@@ -429,3 +429,62 @@ test.describe("the mic dock records a spoken contribution for real", () => {
     expect(note?.contentHash).toMatch(/^[0-9a-f]{64}$/);
   });
 });
+
+test.describe("service worker and the offline shell", () => {
+  // playwright.config.ts blocks workers for every other test so a cached shell
+  // cannot mask a regression; this one exists to prove the worker works.
+  test.use({ serviceWorkers: "allow" });
+
+  test("registers, takes control, and serves /offline with no connection", async ({ page, context }) => {
+    await page.goto("/offline", { waitUntil: "load" });
+
+    const scope = await page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.ready;
+      return registration.active ? registration.scope : null;
+    });
+    expect(scope, "an active service worker should control the origin").toMatch(/\/$/);
+    await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+
+    // The worker precaches the document and its hashed chunks while installing.
+    const cached = await page.evaluate(async () => {
+      const keys = await caches.keys();
+      const urls: string[] = [];
+      for (const key of keys) {
+        for (const request of await (await caches.open(key)).keys()) {
+          urls.push(new URL(request.url).pathname);
+        }
+      }
+      return urls;
+    });
+    expect(cached).toContain("/offline");
+    expect(cached.some((path) => path.startsWith("/_next/static/"))).toBe(true);
+    expect(cached.some((path) => path.startsWith("/api/"))).toBe(false);
+
+    await context.setOffline(true);
+    try {
+      // Playwright's offline emulation reaches a service worker only until its
+      // first navigation, so this test makes exactly one offline navigation and
+      // first proves the worker really has no network (otherwise a pass here
+      // could just be the live server answering).
+      const workerReachesNetwork = await context.serviceWorkers()[0].evaluate(() =>
+        fetch("/offline", { cache: "no-store" }).then(
+          () => true,
+          () => false
+        )
+      );
+      expect(workerReachesNetwork, "the worker must be offline for this test to mean anything").toBe(false);
+
+      const failures: string[] = [];
+      page.on("pageerror", (error) => failures.push(error.message));
+
+      // A page that was never cached redirects to the offline desk, which is
+      // served from the precache, so URL and document agree for hydration.
+      await page.goto("/ledger", { waitUntil: "domcontentloaded" });
+      await expect(page).toHaveURL(/\/offline$/);
+      await expect(page.getByText("Offline ledger desk").or(page.getByText("የመስመር መዝገብ ጠረጴዛ")).first()).toBeVisible();
+      expect(failures).toEqual([]);
+    } finally {
+      await context.setOffline(false);
+    }
+  });
+});

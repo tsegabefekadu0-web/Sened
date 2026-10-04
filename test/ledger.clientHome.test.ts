@@ -139,7 +139,7 @@ describe("loadHomeLedger", () => {
 
   it.each([
     ["no group", [json({ groups: [] })], "no-group"],
-    ["several groups", [json({ groups: [{ groupId: GROUP }, { groupId: GROUP }] })], "multiple-groups"],
+    ["several groups and none chosen", [json({ groups: [{ groupId: GROUP }, { groupId: "33333333-3333-4333-8333-333333333333" }] })], "choose-group"],
     ["a 401 on groups", [json({}, 401)], "unauthorized"],
     ["a 401 on balances", [json(groupBody()), json({}, 401)], "unauthorized"],
     ["a 401 on entries", [json(groupBody()), json(balancesBody("10.00", 1)), json({}, 401)], "unauthorized"],

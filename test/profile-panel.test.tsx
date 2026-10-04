@@ -2,12 +2,19 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+const sessionMock = vi.hoisted(() => ({
+  session: { status: "signed-in", accessToken: "jwt", email: "me@example.test", userId: "11111111-1111-4111-8111-111111111111" } as Record<string, unknown>
+}));
+vi.mock("@/lib/auth/useSession", () => ({ useSession: () => sessionMock.session }));
+
 import { ProfilePanel } from "@/components/shell/ProfilePanel";
+import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
 import { translate } from "@/lib/i18n";
 import { pickTibebFrame } from "@/lib/memberAvatarStyle";
 
 const GROUP = "22222222-2222-4222-8222-222222222222";
 const ME = "11111111-1111-4111-8111-111111111111";
+const OTHER = "33333333-3333-4333-8333-333333333333";
 
 function respond(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status });
@@ -92,7 +99,7 @@ describe("ProfilePanel", () => {
 
   it.each([
     ["no group", () => respond({ groups: [] }), "profile.noGroup"],
-    ["several groups", () => respond({ groups: [group().groups[0], group().groups[0]] }), "profile.multipleGroups"],
+    ["several groups and none chosen", () => respond({ groups: [group().groups[0], { ...group().groups[0], groupId: OTHER }] }), "profile.chooseGroup"],
     ["an ended session", () => respond({}, 401), "profile.unauthorized"],
     ["a server error", () => respond({}, 502), "profile.error"]
   ] as const)("shows an honest notice and no choices for %s", async (_name, handler, key) => {
@@ -133,5 +140,60 @@ describe("ProfilePanel", () => {
     await screen.findAllByRole("radio");
     await user.click(screen.getByRole("button", { name: translate("en", "tab.panels.back") }));
     expect(onBack).toHaveBeenCalled();
+  });
+});
+
+describe("ProfilePanel with several groups", () => {
+  const two = (attireA: string, attireB: string) => ({
+    groups: [
+      { groupId: GROUP, name: "Equb", role: "member", attire: attireA, userId: ME },
+      { groupId: OTHER, name: "Iddir", role: "member", attire: attireB, userId: ME }
+    ]
+  });
+
+  it("shows and saves the attire of the group chosen in the switcher, and nothing leaks between them", async () => {
+    window.localStorage.clear();
+    const user = userEvent.setup();
+    const d = deps((url, init) =>
+      url === "/api/my-groups"
+        ? respond(two("gabi", "netela"))
+        : respond({ groupId: JSON.parse(init!.body as string).groupId, attire: JSON.parse(init!.body as string).attire, changed: true })
+    );
+    render(
+      <ActiveGroupProvider
+        storage={window.localStorage}
+        fetchGroups={async () => ({
+          kind: "ok",
+          userId: ME,
+          groups: [
+            { groupId: GROUP, name: "Equb", role: "member" },
+            { groupId: OTHER, name: "Iddir", role: "member" }
+          ]
+        })}
+      >
+        <ProfilePanel locale="en" onBack={() => undefined} deps={d.deps} />
+      </ActiveGroupProvider>
+    );
+
+    // Nothing is chosen yet: no attire is shown or saved on a guess.
+    expect(await screen.findByText(translate("en", "profile.chooseGroup"))).toBeInTheDocument();
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+
+    const switcher = screen.getByRole("combobox", { name: "Group" });
+    await user.selectOptions(switcher, GROUP);
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Gabi/ })).toBeChecked());
+
+    await user.selectOptions(switcher, OTHER);
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Netela/ })).toBeChecked());
+    expect(screen.getByRole("radio", { name: /Gabi/ })).not.toBeChecked();
+
+    await user.click(screen.getByRole("radio", { name: /No shawl/ }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Saved."));
+    const save = d.fetchImpl.mock.calls.filter(([url]) => url === "/api/ledger/member-attire").at(-1)!;
+    expect(JSON.parse(save[1]!.body as string)).toEqual({ groupId: OTHER, attire: "none" });
+
+    // Back to the first group: its own stored choice, not the one just saved elsewhere.
+    await user.selectOptions(switcher, GROUP);
+    await waitFor(() => expect(screen.getByRole("radio", { name: /Gabi/ })).toBeChecked());
   });
 });

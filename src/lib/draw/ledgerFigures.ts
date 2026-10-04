@@ -153,9 +153,10 @@ function recordedTime(entry: { readonly recordedAt?: unknown; readonly occurredA
 export async function loadCycleLedgerFigures(
   startedAt: string,
   deps: AuthedFetchDeps = {},
-  maxPages: number = FIGURES_MAX_PAGES
+  maxPages: number = FIGURES_MAX_PAGES,
+  groupId?: string | null
 ): Promise<LedgerFiguresResult> {
-  const mine = await readMyGroup(deps);
+  const mine = await readMyGroup(deps, { groupId });
   if (mine.status !== "ok") return { status: "unavailable" };
   const pot = mine.accounts.find((account) => account.code === STANDARD_ACCOUNTS.POT_CASH.code);
   if (!pot) return { status: "unavailable" };

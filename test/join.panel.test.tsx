@@ -13,6 +13,8 @@ vi.mock("@/lib/ledger/clientInvites", async (importOriginal) => ({
 }));
 
 import { JoinPanel } from "@/components/ledger/JoinPanel";
+import { readRemembered } from "@/lib/groups/activeGroup";
+import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
 
 const TOKEN = "c".repeat(64);
 
@@ -114,5 +116,37 @@ describe("JoinPanel", () => {
     openWith(`#token=${TOKEN}`);
     render(<JoinPanel initialLocale="am" />);
     expect(await screen.findByText("ቡድኑን ተቀላቅለዋል።")).toBeInTheDocument();
+  });
+
+  it("makes the group just joined the active one, even when the user already has another", async () => {
+    const OLD = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const NEW = "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    hoisted.session = { status: "signed-in", accessToken: "t", email: "a@b.co", userId: "u1" };
+    hoisted.redeem.mockResolvedValue({ status: "joined", groupId: NEW });
+    openWith(`#token=${TOKEN}`);
+    let joined = false;
+    const fetchGroups = vi.fn(async () => ({
+      kind: "ok" as const,
+      userId: "u1",
+      groups: joined
+        ? [
+            { groupId: OLD, name: "Old", role: "member" as const },
+            { groupId: NEW, name: "New", role: "member" as const }
+          ]
+        : [{ groupId: OLD, name: "Old", role: "member" as const }]
+    }));
+    hoisted.redeem.mockImplementation(async () => {
+      joined = true;
+      return { status: "joined", groupId: NEW };
+    });
+
+    render(
+      <ActiveGroupProvider fetchGroups={fetchGroups} storage={window.localStorage}>
+        <JoinPanel initialLocale="en" />
+      </ActiveGroupProvider>
+    );
+    await screen.findByTestId("join-outcome");
+    await waitFor(() => expect(readRemembered("u1", window.localStorage)).toBe(NEW));
+    expect(fetchGroups).toHaveBeenCalledTimes(2);
   });
 });

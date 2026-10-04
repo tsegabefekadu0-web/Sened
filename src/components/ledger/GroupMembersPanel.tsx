@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useCallback, useEffect, useState, type FormEvent } from "react";
+import React, { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Copy, Link2, UserCog, UsersRound } from "lucide-react";
 
 import { useSession } from "@/lib/auth/useSession";
+import { useActiveGroupPreference } from "@/lib/groups/useActiveGroup";
 import {
   buildJoinUrl,
   createInviteLink,
@@ -52,6 +53,10 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
   const t = createTranslator(locale);
   const session = useSession();
   const signedIn = session.status === "signed-in";
+  // Members and invites are the app's active group's (see `GroupSwitcher`).
+  const { ready: groupReady, groupId: activeGroupId } = useActiveGroupPreference();
+  const activeGroupRef = useRef(activeGroupId);
+  activeGroupRef.current = activeGroupId;
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [invites, setInvites] = useState<readonly InviteRow[]>([]);
   const [invitesFailed, setInvitesFailed] = useState(false);
@@ -64,25 +69,37 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
   const [actionFailed, setActionFailed] = useState<"role" | "revoke" | null>(null);
 
   const refresh = useCallback(async () => {
-    const mine = await loadMyGroup();
+    const mine = await loadMyGroup({}, { groupId: activeGroupId });
+    // The person switched groups while this was loading: that read is for the old group.
+    if (activeGroupRef.current !== activeGroupId) return;
     if (mine.status === "no-group") return setLoad({ kind: "message", key: "members.noGroup" });
-    if (mine.status === "multiple-groups") return setLoad({ kind: "message", key: "members.multipleGroups" });
+    if (mine.status === "choose-group") return setLoad({ kind: "message", key: "members.chooseGroup" });
     if (mine.status !== "ready") return setLoad({ kind: "message", key: "members.error" });
     const list = await loadMembers(mine.groupId);
+    if (activeGroupRef.current !== activeGroupId) return;
     if (list.status !== "ready") return setLoad({ kind: "message", key: "members.error" });
     setLoad({ kind: "ready", group: { groupId: mine.groupId, role: mine.role }, members: list.members });
     if (mine.role === "owner") {
       const result = await loadInvites(mine.groupId);
+      if (activeGroupRef.current !== activeGroupId) return;
       setInvitesFailed(result.status !== "ready");
       setInvites(result.status === "ready" ? result.invites.filter((invite) => invite.status === "active") : []);
     }
-  }, []);
+  }, [activeGroupId]);
 
   useEffect(() => {
     if (!signedIn) return;
     setLoad({ kind: "loading" });
+    if (!groupReady) return;
+    // Nothing of the previous group (its invites, a just-created link) carries over.
+    setInvites([]);
+    setInvitesFailed(false);
+    setCreated(null);
+    setCreateFailed(false);
+    setActionFailed(null);
+    setCopyState("idle");
     void refresh();
-  }, [signedIn, refresh]);
+  }, [signedIn, groupReady, refresh]);
 
   if (!signedIn) {
     return (

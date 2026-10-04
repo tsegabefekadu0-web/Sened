@@ -43,6 +43,7 @@ import {
 } from "@/lib/draw/clientDraw";
 import { loadCycleLedgerFigures, type LedgerFiguresResult } from "@/lib/draw/ledgerFigures";
 import { triggerHaptic } from "@/lib/draw/haptics";
+import { useActiveGroupPreference } from "@/lib/groups/useActiveGroup";
 import type { DrawCycleRecord, DrawListEntry, DrawSessionView } from "@/lib/draw/types";
 import type { MessageKey } from "@/lib/i18n";
 import { formatEtbDisplay, formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
@@ -136,7 +137,27 @@ function pickDraw(draws: readonly DrawListEntry[]): DrawListEntry | null {
  * answer: a revealed draw is recomputed here from the published values and the
  * two are compared.
  */
-export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
+export function LiveDraw(props: LiveDrawProps) {
+  // The draw follows the app's active group (see `GroupSwitcher`). It waits for
+  // the groups to resolve, and a different group remounts the whole ceremony so
+  // nothing of one group's cycle, draw or seal can show under another.
+  const { ready, groupId } = useActiveGroupPreference();
+  if (!ready) {
+    return (
+      <p role="status" className="px-4 py-6 text-[13px] text-[#6F625D]">
+        {liveCopy(props.locale)("drawLive.loading")}
+      </p>
+    );
+  }
+  return <LiveDrawBody key={groupId ?? "no-active-group"} {...props} groupId={groupId} />;
+}
+
+function LiveDrawBody({
+  locale,
+  accessToken,
+  deps,
+  groupId: preferredGroupId
+}: LiveDrawProps & { readonly groupId: string | null }) {
   const t = useMemo(() => liveCopy(locale), [locale]);
   const copy = useMemo(() => drawCopy(locale), [locale]);
   const reducedMotion = usePrefersReducedMotion();
@@ -302,7 +323,7 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
   // Resolve the group once, then load its cycles.
   useEffect(() => {
     let active = true;
-    void readDrawGroup(deps).then(async (read) => {
+    void readDrawGroup(deps, { groupId: preferredGroupId }).then(async (read) => {
       if (!active) return;
       if (read.status !== "ok") {
         return setLoad({
@@ -310,8 +331,8 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
           key:
             read.status === "no-group"
               ? "drawLive.noGroup"
-              : read.status === "multiple-groups"
-                ? "drawLive.multipleGroups"
+              : read.status === "choose-group"
+                ? "drawLive.chooseGroup"
                 : read.status === "unauthorized"
                   ? "drawLive.error.unauthorized"
                   : "drawLive.loadError"
@@ -323,7 +344,7 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
     return () => {
       active = false;
     };
-    // The group is resolved once per mount; the loaders are stable for a given `deps`.
+    // The group is resolved once per mount (a different group remounts this body); the loaders are stable for a given `deps`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -337,7 +358,7 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
     }
     let active = true;
     setLedger("loading");
-    void loadCycleLedgerFigures(cycleStart, deps).then((result) => {
+    void loadCycleLedgerFigures(cycleStart, deps, undefined, preferredGroupId).then((result) => {
       if (active) setLedger(result);
     });
     return () => {

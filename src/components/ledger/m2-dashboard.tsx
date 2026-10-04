@@ -36,6 +36,8 @@ import type { BankVerificationReasonCode, BankVerificationState, ReconciliationJ
 import type { LedgerErrorCode } from "@/lib/ledger/errors";
 import type { LedgerEntryType } from "@/lib/ledger/types";
 import { useSession } from "@/lib/auth/useSession";
+import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
+import { useActiveGroupPreference } from "@/lib/groups/useActiveGroup";
 import { loadCorrectionTargets, type CorrectionTarget, type LiveCorrectionTarget, type LiveLedgerResult } from "@/lib/ledger/clientRead";
 import { postCorrection, type PostCorrectionResult } from "@/lib/ledger/clientCorrect";
 import { buildCorrectionRequest, CorrectionBuildError, newCorrectionIdempotencyKey } from "@/lib/ledger/correction";
@@ -218,7 +220,7 @@ const liveStatusMessageKeys: Record<Exclude<LiveLedgerResult["status"], "ready">
   empty: "m2.correction.live.empty",
   unauthorized: "m2.correction.live.unauthorized",
   "no-group": "m2.correction.live.noGroup",
-  "multiple-groups": "m2.correction.live.multipleGroups",
+  "choose-group": "m2.correction.live.chooseGroup",
   "read-only": "m2.correction.live.readOnly",
   error: "m2.correction.live.error"
 };
@@ -332,6 +334,10 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
   const [correctionCount, setCorrectionCount] = useState(0);
   const session = useSession();
   const signedIn = session.status === "signed-in";
+  // The correction form follows the app's active group (see `GroupSwitcher`).
+  const { ready: groupReady, groupId: activeGroupId } = useActiveGroupPreference();
+  const activeGroupRef = useRef(activeGroupId);
+  activeGroupRef.current = activeGroupId;
   const [live, setLive] = useState<LiveLedgerResult | "loading">("loading");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<SubmitError | null>(null);
@@ -348,10 +354,17 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
     if (!signedIn || !correctionOpen) {
       return;
     }
+    if (!groupReady) {
+      setLive("loading");
+      return;
+    }
     let active = true;
     setLive("loading");
     setSelectedEntryId("");
-    void loadCorrectionTargets().then((result) => {
+    // A different group is a different ledger: an attempt in flight for the
+    // previous one must not carry its idempotency key over.
+    attempt.current = null;
+    void loadCorrectionTargets({}, { groupId: activeGroupId }).then((result) => {
       if (active) {
         setLive(result);
       }
@@ -359,7 +372,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
     return () => {
       active = false;
     };
-  }, [signedIn, correctionOpen]);
+  }, [signedIn, correctionOpen, groupReady, activeGroupId]);
 
   const liveTargets: readonly LiveCorrectionTarget[] = live !== "loading" && live.status === "ready" ? live.targets : [];
   const correctionTargets: readonly CorrectionTarget[] = signedIn
@@ -427,7 +440,12 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
       });
       setRationale("");
       setSelectedEntryId("");
-      void loadCorrectionTargets().then(setLive);
+      void loadCorrectionTargets({}, { groupId: activeGroupId }).then((next) => {
+        // Ignore a read for a group the person has since switched away from.
+        if (activeGroupRef.current === activeGroupId) {
+          setLive(next);
+        }
+      });
       return;
     }
     setSubmitError(result.status);
@@ -436,7 +454,12 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
       // the ledger as it is now, since the original may already be corrected.
       attempt.current = null;
       setSelectedEntryId("");
-      void loadCorrectionTargets().then(setLive);
+      void loadCorrectionTargets({}, { groupId: activeGroupId }).then((next) => {
+        // Ignore a read for a group the person has since switched away from.
+        if (activeGroupRef.current === activeGroupId) {
+          setLive(next);
+        }
+      });
     }
   }
 
@@ -507,6 +530,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
               </span>
             </a>
             <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+              <GroupSwitcher locale={locale} tone="light" className="w-full sm:w-64" />
               <span className="inline-flex min-h-9 items-center gap-2 rounded-full border border-gold-500/45 bg-gold/15 px-3 text-xs font-semibold text-coffee-700">
                 <CircleDashed aria-hidden="true" className="h-3.5 w-3.5" />
                 {t("m2.header.demoLabel")}

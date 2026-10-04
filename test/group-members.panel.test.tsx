@@ -20,6 +20,8 @@ vi.mock("@/lib/ledger/clientInvites", async (importOriginal) => ({
 }));
 
 import { GroupMembersPanel } from "@/components/ledger/GroupMembersPanel";
+import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
+import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
 
 const GROUP = "22222222-2222-4222-8222-222222222222";
 const OWNER = "11111111-1111-4111-8111-111111111111";
@@ -185,9 +187,9 @@ describe("GroupMembersPanel", () => {
     expect(await screen.findByText(/not in a group yet/)).toBeInTheDocument();
     none.unmount();
 
-    hoisted.api.loadMyGroup.mockResolvedValue({ status: "multiple-groups" });
+    hoisted.api.loadMyGroup.mockResolvedValue({ status: "choose-group" });
     const many = render(<GroupMembersPanel locale="en" />);
-    expect(await screen.findByText(/more than one group/)).toBeInTheDocument();
+    expect(await screen.findByText(/more than one group. Choose one with the group switcher/)).toBeInTheDocument();
     many.unmount();
 
     hoisted.api.loadMyGroup.mockResolvedValue({ status: "ready", groupId: GROUP, name: "E", role: "member" });
@@ -199,5 +201,52 @@ describe("GroupMembersPanel", () => {
   it("renders in Amharic", async () => {
     render(<GroupMembersPanel locale="am" />);
     expect(await screen.findByRole("heading", { name: "የቡድን አባላት" })).toBeInTheDocument();
+  });
+
+  it("follows the group switcher: each group's members and invites are read when it is chosen", async () => {
+    const OTHER = "44444444-4444-4444-8444-444444444444";
+    hoisted.session = { status: "signed-in", accessToken: "t", email: "o@example.test", userId: OWNER };
+    hoisted.api.loadMyGroup.mockImplementation(async (_deps: unknown, options?: { groupId?: string | null }) =>
+      options?.groupId === OTHER
+        ? { status: "ready", groupId: OTHER, name: "Iddir", role: "member" }
+        : options?.groupId === GROUP
+          ? { status: "ready", groupId: GROUP, name: "Equb", role: "owner" }
+          : { status: "choose-group" }
+    );
+    window.localStorage.clear();
+    const user = userEvent.setup();
+    render(
+      <ActiveGroupProvider
+        storage={window.localStorage}
+        fetchGroups={async () => ({
+          kind: "ok",
+          userId: OWNER,
+          groups: [
+            { groupId: GROUP, name: "Equb", role: "owner" },
+            { groupId: OTHER, name: "Iddir", role: "member" }
+          ]
+        })}
+      >
+        <GroupSwitcher locale="en" />
+        <GroupMembersPanel locale="en" />
+      </ActiveGroupProvider>
+    );
+    // Several groups and none chosen: no members are loaded on a guess.
+    expect(await screen.findByText(/Choose one with the group switcher/, { selector: "p[role='status'].text-sm" })).toBeInTheDocument();
+    expect(hoisted.api.loadMembers).not.toHaveBeenCalled();
+
+    const switcher = screen.getByRole("combobox", { name: "Group" });
+    await user.selectOptions(switcher, GROUP);
+    await screen.findByTestId("member-list");
+    expect(hoisted.api.loadMembers).toHaveBeenLastCalledWith(GROUP);
+    expect(hoisted.api.loadInvites).toHaveBeenLastCalledWith(GROUP);
+    expect(screen.getByRole("button", { name: "Create invite link" })).toBeInTheDocument();
+
+    // The other group: a plain member there, so the owner controls go away.
+    hoisted.api.loadInvites.mockClear();
+    await user.selectOptions(switcher, OTHER);
+    await waitFor(() => expect(hoisted.api.loadMembers).toHaveBeenLastCalledWith(OTHER));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Create invite link" })).toBeNull());
+    expect(hoisted.api.loadInvites).not.toHaveBeenCalled();
   });
 });

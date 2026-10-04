@@ -1,5 +1,5 @@
 import type { AuthedFetchDeps } from "@/lib/auth/authedFetch";
-import { fetchLedgerBalances, readEntriesPage, readMyGroup, type WireEntry } from "./clientRead";
+import { fetchLedgerBalances, readEntriesPage, readMyGroup, type GroupChoiceOptions, type WireEntry } from "./clientRead";
 import { STANDARD_ACCOUNTS } from "./accounts";
 import { LEDGER_ENTRY_TYPES, type LedgerEntryType } from "./types";
 import { isMaskedReference } from "@/lib/banking/referenceMask";
@@ -52,7 +52,7 @@ export type HomeLedgerResult =
   | { readonly status: "empty" }
   | { readonly status: "unauthorized" }
   | { readonly status: "no-group" }
-  | { readonly status: "multiple-groups" }
+  | { readonly status: "choose-group" }
   | { readonly status: "error" };
 
 /** The most the entries route returns in one read (`LEDGER_READ_MAX_LIMIT`): the feed is one such page. */
@@ -219,7 +219,7 @@ function balanceToMinorUnits(balance: string): bigint {
  * read with `beforeSequence = head + 1` so it ends exactly at the head the
  * balance was computed at: an entry appended between the two reads is in
  * neither, and the screen cannot show a contribution the balance does not
- * contain. The group rules (none, several, unauthorized) are those of the
+ * contain. The group rules (none, choose one of several, unauthorized) are those of the
  * correction form (`readMyGroup`).
  *
  * Two integrity refusals rather than a guess: a negative pot (cash cannot be
@@ -227,8 +227,11 @@ function balanceToMinorUnits(balance: string): bigint {
  * net differs from the server balance (the two would contradict each other on
  * screen).
  */
-export async function loadHomeLedger(deps: AuthedFetchDeps = {}): Promise<HomeLedgerResult> {
-  const mine = await readMyGroup(deps);
+export async function loadHomeLedger(
+  deps: AuthedFetchDeps = {},
+  options: GroupChoiceOptions = {}
+): Promise<HomeLedgerResult> {
+  const mine = await readMyGroup(deps, { groupId: options.groupId });
   if (mine.status !== "ok") {
     return { status: mine.status };
   }

@@ -13,6 +13,7 @@ vi.mock("@/lib/ledger/clientRead", () => ({ loadCorrectionTargets: hoisted.load 
 vi.mock("@/lib/ledger/clientCorrect", () => ({ postCorrection: hoisted.post }));
 
 import { M2Dashboard } from "@/components/ledger/m2-dashboard";
+import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
 
 const GROUP = "22222222-2222-4222-8222-222222222222";
 
@@ -67,8 +68,8 @@ describe("M2 correction form, signed in", () => {
     ["unauthorized", "Your session ended. Sign in again to load your ledger entries."],
     ["no-group", "You are not a member of a ledger group, so there are no entries to show."],
     [
-      "multiple-groups",
-      "You belong to more than one ledger group. Choosing between groups is not supported here yet, so no live entries are shown."
+      "choose-group",
+      "You belong to more than one ledger group. Choose one with the group switcher to see its entries."
     ],
     ["read-only", "Only the group owner or treasurer can record corrections. Ask them to make this correction."],
     ["error", "We could not load your ledger entries. Try again in a moment."]
@@ -255,5 +256,39 @@ describe("M2 correction form, signed out", () => {
     expect(await within(form).findByText("Demo compensating entry created")).toBeInTheDocument();
     expect(within(form).getByText(/Demo only/)).toBeInTheDocument();
     expect(hoisted.post).not.toHaveBeenCalled();
+  });
+
+  it("follows the group switcher: the chosen group is the one that is read", async () => {
+    const OTHER = "33333333-3333-4333-8333-333333333333";
+    hoisted.session = { status: "signed-in", userId: "user-1", email: "t@example.test", accessToken: "t" } as never;
+    hoisted.load.mockResolvedValue({ status: "ready", targets: [target("e1", "7")] });
+    const user = userEvent.setup();
+    const storage = window.localStorage;
+    storage.clear();
+    render(
+      <ActiveGroupProvider
+        storage={storage}
+        fetchGroups={async () => ({
+          kind: "ok",
+          userId: "user-1",
+          groups: [
+            { groupId: GROUP, name: "Bole Equb", role: "owner" },
+            { groupId: OTHER, name: "Family Iddir", role: "treasurer" }
+          ]
+        })}
+      >
+        <M2Dashboard />
+      </ActiveGroupProvider>
+    );
+    // Several groups and nothing chosen yet: the form is not opened on a guess.
+    const switcher = await screen.findByRole("combobox", { name: "Group" });
+    await user.click(screen.getAllByRole("button", { name: "Start a correction" })[0]);
+    await waitFor(() => expect(hoisted.load).toHaveBeenCalled());
+    expect(hoisted.load).toHaveBeenLastCalledWith({}, { groupId: null });
+
+    await user.selectOptions(switcher, OTHER);
+    await waitFor(() => expect(hoisted.load).toHaveBeenLastCalledWith({}, { groupId: OTHER }));
+    await user.selectOptions(switcher, GROUP);
+    await waitFor(() => expect(hoisted.load).toHaveBeenLastCalledWith({}, { groupId: GROUP }));
   });
 });

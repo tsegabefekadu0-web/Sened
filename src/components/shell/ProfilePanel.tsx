@@ -1,10 +1,12 @@
 "use client";
 
-import React, { useEffect, useId, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import { ArrowLeft, User } from "lucide-react";
 
 import { MemberAvatar } from "@/components/cultural/MemberAvatar";
 import type { AuthedFetchDeps } from "@/lib/auth/authedFetch";
+import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
+import { useActiveGroupPreference } from "@/lib/groups/useActiveGroup";
 import { createTranslator, type Locale, type MessageKey } from "@/lib/i18n";
 import { loadMyGroup, saveMyAttire, type MemberAttire } from "@/lib/ledger/clientInvites";
 
@@ -23,7 +25,7 @@ import { loadMyGroup, saveMyAttire, type MemberAttire } from "@/lib/ledger/clien
 type Load =
   | { readonly status: "loading" }
   | { readonly status: "ready"; readonly groupId: string; readonly userId: string | null }
-  | { readonly status: "no-group" | "multiple-groups" | "unauthorized" | "unavailable" | "error" };
+  | { readonly status: "no-group" | "choose-group" | "unauthorized" | "unavailable" | "error" };
 
 type Save = "idle" | "saving" | "saved" | "error";
 
@@ -35,7 +37,7 @@ const OPTIONS: ReadonlyArray<{ readonly value: MemberAttire; readonly label: Mes
 
 const LOAD_NOTICE: Record<Exclude<Load["status"], "loading" | "ready">, MessageKey> = {
   "no-group": "profile.noGroup",
-  "multiple-groups": "profile.multipleGroups",
+  "choose-group": "profile.chooseGroup",
   unauthorized: "profile.unauthorized",
   unavailable: "profile.unavailable",
   error: "profile.error"
@@ -55,10 +57,16 @@ export function ProfilePanel({
   const [load, setLoad] = useState<Load>({ status: "loading" });
   const [attire, setAttire] = useState<MemberAttire>("none");
   const [save, setSave] = useState<Save>("idle");
+  // Attire is per group: the panel follows the app's active group (see `GroupSwitcher`).
+  const { ready: groupReady, groupId: activeGroupId } = useActiveGroupPreference();
 
   useEffect(() => {
+    setLoad({ status: "loading" });
+    setAttire("none");
+    setSave("idle");
+    if (!groupReady) return;
     let active = true;
-    void loadMyGroup(deps).then((outcome) => {
+    void loadMyGroup(deps, { groupId: activeGroupId }).then((outcome) => {
       if (!active) return;
       if (outcome.status === "ready") {
         setAttire(outcome.attire);
@@ -74,14 +82,20 @@ export function ProfilePanel({
     };
     // `deps` is injected by tests only and is stable for the life of the panel.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [groupReady, activeGroupId]);
+
+  const readyGroup = useRef<string | null>(null);
+  readyGroup.current = load.status === "ready" ? load.groupId : null;
 
   const choose = (next: MemberAttire) => {
     if (load.status !== "ready" || save === "saving" || next === attire) return;
     const previous = attire;
+    const savingFor = load.groupId;
     setAttire(next);
     setSave("saving");
-    void saveMyAttire({ groupId: load.groupId, attire: next }, deps).then((outcome) => {
+    void saveMyAttire({ groupId: savingFor, attire: next }, deps).then((outcome) => {
+      // The person switched groups while this saved: the panel now shows another group's attire.
+      if (readyGroup.current !== savingFor) return;
       if (outcome.status === "saved") {
         setAttire(outcome.attire);
         setSave("saved");
@@ -106,6 +120,8 @@ export function ProfilePanel({
         </span>
         <h2 className="font-ethiopic text-lg font-bold text-[#1F1714]">{t("tab.panels.profile")}</h2>
       </div>
+
+      <GroupSwitcher locale={locale} tone="light" className="mt-3" />
 
       {load.status === "loading" ? (
         <p role="status" className="mt-3 text-sm text-[#6B5B4E]">

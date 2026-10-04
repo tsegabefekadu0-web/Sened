@@ -1,4 +1,5 @@
 import { authedFetch, NotSignedInError, type AuthedFetchDeps } from "@/lib/auth/authedFetch";
+import { pickGroup } from "./clientRead";
 
 /**
  * Browser helpers for invite links, group members and the treasurer toggle.
@@ -282,19 +283,27 @@ export type MyGroupOutcome =
       /** The caller's own user id, for previewing their avatar frame; null if the server did not say. */
       readonly userId: string | null;
     }
-  | { readonly status: "no-group" | "multiple-groups" }
+  | { readonly status: "no-group" | "choose-group" }
   | { readonly status: FailureStatus };
 
-/** The caller's single group from `GET /api/my-groups` (refuses to guess among several). */
-export async function loadMyGroup(deps: AuthedFetchDeps = {}): Promise<MyGroupOutcome> {
+/**
+ * The caller's active group from `GET /api/my-groups`: `options.groupId` when it
+ * is one of theirs, else their only group. With several and none chosen it
+ * reports `choose-group` rather than guessing.
+ */
+export async function loadMyGroup(
+  deps: AuthedFetchDeps = {},
+  options: { readonly groupId?: string | null } = {}
+): Promise<MyGroupOutcome> {
   try {
     const response = await authedFetch("/api/my-groups", { method: "GET" }, deps);
     if (!response.ok) return { status: failureFor(response.status) };
     const body = (await response.json().catch(() => null)) as { groups?: unknown } | null;
     if (!body || !Array.isArray(body.groups)) return { status: "error" };
     if (body.groups.length === 0) return { status: "no-group" };
-    if (body.groups.length > 1) return { status: "multiple-groups" };
-    const group = body.groups[0] as Record<string, unknown>;
+    const picked = pickGroup(body.groups as readonly Record<string, unknown>[], options.groupId);
+    if (picked === null) return { status: "choose-group" };
+    const group = picked as Record<string, unknown>;
     if (
       typeof group.groupId !== "string" ||
       typeof group.name !== "string" ||

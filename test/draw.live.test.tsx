@@ -23,6 +23,8 @@ vi.mock("@/lib/draw/haptics", async (importOriginal) => ({
 
 import DrawPage from "@/app/draw/page";
 import { LiveDraw } from "@/components/draw/LiveDraw";
+import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
+import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
 import { drawErrorKey, readSeal, sealForDraw } from "@/lib/draw/clientDraw";
 import { DRAW_ERROR_CODES } from "@/lib/draw/types";
 import { InMemoryDrawRepository } from "@/lib/draw/repository";
@@ -606,8 +608,45 @@ describe("roles", () => {
 
     const many = createServer("owner", { groups: 2 });
     renderAs(many, TREASURER);
-    expect(await screen.findByTestId("draw-live-refusal")).toHaveTextContent("more than one group");
+    expect(await screen.findByTestId("draw-live-refusal")).toHaveTextContent("Choose one with the group switcher");
     expect(many.calls).not.toContain("GET /api/ledger/members");
+  });
+
+  it("with several groups, the switcher decides which group's draw is read, and a switch reloads it", async () => {
+    const user = userEvent.setup();
+    const server = createServer("owner", { groups: 2 });
+    hoisted.session = { status: "signed-in", accessToken: tokenFor(TREASURER), email: "t@example.test", userId: TREASURER };
+    const base = deps(server, TREASURER);
+    const fetchSpy = vi.fn(base.fetchImpl);
+    switchDevice(TREASURER);
+    render(
+      <ActiveGroupProvider
+        storage={window.localStorage}
+        fetchGroups={async () => ({
+          kind: "ok",
+          userId: TREASURER,
+          groups: [
+            { groupId: GROUP, name: "Bole Equb", role: "owner" },
+            { groupId: TENANT, name: "Family Iddir", role: "owner" }
+          ]
+        })}
+      >
+        <GroupSwitcher locale="en" />
+        <LiveDraw locale="en" accessToken={tokenFor(TREASURER)} deps={{ ...base, fetchImpl: fetchSpy as unknown as typeof fetch }} />
+      </ActiveGroupProvider>
+    );
+    expect(await screen.findByTestId("draw-live-refusal")).toHaveTextContent("Choose one with the group switcher");
+    const membersFor = () =>
+      fetchSpy.mock.calls.map(([input]) => String(input)).filter((url) => url.startsWith("/api/ledger/members"));
+    expect(membersFor()).toEqual([]);
+
+    const switcher = screen.getByRole("combobox", { name: "Group" });
+    await user.selectOptions(switcher, GROUP);
+    await screen.findByTestId("draw-live");
+    expect(membersFor().at(-1)).toContain(`groupId=${GROUP}`);
+
+    await user.selectOptions(switcher, TENANT);
+    await waitFor(() => expect(membersFor().at(-1)).toContain(`groupId=${TENANT}`));
   });
 });
 

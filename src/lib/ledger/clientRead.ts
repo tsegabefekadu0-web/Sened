@@ -24,7 +24,8 @@ export type LiveLedgerResult =
   | { readonly status: "empty" }
   | { readonly status: "unauthorized" }
   | { readonly status: "no-group" }
-  | { readonly status: "multiple-groups" }
+  /** The caller is in several groups and none is chosen yet: the group switcher decides. */
+  | { readonly status: "choose-group" }
   /** The caller is a plain member: they may read but not record entries. */
   | { readonly status: "read-only" }
   | { readonly status: "error" };
@@ -102,7 +103,7 @@ function toTarget(entry: WireEntry): LiveCorrectionTarget | null {
   };
 }
 
-/** The caller's single group, with its chart of accounts and raw entries. */
+/** The active group's ledger: its chart of accounts and raw entries. */
 export type GroupLedgerRead =
   | {
       readonly status: "ok";
@@ -112,11 +113,11 @@ export type GroupLedgerRead =
     }
   | { readonly status: "unauthorized" }
   | { readonly status: "no-group" }
-  | { readonly status: "multiple-groups" }
+  | { readonly status: "choose-group" }
   | { readonly status: "read-only" }
   | { readonly status: "error" };
 
-/** The caller's single group (id, role, chart of accounts) from `GET /api/my-groups`. */
+/** One of the caller's groups (id, role, chart of accounts) from `GET /api/my-groups`. */
 export type MyGroupRead =
   | {
       readonly status: "ok";
@@ -126,15 +127,49 @@ export type MyGroupRead =
     }
   | { readonly status: "unauthorized" }
   | { readonly status: "no-group" }
-  | { readonly status: "multiple-groups" }
+  | { readonly status: "choose-group" }
   | { readonly status: "error" };
 
+/** Which of the caller's groups to act on. */
+export interface GroupChoiceOptions {
+  /**
+   * The caller's active group (see `src/lib/groups`). It is only a preference:
+   * it is used when it is one of the groups the server just returned for this
+   * caller, and ignored otherwise (a stale or foreign id never takes effect).
+   * The server re-checks membership for every group id regardless.
+   */
+  readonly groupId?: string | null;
+}
+
 /**
- * Resolve which group the caller is acting for. Exactly one group or a refusal:
- * with none there is nothing to act on, and with several this refuses rather
- * than choosing, because guessing is how money lands on the wrong ledger.
+ * Pick the group the caller is acting for from the groups the server returned
+ * for them: the preferred one when it is among them, the only one when there
+ * is exactly one, otherwise nothing (the caller must choose). Never guesses
+ * among several, because that is how money lands on the wrong ledger.
  */
-export async function readMyGroup(deps: AuthedFetchDeps = {}): Promise<MyGroupRead> {
+export function pickGroup<T extends { readonly groupId?: unknown }>(
+  groups: readonly T[],
+  preferred: string | null | undefined
+): T | null {
+  if (preferred) {
+    const match = groups.find((group) => group.groupId === preferred);
+    if (match) {
+      return match;
+    }
+  }
+  return groups.length === 1 ? groups[0] : null;
+}
+
+/**
+ * Resolve which group the caller is acting for: the preferred (active) group if
+ * they belong to it, else their only group. With none there is nothing to act
+ * on; with several and no valid preference this reports `choose-group` rather
+ * than choosing.
+ */
+export async function readMyGroup(
+  deps: AuthedFetchDeps = {},
+  options: GroupChoiceOptions = {}
+): Promise<MyGroupRead> {
   try {
     const response = await authedFetch("/api/my-groups", { method: "GET" }, deps);
     if (response.status === 401) {
@@ -147,10 +182,10 @@ export async function readMyGroup(deps: AuthedFetchDeps = {}): Promise<MyGroupRe
     if (groups.length === 0) {
       return { status: "no-group" };
     }
-    if (groups.length > 1) {
-      return { status: "multiple-groups" };
+    const group = pickGroup(groups, options.groupId);
+    if (group === null) {
+      return { status: "choose-group" };
     }
-    const group = groups[0];
     if (typeof group.groupId !== "string") {
       return { status: "error" };
     }
@@ -292,9 +327,9 @@ export async function fetchLedgerBalances(groupId: string, deps: AuthedFetchDeps
  * correction form and the home screen.
  *
  * Every non-success is a distinct result, because "you have nothing" and "we
- * could not look" must not render the same. With more than one group this
- * refuses rather than choosing: picking the group someone is acting for is
- * exactly the guess that puts money on the wrong ledger.
+ * could not look" must not render the same. The group is the caller's active
+ * one (`options.groupId`) or their only one; with several and none chosen this
+ * reports `choose-group` rather than guessing.
  *
  * `writerOnly` is for callers that go on to record entries: only the owner and
  * treasurer may (the database enforces it), so say so up front rather than
@@ -302,10 +337,10 @@ export async function fetchLedgerBalances(groupId: string, deps: AuthedFetchDeps
  */
 export async function readGroupLedger(
   deps: AuthedFetchDeps = {},
-  options: { readonly writerOnly?: boolean; readonly limit?: number } = {}
+  options: GroupChoiceOptions & { readonly writerOnly?: boolean; readonly limit?: number } = {}
 ): Promise<GroupLedgerRead> {
   try {
-    const mine = await readMyGroup(deps);
+    const mine = await readMyGroup(deps, { groupId: options.groupId });
     if (mine.status !== "ok") {
       return { status: mine.status };
     }
@@ -325,11 +360,14 @@ export async function readGroupLedger(
 }
 
 /**
- * Load the entries the correction form can target: the caller's group, then
+ * Load the entries the correction form can target: the caller's active group, then
  * its entries (see `readGroupLedger`).
  */
-export async function loadCorrectionTargets(deps: AuthedFetchDeps = {}): Promise<LiveLedgerResult> {
-  const read = await readGroupLedger(deps, { writerOnly: true });
+export async function loadCorrectionTargets(
+  deps: AuthedFetchDeps = {},
+  options: GroupChoiceOptions = {}
+): Promise<LiveLedgerResult> {
+  const read = await readGroupLedger(deps, { writerOnly: true, groupId: options.groupId });
   if (read.status !== "ok") {
     return { status: read.status };
   }

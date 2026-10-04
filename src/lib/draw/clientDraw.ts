@@ -50,15 +50,18 @@ export interface DrawGroup {
 
 export type DrawGroupRead =
   | { readonly status: "ok"; readonly group: DrawGroup }
-  | { readonly status: "unauthorized" | "no-group" | "multiple-groups" | "error" };
+  | { readonly status: "unauthorized" | "no-group" | "choose-group" | "error" };
 
 /**
- * The caller's single group, its roster and its canonical payout accounts.
- * Refuses on none or several groups (see `readMyGroup`): choosing for the
- * caller is how a payout lands on the wrong ledger.
+ * The caller's active group, its roster and its canonical payout accounts.
+ * With several groups and none chosen it reports `choose-group` (see
+ * `readMyGroup`): choosing for the caller is how a payout lands on the wrong ledger.
  */
-export async function readDrawGroup(deps: AuthedFetchDeps = {}): Promise<DrawGroupRead> {
-  const mine = await readMyGroup(deps);
+export async function readDrawGroup(
+  deps: AuthedFetchDeps = {},
+  options: { readonly groupId?: string | null } = {}
+): Promise<DrawGroupRead> {
+  const mine = await readMyGroup(deps, { groupId: options.groupId });
   if (mine.status !== "ok") {
     return { status: mine.status };
   }

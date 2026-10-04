@@ -114,7 +114,7 @@ const LIVE_NOTICE_KEYS: Readonly<Record<Exclude<HomeLedgerResult["status"], "rea
   empty: "home.live.empty",
   unauthorized: "home.live.unauthorized",
   "no-group": "home.live.noGroup",
-  "multiple-groups": "home.live.multipleGroups",
+  "choose-group": "home.live.chooseGroup",
   error: "home.live.error"
 };
 
@@ -301,6 +301,7 @@ export default function SenedHome() {
       <div className="w-full md:max-w-5xl lg:max-w-6xl bg-[#FAF6F0] h-[100dvh] md:h-[92vh] md:min-h-[820px] md:max-h-[960px] flex flex-col relative overflow-hidden md:rounded-3xl md:border md:border-[#382B24]/50 md:shadow-[0_25px_80px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.06)]">
         {/* Dark Ethiopian Coffee Header with Embroidery, Meskel Cross & Audio Plaque */}
         <Header
+          locale={locale}
           onOpenDigest={() => setIsDigestModalOpen(true)}
           isPlayingAudio={isDigestModalOpen}
         />

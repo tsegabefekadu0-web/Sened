@@ -125,7 +125,7 @@ describe("loadInvites, loadMembers, loadMyGroup", () => {
     expect((await loadMembers(GROUP, deps(403).deps)).status).toBe("forbidden");
   });
 
-  it("picks the single group and refuses to guess among several", async () => {
+  it("picks the single group, honours the active group among several, and never guesses", async () => {
     const group = { groupId: GROUP, name: "Equb", role: "owner" };
     expect(await loadMyGroup(deps(200, { groups: [group] }).deps)).toEqual({
       status: "ready",
@@ -138,7 +138,13 @@ describe("loadInvites, loadMembers, loadMyGroup", () => {
     expect(await loadMyGroup(deps(200, { groups: [{ ...group, attire: "gabi", userId: "u1" }] }).deps)).toMatchObject({ attire: "gabi", userId: "u1" });
     expect((await loadMyGroup(deps(200, { groups: [{ ...group, attire: "male" }] }).deps)).status).toBe("error");
     expect(await loadMyGroup(deps(200, { groups: [] }).deps)).toEqual({ status: "no-group" });
-    expect(await loadMyGroup(deps(200, { groups: [group, group] }).deps)).toEqual({ status: "multiple-groups" });
+    const other = { ...group, groupId: "33333333-3333-4333-8333-333333333333", name: "Iddir", role: "member" };
+    const both = { groups: [group, other] };
+    expect(await loadMyGroup(deps(200, both).deps)).toEqual({ status: "choose-group" });
+    expect(await loadMyGroup(deps(200, both).deps, { groupId: other.groupId })).toMatchObject({ groupId: other.groupId, name: "Iddir", role: "member" });
+    expect(await loadMyGroup(deps(200, both).deps, { groupId: GROUP })).toMatchObject({ groupId: GROUP, name: "Equb" });
+    // A stale or foreign preference is ignored, never obeyed.
+    expect(await loadMyGroup(deps(200, both).deps, { groupId: "55555555-5555-4555-8555-555555555555" })).toEqual({ status: "choose-group" });
   });
 });
 

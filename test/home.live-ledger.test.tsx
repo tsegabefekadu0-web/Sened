@@ -21,6 +21,7 @@ vi.mock("@/components/voice/VoiceModal", () => ({
 }));
 
 import SenedHome from "@/app/page";
+import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
 import { translate, type MessageKey } from "@/lib/i18n";
 import { pickTibebFrame } from "@/lib/memberAvatarStyle";
 
@@ -260,7 +261,7 @@ describe("home screen: signed in shows the group ledger", () => {
     ["error", "home.live.error"],
     ["unauthorized", "home.live.unauthorized"],
     ["no-group", "home.live.noGroup"],
-    ["multiple-groups", "home.live.multipleGroups"]
+    ["choose-group", "home.live.chooseGroup"]
   ] as const)("shows %s with no balance and no sample numbers", async (status, key) => {
     hoisted.load.mockResolvedValue({ status });
     render(<SenedHome />);
@@ -313,5 +314,60 @@ describe("home screen: signed out shows labelled sample data", () => {
     expect(screen.getByText("175,000")).toBeInTheDocument();
     expect(screen.queryByText("184,999")).not.toBeInTheDocument();
     expect(await digestText()).toContain(am("audio.script.potBalance", { amount: "175,000" }));
+  });
+});
+
+describe("home screen: the group switcher decides which ledger is read", () => {
+  const A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+  beforeEach(() => {
+    hoisted.load.mockReset();
+    hoisted.modalProps.length = 0;
+    window.localStorage.clear();
+    hoisted.session = { ...SIGNED_IN, userId: "u1" } as typeof hoisted.session;
+  });
+
+  function mountHome() {
+    return render(
+      <ActiveGroupProvider
+        storage={window.localStorage}
+        fetchGroups={async () => ({
+          kind: "ok",
+          userId: "u1",
+          groups: [
+            { groupId: A, name: "Bole Equb", role: "owner" },
+            { groupId: B, name: "Family Iddir", role: "member" }
+          ]
+        })}
+      >
+        <SenedHome />
+      </ActiveGroupProvider>
+    );
+  }
+
+  it("reads nothing until a group is chosen, then re-reads for each group chosen", async () => {
+    hoisted.load.mockImplementation(async (_deps: unknown, options: { groupId: string | null }) =>
+      options.groupId === null
+        ? { status: "choose-group" }
+        : options.groupId === A
+          ? ready("100.00", [{ id: "e1", sequence: "1", amount: "100.00" }])
+          : ready("250.00", [{ id: "e2", sequence: "9", amount: "250.00" }])
+    );
+    const user = userEvent.setup();
+    mountHome();
+
+    const select = await screen.findByRole("combobox", { name: am("groups.switcher.label") });
+    expect(await screen.findByRole("alert")).toHaveTextContent(am("home.live.chooseGroup"));
+    expect(screen.queryByText("175,000")).not.toBeInTheDocument();
+
+    await user.selectOptions(select, A);
+    expect(await screen.findByText("100.00")).toBeInTheDocument();
+    expect(hoisted.load).toHaveBeenLastCalledWith({}, { groupId: A });
+
+    await user.selectOptions(select, B);
+    expect(await screen.findByText("250.00")).toBeInTheDocument();
+    expect(screen.queryByText("100.00")).not.toBeInTheDocument();
+    expect(hoisted.load).toHaveBeenLastCalledWith({}, { groupId: B });
   });
 });

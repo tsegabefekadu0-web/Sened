@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { ServiceWorkerRegistration } from "@/components/pwa/ServiceWorkerRegistration";
+import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
 
 export const metadata: Metadata = {
   title: "Sened (ሰነድ) — የህብረተሰብ እቁብ እና ዕድር አስተዳዳሪ",
@@ -50,7 +51,8 @@ export default function RootLayout({
       </head>
       <body className="min-h-screen bg-[#F4EEE5] font-ethiopic antialiased selection:bg-terracotta-500 selection:text-white">
         <ServiceWorkerRegistration />
-        {children}
+        {/* One active group for the whole app: a client provider inside this server layout. */}
+        <ActiveGroupProvider>{children}</ActiveGroupProvider>
       </body>
     </html>
   );

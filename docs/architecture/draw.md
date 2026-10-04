@@ -577,8 +577,12 @@ effect did *not* happen** — `expect(service.commit).not.toHaveBeenCalled()`.
   with a fixture roster. It carries a `data-testid="draw-demo-banner"` label in
   both languages and never calls `/api/draw/*`.
 - **Signed in** — `LiveDraw` (`src/components/draw/LiveDraw.tsx`), backed by
-  `src/lib/draw/clientDraw.ts`. The group is resolved with `readMyGroup` (it
-  refuses on no group or several groups) and the roster comes from
+  `src/lib/draw/clientDraw.ts`. The group is the app's **active group**
+  (`readMyGroup` with the id from the group switcher; see
+  `src/lib/groups/activeGroup.ts`): the only group, else the user's remembered
+  choice, else the screen asks (`choose-group`) and reads nothing. It refuses on
+  no group. Switching groups remounts the screen so nothing of one group's
+  cycle, draw or seal shows under another. The roster comes from
   `GET /api/ledger/members`.
 
 The screen is organised around a **cycle** (picked from the group's list, or

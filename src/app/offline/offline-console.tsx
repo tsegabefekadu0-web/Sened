@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { OfflineSyncEngine } from "@/lib/offline/engine";
 import { HttpSyncTransport, UnconfiguredSyncTransport } from "@/lib/offline/transport";
+import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
 import { useSession } from "@/lib/auth/useSession";
+import { useActiveGroup } from "@/lib/groups/useActiveGroup";
 import { readMyGroup } from "@/lib/ledger/clientRead";
 import { isContentHashingAvailable } from "@/lib/offline/hash";
 import { offlineCopy, type OfflineLocale } from "@/lib/offline/copy";
@@ -46,13 +48,16 @@ import { formatEtbDisplay } from "@/lib/ledger/money";
 /**
  * The group a *signed-out* (or unconfigured) device keeps its purely local
  * desk under. It is a placeholder, not a real group: nothing recorded under it
- * can be queued for the server. A signed-in device resolves its own group
- * (`readMyGroup`) and refuses to queue an entry until it has one.
+ * can be queued for the server. A signed-in device resolves the app's active
+ * group (`readMyGroup`, see `GroupSwitcher`) and refuses to queue an entry until
+ * it has one. A draft keeps the group it was created under: its `groupId` is
+ * fixed at save time, and the desk only lists the active group's drafts, so a
+ * later switch hides them but never moves them.
  */
 const LOCAL_GROUP_ID = "22222222-2222-4222-8222-222222222222";
 const PLACEHOLDER_CASH_ACCOUNT = "44444444-4444-4444-8444-444444444444";
 const PLACEHOLDER_INCOME_ACCOUNT = "55555555-5555-4555-8555-555555555555";
-const GROUP_CACHE_KEY = "sened.offline.group.v1";
+const GROUP_CACHE_KEY = "sened.offline.group.v2";
 
 type GroupState =
   | { readonly status: "idle" }
@@ -64,32 +69,28 @@ type GroupState =
       readonly cashAccountId: string | null;
       readonly incomeAccountId: string | null;
     }
-  | { readonly status: "no-group" | "multiple-groups" | "unresolved" };
+  | { readonly status: "no-group" | "choose-group" | "unresolved" };
 
 interface CachedGroup {
-  readonly email: string;
-  readonly groupId: string;
   readonly role: string | null;
   readonly cashAccountId: string | null;
   readonly incomeAccountId: string | null;
 }
 
-/** Per-device convenience only: lets a signed-in treasurer keep drafting with no network. */
-function readCachedGroup(email: string | null): GroupState | null {
+interface GroupCache {
+  readonly email: string;
+  readonly groups: Readonly<Record<string, CachedGroup>>;
+}
+
+function readGroupCache(email: string | null): GroupCache | null {
   if (!email) {
     return null;
   }
   try {
     const raw = window.localStorage.getItem(GROUP_CACHE_KEY);
-    const value = raw ? (JSON.parse(raw) as Partial<CachedGroup>) : null;
-    if (value && value.email === email && typeof value.groupId === "string") {
-      return {
-        status: "ready",
-        groupId: value.groupId,
-        role: typeof value.role === "string" ? value.role : null,
-        cashAccountId: typeof value.cashAccountId === "string" ? value.cashAccountId : null,
-        incomeAccountId: typeof value.incomeAccountId === "string" ? value.incomeAccountId : null
-      };
+    const value = raw ? (JSON.parse(raw) as Partial<GroupCache>) : null;
+    if (value && value.email === email && typeof value.groups === "object" && value.groups !== null) {
+      return { email, groups: value.groups as Record<string, CachedGroup> };
     }
   } catch {
     // Storage blocked or corrupt: no cache.
@@ -97,12 +98,44 @@ function readCachedGroup(email: string | null): GroupState | null {
   return null;
 }
 
+/**
+ * Per-device convenience only: lets a signed-in treasurer keep drafting with no
+ * network. Keyed by group, so one group's accounts are never offered for another.
+ * With a preferred (active) group only that group's entry counts; with none, the
+ * cache answers only when this account has exactly one cached group (the old
+ * single-group behaviour) and never picks among several.
+ */
+function readCachedGroup(email: string | null, preferredGroupId: string | null): GroupState | null {
+  const cache = readGroupCache(email);
+  if (!cache) {
+    return null;
+  }
+  const ids = Object.keys(cache.groups);
+  const groupId = preferredGroupId ?? (ids.length === 1 ? ids[0] : null);
+  const value = groupId ? cache.groups[groupId] : undefined;
+  if (!groupId || !value) {
+    return null;
+  }
+  return {
+    status: "ready",
+    groupId,
+    role: typeof value.role === "string" ? value.role : null,
+    cashAccountId: typeof value.cashAccountId === "string" ? value.cashAccountId : null,
+    incomeAccountId: typeof value.incomeAccountId === "string" ? value.incomeAccountId : null
+  };
+}
+
 function writeCachedGroup(email: string | null, group: Extract<GroupState, { status: "ready" }>): void {
   if (!email) {
     return;
   }
   try {
-    window.localStorage.setItem(GROUP_CACHE_KEY, JSON.stringify({ email, ...group, status: undefined }));
+    const previous = readGroupCache(email);
+    const { groupId, role, cashAccountId, incomeAccountId } = group;
+    window.localStorage.setItem(
+      GROUP_CACHE_KEY,
+      JSON.stringify({ email, groups: { ...(previous?.groups ?? {}), [groupId]: { role, cashAccountId, incomeAccountId } } })
+    );
   } catch {
     // Best effort.
   }
@@ -202,15 +235,23 @@ export function OfflineConsole(props: OfflineConsoleProps) {
   const accessToken = session.status === "signed-in" ? session.accessToken : null;
   const email = session.status === "signed-in" ? session.email : null;
   const [group, setGroup] = useState<GroupState>({ status: "idle" });
+  // Which group the desk is for: the app's active group (see `GroupSwitcher`).
+  const activeGroup = useActiveGroup();
+  const groupReady = !activeGroup.provided || activeGroup.status !== "loading";
+  const activeGroupId = activeGroup.activeGroupId;
+  const needsChoice = activeGroup.needsChoice;
 
   useEffect(() => {
     if (!accessToken) {
       setGroup({ status: "idle" });
       return;
     }
-    let active = true;
     setGroup({ status: "loading" });
-    void readMyGroup({ getToken: async () => accessToken }).then((read) => {
+    if (!groupReady) {
+      return;
+    }
+    let active = true;
+    void readMyGroup({ getToken: async () => accessToken }, { groupId: activeGroupId }).then((read) => {
       if (!active) {
         return;
       }
@@ -225,18 +266,23 @@ export function OfflineConsole(props: OfflineConsoleProps) {
         };
         writeCachedGroup(email, ready);
         setGroup(ready);
-      } else if (read.status === "no-group" || read.status === "multiple-groups") {
+      } else if (read.status === "no-group" || read.status === "choose-group") {
         setGroup({ status: read.status });
       } else {
-        // Could not look (offline, 401, 5xx). A group this account resolved
-        // before is still its group; otherwise say so rather than guess.
-        setGroup(readCachedGroup(email) ?? { status: "unresolved" });
+        // Could not look (offline, 401, 5xx). The group this account chose and
+        // resolved before is still its group; with several and none chosen, or
+        // none ever resolved, say so rather than guess.
+        setGroup(
+          needsChoice ? { status: "choose-group" } : (readCachedGroup(email, activeGroupId) ?? { status: "unresolved" })
+        );
       }
     });
     return () => {
       active = false;
     };
-  }, [accessToken, email]);
+    // `needsChoice` only matters inside the failure branch of a read this effect already made.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, email, groupReady, activeGroupId]);
 
   const GROUP_ID = group.status === "ready" ? group.groupId : LOCAL_GROUP_ID;
   const authorization = props.authorization ?? (accessToken ? `Bearer ${accessToken}` : undefined);
@@ -250,8 +296,8 @@ export function OfflineConsole(props: OfflineConsoleProps) {
         : null
       : group.status === "no-group"
         ? "offline.group.none"
-        : group.status === "multiple-groups"
-          ? "offline.group.multiple"
+        : group.status === "choose-group"
+          ? "offline.group.choose"
           : "offline.group.unresolved";
 
   const syncModeKey: string | null = props.transport
@@ -534,7 +580,8 @@ export function OfflineConsole(props: OfflineConsoleProps) {
             <h1 className="text-2xl font-semibold">{t("offline.title")}</h1>
             <p className="mt-1 max-w-md text-sm text-offline-quiet">{t("offline.subtitle")}</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <GroupSwitcher locale={locale} tone="dark" className="w-full sm:w-56" />
             <span
               className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${
                 connectivity === "online"

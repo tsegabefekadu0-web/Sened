@@ -43,7 +43,10 @@ export const RATE_LIMITED = new Set([
   // route spends the server's ScholarXIV key, so it takes the write rule like
   // the other third-party-backed routes.
   "/api/governance/recommendations",
-  "/api/governance/citations"
+  "/api/governance/citations",
+  // Cron-only (shared-secret) and spends the bank provider's quota, so it is
+  // metered as a write even though a legitimate scheduler calls it once a minute.
+  "/api/reconciliation/drain"
 ]);
 
 const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
@@ -108,7 +111,7 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
   if (pathname === "/api/governance/recommendations") {
     return READ_RULE;
   }
-  if (pathname === "/api/governance/citations") {
+  if (pathname === "/api/governance/citations" || pathname === "/api/reconciliation/drain") {
     return WRITE_RULE;
   }
   if (pathname.endsWith("/sync")) {

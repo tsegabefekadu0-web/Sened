@@ -301,6 +301,11 @@ export interface ReconciliationJobStore {
     nextAttemptAt: Date
   ): Promise<ReconciliationJob>;
   claimNext(workerId: string, now: Date, leaseMs: number): Promise<ReconciliationClaim | null>;
+  /**
+   * Move jobs that are leased-and-expired on their final attempt to
+   * MANUAL_REVIEW (claimNext can never return them). Returns how many.
+   */
+  reapExhausted?(): Promise<number>;
   reschedule(
     jobId: string,
     workerId: string,

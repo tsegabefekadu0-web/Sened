@@ -66,7 +66,7 @@ graph TD
   - Verification adapter for Telebirr, Commercial Bank of Ethiopia (CBE), and Awash Bank.
   - Real-time reference validation endpoint: verifies amount, sender/receiver, and timestamp within 800ms.
 - [ ] **2.3 Graceful Degradation & Reconciliation Queue**:
-  - Status: unresolved verifications are marked `PENDING_RECONCILIATION` and queued in Postgres (`bank_reconciliation_jobs`), with jittered exponential backoff and lease-based claiming implemented in `src/lib/banking/reconciliation.ts`. Nothing in the app calls `drainReconciliationQueue` yet (no route, cron or worker), so the queue is not drained automatically when connectivity returns.
+  - Status: unresolved verifications are marked `PENDING_RECONCILIATION` and queued in Postgres (`bank_reconciliation_jobs`), with jittered exponential backoff and lease-based claiming (`src/lib/banking/reconciliation.ts`). `POST /api/reconciliation/drain` (shared-secret `RECONCILIATION_CRON_SECRET`, service-role DB access, bounded batch and time budget, JSON summary) now drains the queue and posts newly verified jobs to the ledger through the same sink as the synchronous path. It is only as automatic as its scheduler: nothing in this repo triggers it, so a cron (or Supabase `pg_cron`) must call it every minute or so; see `docs/DEPLOYMENT.md` "Scheduling the reconciliation drain". It also needs migration `20261001100000_reconciliation_worker_rpcs.sql`. Not yet verified against a live Supabase project or links.et; covered by route tests and the SQL harness only.
   - Offline / network outage fallback: transactions marked `PENDING_RECONCILIATION`.
   - Exponential backoff queue that automatically checks bank status when connectivity returns.
 

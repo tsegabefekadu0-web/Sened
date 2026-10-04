@@ -148,3 +148,27 @@ describe("the governance routes are metered", () => {
     expect(response.headers.get("X-RateLimit-Limit")).toBe(String(READ_RULE.limit));
   });
 });
+
+describe("the reconciliation drain is metered", () => {
+  it("registers the cron route and charges it the write rule", () => {
+    expect(RATE_LIMITED.has("/api/reconciliation/drain")).toBe(true);
+    expect(isRateLimitedPath("/api/reconciliation/drain")).toBe(true);
+    expect(resolveRateLimit("/api/reconciliation/drain", "POST")).toEqual(WRITE_RULE);
+  });
+
+  it("answers with rate-limit headers and throttles a hammering caller", () => {
+    const url = "http://localhost/api/reconciliation/drain";
+    const first = middleware(
+      new NextRequest(url, { method: "POST", headers: { authorization: "Bearer cron" } })
+    );
+    expect(first.headers.get("X-RateLimit-Limit")).toBe(String(WRITE_RULE.limit));
+
+    let last: Response = first;
+    for (let call = 0; call <= WRITE_RULE.limit; call += 1) {
+      last = middleware(
+        new NextRequest(url, { method: "POST", headers: { authorization: "Bearer cron" } })
+      );
+    }
+    expect(last.status).toBe(429);
+  });
+});

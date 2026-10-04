@@ -10,7 +10,10 @@ image. It needs a Supabase project for auth and data; everything else
 
 1. Create a Supabase project. Note the project URL and the **anon** key
    (Settings > API). The anon key is public by design; every `/api` route
-   re-verifies the caller's JWT. Never put the service-role key in this app.
+   re-verifies the caller's JWT. The service-role key is not needed by any user-facing
+   route; the only thing that reads it is the scheduled reconciliation drain
+   (see "Scheduling the reconciliation drain"), and it is optional until you
+   enable that.
 2. Enable email/password or whichever sign-in the app's `/sign-in` page uses in
    Authentication settings, and add your deployed origin to the allowed
    redirect URLs.
@@ -22,7 +25,7 @@ image. It needs a Supabase project for auth and data; everything else
    `20260927100000_ledger_group_provisioning.sql`, `20260927120000_draw_member_commitments.sql`,
    `20260927130000_draw_member_rpcs.sql`, `20260927140000_client_read_paths.sql`,
    `20260928100000_draw_round_response_shape.sql`, `20260929100000_ledger_member_roles.sql`,
-   `20260930100000_ledger_group_invites.sql`. Later files depend on earlier ones.
+   `20260930100000_ledger_group_invites.sql`, `20261001100000_reconciliation_worker_rpcs.sql`. Later files depend on earlier ones.
 
 ### Migration harness (run before applying to a real project)
 
@@ -63,6 +66,10 @@ The full, commented list is [`.env.example`](../.env.example). Summary:
 | `LINKS_ET_TIMEOUT_MS` | server | optional (default 5000) | `linkset.ts` | default |
 | `LINKS_ET_ETB_OFFSET_MINUTES` | server | optional (default 180) | `linkset.ts` | default |
 | `LINKS_ET_TIMESTAMP_TOLERANCE_SECONDS` | server | optional (default 900) | `linkset.ts` | default |
+| `RECONCILIATION_CRON_SECRET` | server secret (>= 32 chars) | for the reconciliation drain | `src/lib/banking/reconciliationDrainRoute.ts` | `POST /api/reconciliation/drain` returns 503 and runs nothing |
+| `SUPABASE_SERVICE_ROLE_KEY` | server secret, **service role** | for the reconciliation drain | same | the drain returns 503 `not_configured` |
+| `RECONCILIATION_DRAIN_MAX_JOBS` | server | optional (default 25, max 100) | same | default |
+| `RECONCILIATION_DRAIN_BUDGET_MS` | server | optional (default 20000, 1000-50000) | same | default |
 | `SCHOLARXIV_API_URL` | server | optional | `src/lib/governance/scholarxiv.ts` | bundled citations only |
 | `SCHOLARXIV_API_KEY` | server secret (`sxv_...`) | optional | same | same |
 | `SCHOLARXIV_TIMEOUT_MS` | server | optional (default 8000) | same | default |
@@ -149,6 +156,107 @@ is an unauthenticated JSON endpoint that also proves API routes are live.
 - [ ] **Offline sync:** on `/offline`, go offline, queue a draft, reconnect and confirm it syncs via `/api/sync` and is recorded once.
 - [ ] **Governance:** `/governance` renders recommendations; citation chips show the bundled list, and "confirmed" appears only when the ScholarXIV variables are set.
 - [ ] **Bank verification** (if enabled): a verification attempt reaches links.et or fails closed with a clear message; no secrets appear in responses or logs.
+- [ ] **Reconciliation drain** (if bank verification is enabled): the scheduler is configured (section 6a), `POST /api/reconciliation/drain` with the secret returns 200, and without it returns 401.
+
+## 6a. Scheduling the reconciliation drain
+
+When links.et answers `202 queued` (or times out, or rate-limits), the
+verification is stored as `PENDING_RECONCILIATION` and a row is kept in
+`bank_reconciliation_jobs`. Nothing re-checks it until something calls
+`POST /api/reconciliation/drain`, so **you must schedule that call** or pending
+verifications stay pending forever.
+
+### What to configure
+
+| Variable | Purpose |
+|---|---|
+| `RECONCILIATION_CRON_SECRET` | Shared secret the scheduler sends. At least 32 characters (`openssl rand -base64 32`). Unset or shorter: the route returns 503 and does nothing. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key, **runtime env var only**. The claim/reschedule/finalize RPCs are granted to `service_role` only, and a cron has no user session, so this is the one place the app uses it. It is never sent to the browser and is read only by the drain route. Do not pass it as a build arg. |
+| `RECONCILIATION_DRAIN_MAX_JOBS`, `RECONCILIATION_DRAIN_BUDGET_MS` | Optional per-call bounds (defaults 25 jobs, 20 s). A call stops starting new jobs after the budget; a job already started finishes (worst case: budget plus one provider call, about `LINKS_ET_TIMEOUT_MS`). Keep the budget comfortably under your platform's request timeout. |
+
+Apply `20261001100000_reconciliation_worker_rpcs.sql` first: without it the
+drain cannot read a binding or post to the ledger as the job's owner and every
+job would be rescheduled as unavailable.
+
+### The request
+
+```
+curl -fsS -X POST https://<your-host>/api/reconciliation/drain \
+  -H "Authorization: Bearer $RECONCILIATION_CRON_SECRET"
+```
+
+Responses: `200` with a JSON summary, `401` wrong or missing secret, `503`
+secret or service-role key not configured, `502` a storage failure mid-run (the
+body carries the partial summary; the scheduler should alert and retry). All
+responses are `Cache-Control: no-store`. A `200` looks like:
+
+```
+{"claimed":3,"verified":2,"rejected":0,"stillPending":1,"failed":0,"reaped":0,
+ "nextDueAt":"2026-10-01T10:31:12.000Z","truncated":false,"durationMs":1840}
+```
+
+`failed` counts jobs that this call itself took to `MANUAL_REVIEW` because their
+attempts ran out; they need a person. `reaped` counts jobs found stuck by an
+earlier worker that died holding its final-attempt lease; the drain moves them
+to `MANUAL_REVIEW` first (they could never be claimed again). `nextDueAt` is the earliest retry among jobs rescheduled by that
+call. `truncated: true` means the batch or time bound ended the run early; the
+next call continues.
+
+### Safe to overlap
+
+Claiming uses `for update skip locked` and a per-claim lease token, and
+reschedule/finalize refuse unless the worker id and token match, so two
+overlapping calls can never work the same job. A call that crashes leaves its
+job leased; it becomes claimable again when the 2-minute lease expires. A
+verified job is posted to the ledger with the idempotency key
+`bank-verified-<intent key>`, so reprocessing never double-posts.
+
+### Option A: any cron (recommended)
+
+Call the endpoint every minute (or every few minutes) from whatever you
+already run: the host's scheduled-jobs feature, a GitHub Actions `schedule`,
+or a crontab on any machine that can reach the app:
+
+```
+* * * * * curl -fsS -m 60 -X POST https://<your-host>/api/reconciliation/drain -H "Authorization: Bearer $RECONCILIATION_CRON_SECRET" >/dev/null
+```
+
+Note that the app's per-instance rate limiter allows the route 40 calls per
+minute per distinct credential; once a minute is far below that.
+
+### Option B: Supabase `pg_cron` + `pg_net` (optional)
+
+Enable the `pg_cron` and `pg_net` extensions (Database > Extensions), store the
+secret in Vault so it is not in the cron definition, then schedule the call.
+Verify the syntax against your project's extension versions before relying on it:
+
+```sql
+select vault.create_secret('<the same value as RECONCILIATION_CRON_SECRET>', 'reconciliation_cron_secret');
+
+select cron.schedule(
+  'sened-reconciliation-drain',
+  '* * * * *',
+  $$
+  select net.http_post(
+    url := 'https://<your-host>/api/reconciliation/drain',
+    headers := jsonb_build_object(
+      'Authorization',
+      'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'reconciliation_cron_secret')
+    ),
+    timeout_milliseconds := 30000
+  );
+  $$
+);
+```
+
+`pg_net` is fire-and-forget, so check its response log
+(`select * from net._http_response order by created desc limit 10`) for
+non-200s. Remove the schedule with `select cron.unschedule('sened-reconciliation-drain');`.
+
+### Verify it works
+
+- Without the header: `401`. With `RECONCILIATION_CRON_SECRET` unset on the server: `503`.
+- With the secret and an empty queue: `200` with all counts `0`.
 
 ## 7. End-to-end tests (Playwright)
 

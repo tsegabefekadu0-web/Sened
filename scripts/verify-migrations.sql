@@ -2058,3 +2058,140 @@ end;
 $invites$;
 
 select 'ALL DRAW BINDING CHECKS PASSED' as result;
+
+-- ---------------------------------------------------------------------------
+-- Reconciliation worker RPCs (20261001100000_reconciliation_worker_rpcs.sql)
+--
+-- The cron-driven drain runs as service_role, which has no auth.uid(). Checks
+-- that the two worker wrappers (a) only work for a CLAIMED, unexpired job,
+-- (b) act as the job's owner, (c) are idempotent on replay, (d) refuse a
+-- posting that is not the bank posting for that intent, and (e) are not
+-- callable by `authenticated`. Runs in a transaction that is rolled back.
+-- ---------------------------------------------------------------------------
+reset role;
+begin;
+select set_config('request.jwt.claim.sub','',true);
+insert into public.bank_account_bindings (id,user_id,tenant_id,group_id,ledger_account_id,provider,account_label,account_fingerprint_hmac,sender_fingerprint_hmac,receiver_fingerprint_hmac)
+values ('cccccccc-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111','bbbbbbbb-0000-4000-8000-000000000001','aaaaaaaa-0000-4000-8000-000000000001','aaaaaaaa-0000-4000-8000-0000000000a1','telebirr','T',repeat('a',64),repeat('b',64),repeat('c',64));
+insert into public.bank_verification_intents (id,user_id,tenant_id,group_id,bank_account_binding_id,ledger_account_id,provider,provider_reference_hmac,idempotency_key,request_fingerprint,amount,direction,occurred_at)
+values ('dddddddd-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111','bbbbbbbb-0000-4000-8000-000000000001','aaaaaaaa-0000-4000-8000-000000000001','cccccccc-0000-4000-8000-000000000001','aaaaaaaa-0000-4000-8000-0000000000a1','telebirr',repeat('d',64),'bank-intent-9',repeat('e',64),25.00,'inbound',now());
+insert into public.bank_reconciliation_jobs (verification_id,user_id,provider) values ('dddddddd-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111','telebirr');
+
+delete from public.bank_reconciliation_jobs where verification_id <> 'dddddddd-0000-4000-8000-000000000001';
+set local role service_role;
+-- 1. unclaimed job: both wrappers refuse
+do $$ begin
+  begin perform public.get_bank_account_binding_for_reconciliation_v1('cccccccc-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111'); raise exception 'FAIL unclaimed binding'; exception when sqlstate '42501' then null; end;
+end $$;
+do $$ begin if (public.claim_bank_reconciliation_job_v1('w1', 60)->'job'->>'state') is distinct from 'CLAIMED' then raise exception 'worker check: claim failed'; end if; end $$;
+-- 2. claimed: binding readable
+do $$ begin if public.get_bank_account_binding_for_reconciliation_v1('cccccccc-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111')->>'accountLabel' is distinct from 'T' then raise exception 'worker check: binding not readable by worker rpc'; end if; end $$;
+do $$ begin if coalesce(nullif(current_setting('request.jwt.claim.sub', true),''),'') <> '' then raise exception 'worker check: identity leaked after rpc'; end if; end $$;
+-- wrong user refused
+do $$ begin
+  begin perform public.get_bank_account_binding_for_reconciliation_v1('cccccccc-0000-4000-8000-000000000001','22222222-2222-4222-8222-222222222222'); raise exception 'FAIL wrong user'; exception when sqlstate '42501' then null; end;
+end $$;
+-- 3. ledger post
+create temp table r as select public.post_ledger_entry_for_reconciliation_v1(
+ '11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,
+ '[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"credit","amount":"25.00"}]'::jsonb) as j;
+do $$ begin if (select j->>'replayed' from r) <> 'false' then raise exception 'worker check: first post replayed'; end if; end $$;
+create temp table r2 as select public.post_ledger_entry_for_reconciliation_v1(
+ '11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,
+ '[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"credit","amount":"25.00"}]'::jsonb) as j;
+do $$ begin if (select j->>'replayed' from r2) <> 'true' or (select j->'entry'->>'id' from r2) <> (select j->'entry'->>'id' from r) then raise exception 'worker check: replay was not idempotent'; end if; end $$;
+-- refusals
+do $$ begin
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','other-key',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"credit","amount":"25.00"}]'::jsonb); raise exception 'FAIL key'; exception when sqlstate '42501' then null; end;
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"2500.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"credit","amount":"2500.00"}]'::jsonb); raise exception 'FAIL amount'; exception when sqlstate '42501' then null; end;
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'disbursement',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"credit","amount":"25.00"}]'::jsonb); raise exception 'FAIL type'; exception when sqlstate '42501' then null; end;
+end $$;
+-- 4. grants: authenticated cannot call
+reset role; set local role authenticated;
+do $$ begin
+  begin perform public.get_bank_account_binding_for_reconciliation_v1('cccccccc-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111'); raise exception 'FAIL grant'; exception when sqlstate '42501' then null; end;
+end $$;
+rollback;
+select 'ALL RECONCILIATION WORKER CHECKS PASSED' as result;
+
+-- ---------------------------------------------------------------------------
+-- Stuck-job reaper (reap_exhausted_bank_reconciliation_jobs_v1)
+--
+-- claim only reclaims an expired lease while attempts remain, so a worker that
+-- dies on its FINAL attempt used to leave a job that was never claimed again
+-- and never reached MANUAL_REVIEW. Checks that the reaper (a) moves that job to
+-- MANUAL_REVIEW exactly as reschedule does on exhaustion, (b) leaves an expired
+-- lease with attempts left for claim to reclaim as before, (c) leaves a live
+-- lease alone, (d) is idempotent, and (e) is not callable by `authenticated`.
+-- ---------------------------------------------------------------------------
+reset role;
+begin;
+delete from public.bank_reconciliation_jobs;
+insert into public.bank_account_bindings (id,user_id,tenant_id,group_id,ledger_account_id,provider,account_label,account_fingerprint_hmac,sender_fingerprint_hmac,receiver_fingerprint_hmac)
+values ('cccccccc-0000-4000-8000-0000000000f1','11111111-1111-4111-8111-111111111111','bbbbbbbb-0000-4000-8000-000000000001','aaaaaaaa-0000-4000-8000-000000000001','aaaaaaaa-0000-4000-8000-0000000000a1','telebirr','R',repeat('a',64),repeat('b',64),repeat('c',64));
+insert into public.bank_verification_intents (id,user_id,tenant_id,group_id,bank_account_binding_id,ledger_account_id,provider,provider_reference_hmac,idempotency_key,request_fingerprint,amount,direction,occurred_at)
+select ('eeeeeeee-0000-4000-8000-00000000000' || n)::uuid,'11111111-1111-4111-8111-111111111111','bbbbbbbb-0000-4000-8000-000000000001','aaaaaaaa-0000-4000-8000-000000000001','cccccccc-0000-4000-8000-0000000000f1','aaaaaaaa-0000-4000-8000-0000000000a1','telebirr',repeat(n::text,64),'reap-intent-' || n,repeat('e',64),10.00,'inbound',now()
+from generate_series(1,3) n;
+-- 1: final attempt, lease expired (stuck). 2: attempts left, lease expired. 3: final attempt, lease live.
+insert into public.bank_reconciliation_jobs (verification_id,user_id,provider,state,attempt,max_attempts,lease_owner,lease_token,lease_expires_at) values
+  ('eeeeeeee-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111','telebirr','CLAIMED',1,1,'dead',gen_random_uuid(),clock_timestamp() - interval '1 minute'),
+  ('eeeeeeee-0000-4000-8000-000000000002','11111111-1111-4111-8111-111111111111','telebirr','CLAIMED',1,3,'dead',gen_random_uuid(),clock_timestamp() - interval '1 minute'),
+  ('eeeeeeee-0000-4000-8000-000000000003','11111111-1111-4111-8111-111111111111','telebirr','CLAIMED',1,1,'busy',gen_random_uuid(),clock_timestamp() + interval '10 minutes');
+
+set local role service_role;
+do $$
+begin
+  if public.reap_exhausted_bank_reconciliation_jobs_v1() <> 1 then
+    raise exception 'reaper check: expected exactly one job reaped';
+  end if;
+  if public.reap_exhausted_bank_reconciliation_jobs_v1() <> 0 then
+    raise exception 'reaper check: second run was not a no-op';
+  end if;
+end $$;
+reset role;
+do $$
+declare
+  j public.bank_reconciliation_jobs%rowtype;
+  i public.bank_verification_intents%rowtype;
+begin
+  select * into j from public.bank_reconciliation_jobs where verification_id = 'eeeeeeee-0000-4000-8000-000000000001';
+  if j.state <> 'MANUAL_REVIEW' or j.lease_token is not null or j.lease_owner is not null
+     or j.lease_expires_at is not null or j.terminal_at is null or j.last_reason_code <> 'MANUAL_REVIEW_REQUIRED' then
+    raise exception 'reaper check: stuck job not in MANUAL_REVIEW shape (state=%)', j.state;
+  end if;
+  select * into i from public.bank_verification_intents where id = 'eeeeeeee-0000-4000-8000-000000000001';
+  if i.state <> 'PENDING_RECONCILIATION' or i.reason_code <> 'MANUAL_REVIEW_REQUIRED' then
+    raise exception 'reaper check: intent not marked MANUAL_REVIEW_REQUIRED';
+  end if;
+  if (select count(*) from public.bank_verification_events
+      where verification_id = 'eeeeeeee-0000-4000-8000-000000000001' and event_type = 'MANUAL_REVIEW') <> 1 then
+    raise exception 'reaper check: expected one MANUAL_REVIEW event';
+  end if;
+  if (select state from public.bank_reconciliation_jobs where verification_id = 'eeeeeeee-0000-4000-8000-000000000003') <> 'CLAIMED' then
+    raise exception 'reaper check: live lease was touched';
+  end if;
+  if (select state from public.bank_reconciliation_jobs where verification_id = 'eeeeeeee-0000-4000-8000-000000000002') <> 'CLAIMED' then
+    raise exception 'reaper check: job with attempts left was touched';
+  end if;
+end $$;
+-- The job with attempts left is still reclaimable by claim, as before.
+set local role service_role;
+do $$
+begin
+  if (public.claim_bank_reconciliation_job_v1('w2', 60) -> 'job' ->> 'verificationId') is distinct from 'eeeeeeee-0000-4000-8000-000000000002' then
+    raise exception 'reaper check: expired lease with attempts left was not reclaimable';
+  end if;
+end $$;
+reset role;
+set local role authenticated;
+do $$
+begin
+  begin
+    perform public.reap_exhausted_bank_reconciliation_jobs_v1();
+    raise exception 'reaper check: authenticated could call the reaper';
+  exception when sqlstate '42501' then null;
+  end;
+end $$;
+reset role;
+rollback;
+select 'ALL RECONCILIATION REAPER CHECKS PASSED' as result;

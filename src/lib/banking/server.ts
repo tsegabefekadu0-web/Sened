@@ -32,6 +32,7 @@ import type {
 } from "./types";
 import { createAesGcmReferenceVaultFromEnvironment } from "./vault";
 import { BankVerificationService } from "./service";
+import { ReconciliationCoordinator } from "./reconciliation";
 
 interface SupabaseErrorLike {
   readonly code?: string;
@@ -118,15 +119,31 @@ function parseBindingSummary(value: unknown): BankAccountBindingSummary | null {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class SupabaseBankVerificationRepository implements BankVerificationRepository, ReconciliationJobStore {
-  constructor(private readonly client: SupabaseClient) {}
+  /**
+   * @param options.readBindingsAsReconciliationWorker Look bindings up through
+   *   `get_bank_account_binding_for_reconciliation_v1`, for the cron-driven
+   *   drain. A service-role client has no `auth.uid()`, so the user-scoped RPC
+   *   would return nothing for every job. The worker RPC takes the owner from
+   *   the context and refuses unless a claimed job covers that binding. Never
+   *   set it for a user-scoped client.
+   */
+  constructor(
+    private readonly client: SupabaseClient,
+    private readonly options: { readonly readBindingsAsReconciliationWorker?: boolean } = {}
+  ) {}
 
   async getBinding(
     bindingId: string,
-    _context: BankVerificationContext
+    context: BankVerificationContext
   ): Promise<BankAccountBinding | null> {
-    const { data, error } = await this.client.rpc("get_bank_account_binding_v1", {
-      p_binding_id: bindingId
-    });
+    const { data, error } = this.options.readBindingsAsReconciliationWorker
+      ? await this.client.rpc("get_bank_account_binding_for_reconciliation_v1", {
+          p_binding_id: bindingId,
+          p_user_id: context.userId
+        })
+      : await this.client.rpc("get_bank_account_binding_v1", {
+          p_binding_id: bindingId
+        });
     if (error) {
       throw mapSupabaseError(error);
     }
@@ -273,6 +290,14 @@ export class SupabaseBankVerificationRepository implements BankVerificationRepos
     };
   }
 
+  async reapExhausted(): Promise<number> {
+    const { data, error } = await this.client.rpc("reap_exhausted_bank_reconciliation_jobs_v1");
+    if (error) {
+      throw mapSupabaseError(error);
+    }
+    return typeof data === "number" && Number.isInteger(data) && data >= 0 ? data : 0;
+  }
+
   async reschedule(
     jobId: string,
     workerId: string,
@@ -385,4 +410,42 @@ export function createProductionBankVerificationService(
     adapterResolver: createProductionBankProviderAdapter,
     ledgerSink
   });
+}
+
+/**
+ * The reconciliation drain's wiring: the same verifier and ledger sink as the
+ * synchronous path, driven by a service-role client.
+ *
+ * `client` MUST be the service-role client; this is the only place that is
+ * true. The queue RPCs (claim, reschedule, finalize) are granted to
+ * `service_role` only, and the two worker RPCs below stand in for the
+ * `auth.uid()`-scoped binding read and ledger post that a cron has no session
+ * for. Everything else (matching, evidence hashing, the sink's refusal to
+ * guess an account, ledger idempotency) is the shared code, not a copy.
+ */
+export function createProductionReconciliationCoordinator(
+  client: SupabaseClient,
+  options: { readonly clock?: () => Date } = {}
+): ReconciliationCoordinator {
+  const repository = new SupabaseBankVerificationRepository(client, {
+    readBindingsAsReconciliationWorker: true
+  });
+  const ledgerSink = new LedgerBankVerificationSink({
+    ledger: new LedgerService(
+      new SupabaseLedgerRepository(client, { postAsReconciliationWorker: true })
+    ),
+    accounts: async (intent) => {
+      const resolver = new SupabaseLedgerAccountResolver(client);
+      return resolver.resolve(intent.groupId, intent.ledgerAccountId, intent.direction);
+    }
+  });
+  const service = new BankVerificationService({
+    repository,
+    jobStore: repository,
+    referenceVault: createLazyEnvironmentVault(),
+    adapterResolver: createProductionBankProviderAdapter,
+    ledgerSink,
+    ...(options.clock ? { clock: options.clock } : {})
+  });
+  return new ReconciliationCoordinator(repository, service, options.clock);
 }

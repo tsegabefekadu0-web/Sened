@@ -269,3 +269,118 @@ describe("loadHomeLedger provenance", () => {
     expect(result.status === "ready" && result.summary.contributions[0].provenance).toBeNull();
   });
 });
+
+describe("loadHomeLedger attribution (who paid a cash contribution)", () => {
+  const PAYER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const OTHER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const RECORDER = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const record = {
+    source: "treasurer",
+    memberUserId: PAYER,
+    recordedBy: RECORDER,
+    recordedAt: "2026-10-10T09:00:00.000Z",
+    cycleId: null,
+    round: null,
+    revision: 1,
+    reason: null
+  };
+  const proof = {
+    kind: "bank_verification",
+    provider: "cbe",
+    verifiedAt: "2026-09-01T09:00:05.000Z",
+    verificationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    memberUserId: OTHER
+  };
+  const members = {
+    members: [
+      { userId: PAYER, role: "member", joinedAt: "2026-08-01T00:00:00.000Z", email: "payer@example.test" },
+      { userId: OTHER, role: "member", joinedAt: "2026-08-01T00:00:00.000Z", email: null }
+    ]
+  };
+
+  it("carries the treasurer's record onto the contribution and names the payer from the members API", async () => {
+    const d = deps([
+      json(groupBody()),
+      json(balancesBody("20.00", 2)),
+      json({ entries: [{ ...wire(2), attribution: record }, wire(1)] }),
+      json(members)
+    ]);
+    const result = await loadHomeLedger(d);
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") return;
+    const [attributed, plain] = result.summary.contributions;
+    expect(attributed.provenance).toBeNull();
+    expect(attributed.attribution).toEqual(record);
+    expect(plain.attribution).toBeNull();
+    expect(result.memberLabels).toEqual({ [PAYER]: "payer@example.test" });
+  });
+
+  it("makes bank provenance win over a treasurer's record that came with it", async () => {
+    const result = await loadHomeLedger(
+      deps([
+        json(groupBody()),
+        json(balancesBody("10.00", 1)),
+        json({ entries: [{ ...wire(1), provenance: proof, attribution: record }] }),
+        json(members)
+      ])
+    );
+    if (result.status !== "ready") throw new Error("not ready");
+    const [row] = result.summary.contributions;
+    expect(row.attribution).toMatchObject({ source: "bank_verification", memberUserId: OTHER, recordedAt: proof.verifiedAt });
+    expect(result.memberLabels).toEqual({ [OTHER]: null });
+  });
+
+  it.each([
+    ["an unknown source", { ...record, source: "admin" }],
+    ["a missing source", { ...record, source: undefined }],
+    ["a non-uuid member", { ...record, memberUserId: "someone" }],
+    ["a non-uuid recorder", { ...record, recordedBy: "someone" }],
+    ["an unparseable time", { ...record, recordedAt: "yesterday" }],
+    ["a zero revision", { ...record, revision: 0 }],
+    ["a fractional round", { ...record, round: 1.5 }],
+    ["a bare string", "paid"],
+    ["an array", [record]]
+  ])("treats %s as no attribution, so a payer is never half-shown", async (_name, bad) => {
+    const result = await loadHomeLedger(
+      deps([json(groupBody()), json(balancesBody("10.00", 1)), json({ entries: [{ ...wire(1), attribution: bad }] })])
+    );
+    expect(result.status === "ready" && result.summary.contributions[0].attribution).toBeNull();
+  });
+
+  it("reads the members for an owner or treasurer so they can be offered as payers, and for nobody else", async () => {
+    for (const role of ["owner", "treasurer"]) {
+      const d = deps([json(groupBody(role)), json(balancesBody("10.00", 1)), json({ entries: [wire(1)] }), json(members)]);
+      const result = await loadHomeLedger(d);
+      expect(result.status).toBe("ready");
+      if (result.status !== "ready") return;
+      expect(result.groupId).toBe(GROUP);
+      expect(result.role).toBe(role);
+      expect(result.attributableMembers.map((member) => member.userId)).toEqual([PAYER, OTHER]);
+      expect(d.fetchImpl.mock.calls[3][0]).toBe(`/api/ledger/members?groupId=${GROUP}`);
+    }
+    const plain = deps([json(groupBody("member")), json(balancesBody("10.00", 1)), json({ entries: [wire(1)] })]);
+    const result = await loadHomeLedger(plain);
+    expect(plain.fetchImpl).toHaveBeenCalledTimes(3);
+    expect(result.status === "ready" && result.attributableMembers).toEqual([]);
+    expect(result.status === "ready" && result.role).toBe("member");
+  });
+
+  it("offers a plain member nothing even when a treasurer record names a payer", async () => {
+    const result = await loadHomeLedger(
+      deps([json(groupBody("member")), json(balancesBody("10.00", 1)), json({ entries: [{ ...wire(1), attribution: record }] }), json(members)])
+    );
+    expect(result.status === "ready" && result.attributableMembers).toEqual([]);
+    expect(result.status === "ready" && result.memberLabels).toEqual({ [PAYER]: "payer@example.test" });
+  });
+
+  it("still shows the row, attributed, when the members cannot be read", async () => {
+    const result = await loadHomeLedger(
+      deps([json(groupBody("treasurer")), json(balancesBody("10.00", 1)), json({ entries: [{ ...wire(1), attribution: record }] }), json({}, 502)])
+    );
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") return;
+    expect(result.summary.contributions[0].attribution?.memberUserId).toBe(PAYER);
+    expect(result.attributableMembers).toEqual([]);
+    expect(result.memberLabels).toEqual({});
+  });
+});

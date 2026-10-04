@@ -4082,3 +4082,1017 @@ end;
 $attire$;
 rollback;
 select 'ALL MEMBER ATTIRE CHECKS PASSED' as result;
+
+-- ---------------------------------------------------------------------------
+-- Contribution attribution and collateral (20261010100000_contribution_attribution_and_collateral.sql)
+--
+-- ATTRIBUTION. A manual (cash) contribution has no payer unless an owner or
+-- treasurer records one beside the hash-chained entry. Checks that (a) only an
+-- owner/treasurer of the group records it - a plain member, an outsider and an
+-- anonymous caller are refused, (b) it is refused for a foreign group's entry (the
+-- same answer as an absent one), a non-contribution entry, a corrected
+-- contribution, a member who is not an ACTIVE member of the group (an outsider and
+-- an inactive member), and an entry a verified bank receipt already names (bank
+-- provenance wins, for record and for supersede, and the read reports the bank even
+-- when a manual row came first), (c) there is ONE attribution per entry (replaying
+-- the same one is a replay, a different one is attribution_exists) and a mistake
+-- is fixed only by an explicit superseding row with a reason, the history staying
+-- a single line, (d) the table is append-only (update, delete and truncate are
+-- refused, a client role cannot write it, the unique indexes hold against a direct
+-- insert) and a row's own invariants hold for ANY writer (trigger), (e) the
+-- entry's hash and the chain head are untouched, (f) the read function returns the
+-- effective attribution with its documented keys to any member and refuses an
+-- outsider, and (g) grants.
+--
+-- COLLATERAL. Checks that (a) only an owner/treasurer proposes, for a member who
+-- actually won a round of THAT cycle with rounds left, with an active guarantor
+-- who is not the winner, (b) the guarantee needs the GUARANTOR'S OWN consent: an
+-- owner, a treasurer, the winner and an outsider cannot accept or decline for them,
+-- and the trigger refuses a directly inserted accepted event by anyone else,
+-- (c) the state is derived from append-only events (accepted once, ending once,
+-- release and supersede carry a reason, replays are replays, terminal states do
+-- not reopen), (d) nothing moves money (entries and the chain head are
+-- unchanged), and (e) the DEFAULT DERIVATION: for each winner and each later round,
+-- met / flagged / not_due follow the documented rule - a draw opened with no
+-- qualifying attributed contribution is flagged, a contribution recorded before the
+-- previous reveal does not pay a later round, an amount under the cycle's share does
+-- not count, an explicit cycle+round attribution assigns that round, one entry pays
+-- one round, bank provenance counts, another cycle's attribution does not, and a
+-- corrected contribution stops counting - and nothing about it is stored. Runs in a
+-- transaction that is rolled back.
+-- ---------------------------------------------------------------------------
+reset role;
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+
+insert into auth.users (id, email) values
+  ('55555555-5555-4555-8555-555555555555', 'treasurer-role@example.test'),
+  ('66666666-6666-4666-8666-666666666666', 'member-d@example.test'),
+  ('77777777-7777-4777-8777-777777777777', 'other-owner@example.test'),
+  ('88888888-8888-4888-8888-888888888888', 'inactive@example.test')
+on conflict (id) do nothing;
+
+-- Run `p_sql` as `p_uid` (empty = anonymous) under the authenticated role and
+-- demand that it fails with exactly this message and SQLSTATE.
+create or replace function pg_temp.expect_error(p_uid text, p_sql text, p_msg text, p_state text)
+returns void
+language plpgsql
+as $$
+declare
+  got_msg text;
+  got_state text;
+begin
+  perform set_config('request.jwt.claim.sub', coalesce(p_uid, ''), true);
+  begin
+    set local role authenticated;
+    execute p_sql;
+    reset role;
+    raise exception 'no error' using errcode = 'XX999';
+  exception when others then
+    got_msg := sqlerrm;
+    got_state := sqlstate;
+  end;
+  reset role;
+  if got_state = 'XX999' then
+    raise exception 'EXPECT FAILED: no error from [%], wanted % %', p_sql, p_state, p_msg;
+  end if;
+  if got_msg <> p_msg or got_state <> p_state then
+    raise exception 'EXPECT FAILED: [%] wanted % %, got % %', p_sql, p_state, p_msg, got_state, got_msg;
+  end if;
+end;
+$$;
+
+-- Run `p_sql` (a select returning jsonb) as `p_uid` and return the result.
+create or replace function pg_temp.call_as(p_uid text, p_sql text)
+returns jsonb
+language plpgsql
+as $$
+declare
+  result jsonb;
+begin
+  perform set_config('request.jwt.claim.sub', coalesce(p_uid, ''), true);
+  set local role authenticated;
+  execute p_sql into result;
+  reset role;
+  return result;
+exception when others then
+  reset role;
+  raise;
+end;
+$$;
+
+-- Fixture: a committed and revealed draw won by `p_winner`, as the superuser.
+create or replace function pg_temp.fx_reveal(p_group uuid, p_tenant uuid, p_cycle uuid, p_round integer, p_winner uuid, p_actor uuid)
+returns timestamptz
+language plpgsql
+as $$
+declare
+  draw_uuid uuid := gen_random_uuid();
+  revealed timestamptz;
+begin
+  insert into public.draw_commitments (
+    draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce,
+    roster_digest, participants, pot_amount, total_rounds, reserve_ratio_bps, actor_id, idempotency_key
+  ) values (
+    draw_uuid, p_group, p_tenant, p_cycle, p_round, repeat('a', 64), 'nonce-0123456789abcdef-XYZ',
+    repeat('b', 64),
+    jsonb_build_array(jsonb_build_object('memberId', p_winner, 'ticket', repeat('c', 64), 'contributionAmount', '100.00')),
+    500.00, 4, 1000, p_actor, 'fx-commit-' || draw_uuid::text
+  );
+  insert into public.draw_reveals (
+    draw_id, commitment, seed, transcript_digest, selection_digest, selected_index,
+    winner_member_id, winning_ticket, payout_amount, reserve_amount, actor_id
+  ) values (
+    draw_uuid, repeat('a', 64), 'reveal-seed-0123456789', repeat('f', 64), repeat('a', 64), 0,
+    p_winner, repeat('c', 64), 450.00, 50.00, p_actor
+  ) returning revealed_at into revealed;
+  return revealed;
+end;
+$$;
+
+-- Fixture: post a contribution of `p_amount` as the group owner (the session user is switched).
+create or replace function pg_temp.fx_post(p_group uuid, p_key text, p_amount text, p_cash uuid, p_income uuid)
+returns uuid
+language plpgsql
+as $$
+begin
+  perform set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', true);
+  return (public.post_ledger_entry_v1(p_group, p_key, now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', p_cash, 'direction', 'debit', 'amount', p_amount),
+                      jsonb_build_object('accountId', p_income, 'direction', 'credit', 'amount', p_amount))) -> 'entry' ->> 'id')::uuid;
+end;
+$$;
+
+-- Fixture: reverse an entry with a correction, as the group owner.
+create or replace function pg_temp.fx_correct(p_group uuid, p_key text, p_entry uuid, p_amount text, p_cash uuid, p_income uuid)
+returns void
+language plpgsql
+as $$
+begin
+  perform set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', true);
+  perform public.post_ledger_entry_v1(p_group, p_key, now(), 'correction', p_entry,
+    'Reversing this payment, recorded in error.',
+    jsonb_build_array(jsonb_build_object('accountId', p_cash, 'direction', 'credit', 'amount', p_amount),
+                      jsonb_build_object('accountId', p_income, 'direction', 'debit', 'amount', p_amount)));
+end;
+$$;
+
+do $attr$
+declare
+  owner_uid  constant text := '11111111-1111-4111-8111-111111111111';
+  t_uid      constant text := '55555555-5555-4555-8555-555555555555'; -- treasurer role
+  a_uid      constant text := '22222222-2222-4222-8222-222222222222'; -- winner of round 1
+  b_uid      constant text := '33333333-3333-4333-8333-333333333333'; -- winner of round 2, guarantor
+  c_uid      constant text := '66666666-6666-4666-8666-666666666666'; -- plain member
+  h_uid      constant text := '77777777-7777-4777-8777-777777777777'; -- owner of the OTHER group
+  i_uid      constant text := '88888888-8888-4888-8888-888888888888'; -- inactive member
+  outsider   constant text := '44444444-4444-4444-8444-444444444444';
+  group_g    uuid;
+  group_h    uuid;
+  tenant_g   uuid;
+  tenant_h   uuid;
+  cash_g     uuid;
+  income_g   uuid;
+  expense_g  uuid;
+  cash_h     uuid;
+  income_h   uuid;
+  cycle_1    uuid;
+  cycle_2    uuid;
+  binding_c  uuid := 'cccccccc-0000-4000-8000-0000000000f1';
+  binding_b  uuid := 'cccccccc-0000-4000-8000-0000000000f2';
+  e1 uuid; e2 uuid; e_dis uuid; e_bank uuid; e_late uuid; e_corr uuid; e_foreign uuid;
+  head_before record;
+  head_after record;
+  hash_before text;
+  res jsonb;
+  res2 jsonb;
+  n bigint;
+  msg text;
+  guarantee_ab uuid;
+  guarantee_ac uuid;
+  guarantee_ab2 uuid;
+  guarantee_succ uuid;
+  entries_before bigint;
+  r1 timestamptz;
+  r2 timestamptz;
+  ea0 uuid; ea1 uuid; ea5 uuid; ea2 uuid; ea3 uuid; ea4 uuid; ea6 uuid; ea7 uuid; eb1 uuid;
+  owed jsonb;
+  winner_a jsonb;
+  winner_b jsonb;
+begin
+  -- -------------------------------------------------------------------------
+  -- Fixtures: group G (owner, treasurer role, A, B, C, an inactive member) and an
+  -- unrelated group H.
+  -- -------------------------------------------------------------------------
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  group_g := (public.sened_ledger_provision_group_v1('Attribution equb') ->> 'groupId')::uuid;
+  perform set_config('request.jwt.claim.sub', h_uid, true);
+  group_h := (public.sened_ledger_provision_group_v1('Other attribution equb') ->> 'groupId')::uuid;
+  select tenant_id into tenant_g from public.ledger_groups where id = group_g;
+  select tenant_id into tenant_h from public.ledger_groups where id = group_h;
+  select id into cash_g from public.ledger_accounts where group_id = group_g and code = 'POT_CASH';
+  select id into income_g from public.ledger_accounts where group_id = group_g and code = 'CONTRIBUTION_INCOME';
+  select id into expense_g from public.ledger_accounts where group_id = group_g and code = 'PAYOUT_EXPENSE';
+  select id into cash_h from public.ledger_accounts where group_id = group_h and code = 'POT_CASH';
+  select id into income_h from public.ledger_accounts where group_id = group_h and code = 'CONTRIBUTION_INCOME';
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status) values
+    (group_g, tenant_g, t_uid::uuid, 'treasurer', 'active'),
+    (group_g, tenant_g, a_uid::uuid, 'member', 'active'),
+    (group_g, tenant_g, b_uid::uuid, 'member', 'active'),
+    (group_g, tenant_g, c_uid::uuid, 'member', 'active'),
+    (group_g, tenant_g, i_uid::uuid, 'member', 'inactive');
+
+  -- A cycle of 4 rounds at 100.00 per round, started a day ago.
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  cycle_1 := (public.create_draw_cycle_v1(group_g, 'Cycle one', 100.00, 4, 1000, now() - interval '1 day', 'attr-cycle-1') -> 'cycle' ->> 'cycleId')::uuid;
+  cycle_2 := (public.create_draw_cycle_v1(group_g, 'Cycle two', 100.00, 4, 1000, now() - interval '1 day', 'attr-cycle-2') -> 'cycle' ->> 'cycleId')::uuid;
+
+  -- Entries. e1/e2 cash contributions; e_dis a disbursement; e_bank and e_late get
+  -- bank provenance; e_corr is later reversed; e_foreign lives in group H.
+  e1 := (public.post_ledger_entry_v1(group_g, 'attr-e1', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e2 := (public.post_ledger_entry_v1(group_g, 'attr-e2', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e_dis := (public.post_ledger_entry_v1(group_g, 'attr-dis', now(), 'disbursement', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', expense_g, 'direction', 'debit', 'amount', '10.00'),
+                      jsonb_build_object('accountId', cash_g, 'direction', 'credit', 'amount', '10.00'))) -> 'entry' ->> 'id')::uuid;
+  e_bank := (public.post_ledger_entry_v1(group_g, 'bank-verified-attr-1', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e_late := (public.post_ledger_entry_v1(group_g, 'attr-late', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e_corr := (public.post_ledger_entry_v1(group_g, 'attr-corr', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  perform public.post_ledger_entry_v1(group_g, 'attr-corr-fix', now(), 'correction', e_corr,
+    'Entered twice by mistake, reversing it.',
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'credit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'debit', 'amount', '100.00')));
+  perform set_config('request.jwt.claim.sub', h_uid, true);
+  e_foreign := (public.post_ledger_entry_v1(group_h, 'attr-foreign', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_h, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_h, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+
+  -- Bank provenance: a binding, one verified intent linked to e_bank, one verified
+  -- but not yet linked to e_late (linked LATER, after a manual attribution exists).
+  insert into public.bank_account_bindings (id,user_id,tenant_id,group_id,ledger_account_id,provider,account_label,account_fingerprint_hmac,sender_fingerprint_hmac,receiver_fingerprint_hmac)
+  values
+    (binding_c, c_uid::uuid, tenant_g, group_g, cash_g, 'cbe', 'C', repeat('a',64), repeat('b',64), repeat('c',64)),
+    (binding_b, b_uid::uuid, tenant_g, group_g, cash_g, 'cbe', 'B', repeat('d',64), repeat('e',64), repeat('f',64));
+  insert into public.bank_verification_intents (id,user_id,tenant_id,group_id,bank_account_binding_id,ledger_account_id,provider,provider_reference_hmac,idempotency_key,request_fingerprint,amount,direction,occurred_at)
+  values
+    ('dddddddd-0000-4000-8000-0000000000f1', c_uid::uuid, tenant_g, group_g, binding_c, cash_g, 'cbe', repeat('9',64), 'attr-bank-1', repeat('e',64), 100.00, 'inbound', now()),
+    ('dddddddd-0000-4000-8000-0000000000f2', b_uid::uuid, tenant_g, group_g, binding_b, cash_g, 'cbe', repeat('8',64), 'attr-bank-2', repeat('e',64), 100.00, 'inbound', now());
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('1',64), verified_at = '2026-10-10 09:00:05.123+00',
+      ledger_entry_id = e_bank
+  where id = 'dddddddd-0000-4000-8000-0000000000f1';
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('2',64), verified_at = '2026-10-10 09:05:00+00'
+  where id = 'dddddddd-0000-4000-8000-0000000000f2';
+
+  select last_sequence, last_hash into head_before from public.ledger_group_heads where group_id = group_g;
+  select entry_hash into hash_before from public.ledger_entries where id = e1;
+  select count(*) into entries_before from public.ledger_entries where group_id = group_g;
+
+  -- =========================================================================
+  -- ATTRIBUTION: who may record
+  -- =========================================================================
+  perform pg_temp.expect_error(c_uid,    format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e1, a_uid), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error(outsider, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e1, a_uid), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error('',       format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e1, a_uid), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error(a_uid,    format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e1, a_uid), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', gen_random_uuid(), e1, a_uid), 'ledger_forbidden', '42501');
+  if (select count(*) from public.ledger_entry_attributions) <> 0 then
+    raise exception 'ATTRIBUTION 1 FAILED: a refused caller left a row behind';
+  end if;
+
+  -- The treasurer-role member records e1 -> A (a cash payment): source treasurer.
+  res := pg_temp.call_as(t_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e1, a_uid));
+  if (res ->> 'replayed')::boolean is not false
+     or res -> 'attribution' ->> 'source' <> 'treasurer'
+     or res -> 'attribution' ->> 'memberUserId' <> a_uid
+     or res -> 'attribution' ->> 'recordedBy' <> t_uid
+     or (res -> 'attribution' ->> 'revision')::int <> 1
+     or res -> 'attribution' ->> 'entryId' <> e1::text
+     or res -> 'attribution' -> 'cycleId' <> 'null'::jsonb
+     or res -> 'attribution' -> 'round' <> 'null'::jsonb then
+    raise exception 'ATTRIBUTION 2 FAILED: unexpected result %', res;
+  end if;
+  if (select array_agg(k order by k) from jsonb_object_keys(res -> 'attribution') k)
+     is distinct from array['cycleId','entryId','memberUserId','reason','recordedAt','recordedBy','revision','round','source'] then
+    raise exception 'ATTRIBUTION 3 FAILED: unexpected keys %', res -> 'attribution';
+  end if;
+
+  -- =========================================================================
+  -- ATTRIBUTION: what may be attributed, and to whom
+  -- =========================================================================
+  -- another group's entry reads as absent (from either side)
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e_foreign, a_uid), 'ledger_entry_not_found', 'P0002');
+  perform pg_temp.expect_error(h_uid,     format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_h, e1, a_uid), 'ledger_entry_not_found', 'P0002');
+  perform pg_temp.expect_error(h_uid,     format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e1, a_uid), 'ledger_forbidden', '42501');
+  -- not a contribution
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e_dis, a_uid), 'attribution_not_contribution', '22023');
+  -- a member who is not in this group, and one who is inactive
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e2, outsider), 'ledger_member_not_found', 'P0002');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e2, i_uid), 'ledger_member_not_found', 'P0002');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e2, h_uid), 'ledger_member_not_found', 'P0002');
+  -- a reversed contribution
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e_corr, a_uid), 'attribution_entry_corrected', 'P0001');
+  -- argument shape: a round needs a cycle; the cycle must be this group's; round within the cycle
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,2)', group_g, e2, a_uid), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,%L,5)', group_g, e2, a_uid, cycle_1), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,%L,1)', group_g, e2, a_uid, gen_random_uuid()), 'ledger_cycle_not_found', 'P0002');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,null)', group_g, e2), 'ledger_invalid_request', '22023');
+  -- bank provenance wins: record and supersede are both refused on e_bank
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e_bank, a_uid), 'attribution_bank_verified', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e_bank, a_uid, 'Trying to override a bank verification'), 'attribution_bank_verified', 'P0001');
+
+  -- =========================================================================
+  -- ATTRIBUTION: one per entry, supersede with a reason
+  -- =========================================================================
+  res2 := pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e1, a_uid));
+  if (res2 ->> 'replayed')::boolean is not true then
+    raise exception 'ATTRIBUTION 4 FAILED: the same attribution again was not a replay: %', res2;
+  end if;
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e1, b_uid), 'attribution_exists', 'P0001');
+  if (select count(*) from public.ledger_entry_attributions where entry_id = e1) <> 1 then
+    raise exception 'ATTRIBUTION 5 FAILED: more than one row for an entry after refusals and a replay';
+  end if;
+  -- supersede: needs a reason of 10..1000 characters, and something to supersede
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e1, b_uid, 'too short'), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,null)', group_g, e1, b_uid), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e2, b_uid, 'Nothing to supersede here'), 'attribution_not_found', 'P0002');
+  perform pg_temp.expect_error(c_uid,     format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e1, b_uid, 'A plain member cannot supersede'), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e1, a_uid, 'Same payer again changes nothing'), 'attribution_unchanged', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e1, outsider, 'Outsider is not a member here'), 'ledger_member_not_found', 'P0002');
+  res := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e1, b_uid, 'Receipt book shows B paid, not A'));
+  if (res ->> 'replayed')::boolean is not false
+     or res -> 'attribution' ->> 'memberUserId' <> b_uid
+     or (res -> 'attribution' ->> 'revision')::int <> 2
+     or res -> 'attribution' ->> 'reason' <> 'Receipt book shows B paid, not A'
+     or res -> 'attribution' ->> 'recordedBy' <> owner_uid then
+    raise exception 'ATTRIBUTION 6 FAILED: unexpected superseding result %', res;
+  end if;
+  res2 := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e1, b_uid, 'Receipt book shows B paid, not A'));
+  if (res2 ->> 'replayed')::boolean is not true then
+    raise exception 'ATTRIBUTION 7 FAILED: the same supersede again was not a replay: %', res2;
+  end if;
+  -- the original row is still there, untouched, and the history is one line of two
+  if (select count(*) from public.ledger_entry_attributions where entry_id = e1) <> 2
+     or (select member_user_id from public.ledger_entry_attributions where entry_id = e1 and supersedes_id is null) <> a_uid::uuid
+     or (select recorded_by from public.ledger_entry_attributions where entry_id = e1 and supersedes_id is null) <> t_uid::uuid then
+    raise exception 'ATTRIBUTION 8 FAILED: the original attribution was not preserved';
+  end if;
+  -- a second supersede must target the new tip, so history stays linear
+  res := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,%L,2)', group_g, e1, b_uid, 'Payment was for round two of cycle one', cycle_1));
+  if (res -> 'attribution' ->> 'revision')::int <> 3 or (res -> 'attribution' ->> 'round')::int <> 2
+     or res -> 'attribution' ->> 'cycleId' <> cycle_1::text then
+    raise exception 'ATTRIBUTION 9 FAILED: unexpected third revision %', res;
+  end if;
+  if (select count(*) from public.ledger_entry_attributions where supersedes_id is null and entry_id = e1) <> 1 then
+    raise exception 'ATTRIBUTION 10 FAILED: more than one root for an entry';
+  end if;
+
+  -- =========================================================================
+  -- ATTRIBUTION: bank provenance wins on the read, even when a manual row came first
+  -- =========================================================================
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e_late, a_uid));
+  -- later the bank link appears: intent f2 (member B) is linked to e_late
+  update public.bank_verification_intents set ledger_entry_id = e_late where id = 'dddddddd-0000-4000-8000-0000000000f2';
+  res := pg_temp.call_as(a_uid, format('select public.get_ledger_entry_attributions_v1(%L, array[%L,%L,%L,%L,%L,%L]::uuid[])', group_g, e1, e2, e_dis, e_bank, e_late, e_corr));
+  if jsonb_array_length(res) <> 3 then
+    raise exception 'ATTRIBUTION 11 FAILED: expected e1, e_bank and e_late only, got %', res;
+  end if;
+  if (select r ->> 'source' from jsonb_array_elements(res) r where r ->> 'entryId' = e_bank::text) <> 'bank_verification'
+     or (select r ->> 'memberUserId' from jsonb_array_elements(res) r where r ->> 'entryId' = e_bank::text) <> c_uid
+     or (select r ->> 'recordedAt' from jsonb_array_elements(res) r where r ->> 'entryId' = e_bank::text) <> '2026-10-10T09:00:05.123Z' then
+    raise exception 'ATTRIBUTION 12 FAILED: the bank-verified entry is not reported as bank verified: %', res;
+  end if;
+  if (select r ->> 'source' from jsonb_array_elements(res) r where r ->> 'entryId' = e_late::text) <> 'bank_verification'
+     or (select r ->> 'memberUserId' from jsonb_array_elements(res) r where r ->> 'entryId' = e_late::text) <> b_uid then
+    raise exception 'ATTRIBUTION 13 FAILED: a manual row outranked a later bank link: %', res;
+  end if;
+  if (select r ->> 'source' from jsonb_array_elements(res) r where r ->> 'entryId' = e1::text) <> 'treasurer'
+     or (select r ->> 'memberUserId' from jsonb_array_elements(res) r where r ->> 'entryId' = e1::text) <> b_uid then
+    raise exception 'ATTRIBUTION 14 FAILED: the current manual attribution is not the tip: %', res;
+  end if;
+  -- and a supersede on e_late is now refused too
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e_late, c_uid, 'Bank link appeared afterwards'), 'attribution_bank_verified', 'P0001');
+  -- the read is for members only, and group-scoped
+  perform pg_temp.expect_error(outsider, format('select public.get_ledger_entry_attributions_v1(%L, array[%L]::uuid[])', group_g, e1), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error(h_uid,    format('select public.get_ledger_entry_attributions_v1(%L, array[%L]::uuid[])', group_g, e1), 'ledger_forbidden', '42501');
+  if pg_temp.call_as(h_uid, format('select public.get_ledger_entry_attributions_v1(%L, array[%L]::uuid[])', group_h, e1)) <> '[]'::jsonb then
+    raise exception 'ATTRIBUTION 15 FAILED: another group''s call returned this group''s attribution';
+  end if;
+  if pg_temp.call_as(c_uid, format('select public.get_ledger_entry_attributions_v1(%L, array[]::uuid[])', group_g)) <> '[]'::jsonb
+     or pg_temp.call_as(c_uid, format('select public.get_ledger_entry_attributions_v1(%L, null)', group_g)) <> '[]'::jsonb then
+    raise exception 'ATTRIBUTION 16 FAILED: empty input was not an empty result';
+  end if;
+  perform pg_temp.expect_error(c_uid, format('select public.get_ledger_entry_attributions_v1(%L, (select array_agg(gen_random_uuid()) from generate_series(1, 501)))', group_g), 'ledger_invalid_request', '22023');
+
+  -- =========================================================================
+  -- ATTRIBUTION: append-only, and invariants for ANY writer
+  -- =========================================================================
+  begin
+    update public.ledger_entry_attributions set member_user_id = c_uid::uuid where entry_id = e1;
+    raise exception 'ATTRIBUTION 17 FAILED: an attribution was updated';
+  exception when others then
+    if sqlerrm <> 'attribution_history_immutable' then raise exception 'ATTRIBUTION 17 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    delete from public.ledger_entry_attributions where entry_id = e1;
+    raise exception 'ATTRIBUTION 18 FAILED: an attribution was deleted';
+  exception when others then
+    if sqlerrm <> 'attribution_history_immutable' then raise exception 'ATTRIBUTION 18 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    truncate public.ledger_entry_attributions;
+    raise exception 'ATTRIBUTION 19 FAILED: the table was truncated';
+  exception when others then
+    if sqlerrm <> 'attribution_history_immutable' then raise exception 'ATTRIBUTION 19 FAILED: %', sqlerrm; end if;
+  end;
+  -- a second root, or a second successor, is refused by the unique indexes
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by)
+    values (e1, group_g, tenant_g, a_uid::uuid, owner_uid::uuid);
+    raise exception 'ATTRIBUTION 20 FAILED: a second root was accepted';
+  exception when unique_violation then null;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by, supersedes_id, reason)
+    select e1, group_g, tenant_g, a_uid::uuid, owner_uid::uuid, root.id, 'A second successor of the root row'
+    from public.ledger_entry_attributions root where root.entry_id = e1 and root.supersedes_id is null;
+    raise exception 'ATTRIBUTION 21 FAILED: a second successor was accepted';
+  exception when unique_violation then null;
+  end;
+  -- a superseding row needs a reason of the right length
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by, supersedes_id, reason)
+    select e1, group_g, tenant_g, a_uid::uuid, owner_uid::uuid, tip.id, 'short'
+    from public.ledger_entry_attributions tip where tip.entry_id = e1 and tip.round = 2;
+    raise exception 'ATTRIBUTION 22 FAILED: a superseding row without a proper reason was accepted';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by, round)
+    values (e2, group_g, tenant_g, a_uid::uuid, owner_uid::uuid, 2);
+    raise exception 'ATTRIBUTION 23 FAILED: a round without a cycle was accepted';
+  exception when check_violation then null;
+  end;
+  -- the trigger holds the rules for a writer that skips the RPC
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by)
+    values (e_dis, group_g, tenant_g, a_uid::uuid, owner_uid::uuid);
+    raise exception 'ATTRIBUTION 24 FAILED: a disbursement was attributed directly';
+  exception when others then
+    if sqlerrm <> 'attribution_not_contribution' then raise exception 'ATTRIBUTION 24 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by)
+    values (e2, group_g, tenant_g, a_uid::uuid, c_uid::uuid);
+    raise exception 'ATTRIBUTION 25 FAILED: a plain member recorded an attribution directly';
+  exception when others then
+    if sqlerrm <> 'ledger_forbidden' then raise exception 'ATTRIBUTION 25 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by)
+    values (e2, group_g, tenant_g, outsider::uuid, owner_uid::uuid);
+    raise exception 'ATTRIBUTION 26 FAILED: a non-member was attributed directly';
+  exception when others then
+    if sqlerrm <> 'ledger_member_not_found' then raise exception 'ATTRIBUTION 26 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by)
+    values (e_bank, group_g, tenant_g, a_uid::uuid, owner_uid::uuid);
+    raise exception 'ATTRIBUTION 27 FAILED: a bank-verified entry was attributed directly';
+  exception when others then
+    if sqlerrm <> 'attribution_bank_verified' then raise exception 'ATTRIBUTION 27 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by)
+    values (e_foreign, group_g, tenant_g, a_uid::uuid, owner_uid::uuid);
+    raise exception 'ATTRIBUTION 28 FAILED: another group''s entry was attributed under this group';
+  exception when others then
+    -- the trigger finds no such contribution in THIS group (the composite foreign key says the same later)
+    if sqlerrm <> 'attribution_not_contribution' then raise exception 'ATTRIBUTION 28 FAILED: %', sqlerrm; end if;
+  end;
+  -- a client role cannot write the table; a member can read it, an outsider sees nothing
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  set local role authenticated;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by)
+    values (e2, group_g, tenant_g, a_uid::uuid, owner_uid::uuid);
+    raise exception 'ATTRIBUTION 29 FAILED: authenticated inserted directly';
+  exception when insufficient_privilege then null;
+  end;
+  reset role;
+  perform set_config('request.jwt.claim.sub', c_uid, true);
+  set local role authenticated;
+  select count(*) into n from public.ledger_entry_attributions;
+  reset role;
+  if n <> 4 then
+    raise exception 'ATTRIBUTION 30 FAILED: a member sees % attribution rows, expected 4', n;
+  end if;
+  perform set_config('request.jwt.claim.sub', outsider, true);
+  set local role authenticated;
+  select count(*) into n from public.ledger_entry_attributions;
+  reset role;
+  if n <> 0 then
+    raise exception 'ATTRIBUTION 31 FAILED: an outsider sees % attribution rows', n;
+  end if;
+
+  -- =========================================================================
+  -- ATTRIBUTION: the hash-chained entry is untouched
+  -- =========================================================================
+  select last_sequence, last_hash into head_after from public.ledger_group_heads where group_id = group_g;
+  if head_after.last_sequence <> head_before.last_sequence or head_after.last_hash <> head_before.last_hash
+     or (select entry_hash from public.ledger_entries where id = e1) <> hash_before
+     or (select count(*) from public.ledger_entries where group_id = group_g) <> entries_before then
+    raise exception 'ATTRIBUTION 32 FAILED: attributing moved the ledger chain';
+  end if;
+
+  -- =========================================================================
+  -- ATTRIBUTION: grants
+  -- =========================================================================
+  if has_function_privilege('anon', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer)', 'EXECUTE')
+     or has_function_privilege('public', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.supersede_ledger_entry_attribution_v1(uuid, uuid, uuid, text, uuid, integer)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.get_ledger_entry_attributions_v1(uuid, uuid[])', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_attribute_entry(text, uuid, uuid, uuid, uuid, integer, text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_effective_attribution(uuid, uuid)', 'EXECUTE') then
+    raise exception 'ATTRIBUTION 33 FAILED: a function is executable by a role that must not have it';
+  end if;
+  if not has_function_privilege('authenticated', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.supersede_ledger_entry_attribution_v1(uuid, uuid, uuid, text, uuid, integer)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.get_ledger_entry_attributions_v1(uuid, uuid[])', 'EXECUTE') then
+    raise exception 'ATTRIBUTION 34 FAILED: authenticated cannot execute an attribution RPC';
+  end if;
+
+  -- =========================================================================
+  -- COLLATERAL: the derivation timeline
+  --
+  --   eA0  A pays and the treasurer attributes it                    (before round 1's reveal)
+  --   R1   round 1 revealed: A wins
+  --   draw for round 2 opened  -> A owes round 2 (flagged: nothing since R1), 3 and 4 not due
+  --   eA1  A pays 100.00, attributed                                  -> round 2 met
+  --   eA5  A pays 100.00 again, attributed                            (unused: round 3 is not due yet)
+  --   R2   round 2 revealed: B wins
+  --   draw for round 3 opened -> A: round 3 flagged (eA2 is under the share, eA5 was recorded
+  --        before R2). B: nothing yet, flagged
+  --   eB1  B pays by bank (verified)                                   -> B round 3 met by bank provenance
+  --   eA2  A pays 50.00 attributed                                     -> still under the share
+  --   eA3  explicit cycle 1 round 4                                    -> A round 4 met although not due
+  --   eA6  attributed to ANOTHER cycle                                 -> does not count
+  --   eA4  A pays 100.00 attributed                                    -> A round 3 met (oldest eligible)
+  --   correct eA4                                                      -> A round 3 flagged again
+  --   eA7  A pays 100.00                                               -> A round 3 met again
+  -- =========================================================================
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  ea0 := pg_temp.fx_post(group_g, 'col-ea0', '100.00', cash_g, income_g);
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, ea0, a_uid));
+  perform pg_sleep(0.02);
+  reset role;
+  r1 := pg_temp.fx_reveal(group_g, tenant_g, cycle_1, 1, a_uid::uuid, owner_uid::uuid);
+  perform pg_sleep(0.02);
+
+  -- before any draw for round 2 is opened nothing is due, so nothing is flagged
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  if (res ->> 'flaggedCount')::int <> 0 or jsonb_array_length(res -> 'winners') <> 1
+     or (res -> 'winners' -> 0 ->> 'memberId') <> a_uid or (res -> 'winners' -> 0 ->> 'round')::int <> 1
+     or (res ->> 'nextRound')::int <> 2 or (res ->> 'reserveRetained') <> '50.00'
+     or (res ->> 'contributionAmount') <> '100.00' or (res ->> 'totalRounds')::int <> 4 then
+    raise exception 'COLLATERAL 1 FAILED: unexpected view before round 2 opens: %', res;
+  end if;
+  if (select array_agg(s ->> 'status' order by (s ->> 'round')::int) from jsonb_array_elements(res -> 'winners' -> 0 -> 'owed') s)
+     is distinct from array['not_due','not_due','not_due'] then
+    raise exception 'COLLATERAL 2 FAILED: rounds with no opened draw are not "not_due": %', res -> 'winners' -> 0 -> 'owed';
+  end if;
+  if (select array_agg(k order by k) from jsonb_object_keys(res) k)
+     is distinct from array['contributionAmount','cycleId','eligibleCount','flaggedCount','groupId','nextRound','potAmount','reserveRatioBps','reserveRetained','startedAt','totalRounds','winners'] then
+    raise exception 'COLLATERAL 3 FAILED: unexpected top-level keys %', res;
+  end if;
+
+  -- open round 2
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  perform public.open_draw_v1(cycle_1, 2, 'col-open-2');
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  owed := res -> 'winners' -> 0 -> 'owed';
+  if (res ->> 'flaggedCount')::int <> 1
+     or owed -> 0 ->> 'status' <> 'flagged' or (owed -> 0 ->> 'round')::int <> 2
+     or owed -> 0 -> 'dueAt' = 'null'::jsonb or owed -> 0 -> 'entryId' <> 'null'::jsonb
+     or owed -> 1 ->> 'status' <> 'not_due' or owed -> 2 ->> 'status' <> 'not_due' then
+    raise exception 'COLLATERAL 4 FAILED: a due round with no contribution after the win is not flagged (eA0 was before R1): %', res;
+  end if;
+
+  ea1 := pg_temp.fx_post(group_g, 'col-ea1', '100.00', cash_g, income_g);
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  if (res ->> 'flaggedCount')::int <> 1 then
+    raise exception 'COLLATERAL 5 FAILED: an entry nobody attributed met an obligation: %', res;
+  end if;
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, ea1, a_uid));
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  owed := res -> 'winners' -> 0 -> 'owed';
+  if (res ->> 'flaggedCount')::int <> 0 or owed -> 0 ->> 'status' <> 'met'
+     or owed -> 0 ->> 'source' <> 'treasurer' or (owed -> 0 ->> 'entryId')::uuid <> ea1 then
+    raise exception 'COLLATERAL 6 FAILED: attributing the payment did not clear the flag (derived, not stored): %', res;
+  end if;
+  -- an extra payment recorded before the next reveal cannot pay a later round
+  ea5 := pg_temp.fx_post(group_g, 'col-ea5', '100.00', cash_g, income_g);
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, ea5, a_uid));
+  perform pg_sleep(0.02);
+  reset role;
+  r2 := pg_temp.fx_reveal(group_g, tenant_g, cycle_1, 2, b_uid::uuid, owner_uid::uuid);
+  perform pg_sleep(0.02);
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  perform public.open_draw_v1(cycle_1, 3, 'col-open-3');
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  select w into winner_a from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = a_uid;
+  select w into winner_b from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = b_uid;
+  if (select array_agg(s ->> 'status' order by (s ->> 'round')::int) from jsonb_array_elements(winner_a -> 'owed') s)
+       is distinct from array['met','flagged','not_due']
+     or (select array_agg(s ->> 'status' order by (s ->> 'round')::int) from jsonb_array_elements(winner_b -> 'owed') s)
+       is distinct from array['flagged','not_due']
+     or (res ->> 'flaggedCount')::int <> 2 or (res ->> 'reserveRetained') <> '100.00' or (res ->> 'nextRound')::int <> 3 then
+    raise exception 'COLLATERAL 7 FAILED: a payment recorded before the previous reveal paid a later round, or the flags are wrong: %', res;
+  end if;
+  if (winner_a -> 'owed' -> 0 ->> 'entryId')::uuid <> ea1 then
+    raise exception 'COLLATERAL 8 FAILED: round 2 was not paid by the oldest eligible entry: %', winner_a;
+  end if;
+
+  -- B pays by bank (verified, linked): counts by provenance, not by treasurer attribution
+  eb1 := pg_temp.fx_post(group_g, 'bank-verified-col-eb1', '100.00', cash_g, income_g);
+  insert into public.bank_verification_intents (id,user_id,tenant_id,group_id,bank_account_binding_id,ledger_account_id,provider,provider_reference_hmac,idempotency_key,request_fingerprint,amount,direction,occurred_at)
+  values ('dddddddd-0000-4000-8000-0000000000f3', b_uid::uuid, tenant_g, group_g, binding_b, cash_g, 'cbe', repeat('7',64), 'attr-bank-3', repeat('e',64), 100.00, 'inbound', now());
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('3',64), verified_at = now(), ledger_entry_id = eb1
+  where id = 'dddddddd-0000-4000-8000-0000000000f3';
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  select w into winner_b from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = b_uid;
+  if winner_b -> 'owed' -> 0 ->> 'status' <> 'met' or winner_b -> 'owed' -> 0 ->> 'source' <> 'bank_verification'
+     or (winner_b -> 'owed' -> 0 ->> 'entryId')::uuid <> eb1 then
+    raise exception 'COLLATERAL 9 FAILED: a bank-verified contribution did not meet the round: %', winner_b;
+  end if;
+
+  -- 50.00 is under the cycle's 100.00 share: it does not count
+  ea2 := pg_temp.fx_post(group_g, 'col-ea2', '50.00', cash_g, income_g);
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, ea2, a_uid));
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  select w into winner_a from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = a_uid;
+  if winner_a -> 'owed' -> 1 ->> 'status' <> 'flagged' then
+    raise exception 'COLLATERAL 10 FAILED: an under-share contribution met the round: %', winner_a;
+  end if;
+  -- attributed to ANOTHER cycle: does not count here
+  ea6 := pg_temp.fx_post(group_g, 'col-ea6', '100.00', cash_g, income_g);
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,%L,1)', group_g, ea6, a_uid, cycle_2));
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  select w into winner_a from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = a_uid;
+  if winner_a -> 'owed' -> 1 ->> 'status' <> 'flagged' then
+    raise exception 'COLLATERAL 11 FAILED: an entry attributed to another cycle met this cycle''s round: %', winner_a;
+  end if;
+  -- an explicit cycle+round attribution assigns that round (here a round not yet due)
+  ea3 := pg_temp.fx_post(group_g, 'col-ea3', '100.00', cash_g, income_g);
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,%L,4)', group_g, ea3, a_uid, cycle_1));
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  select w into winner_a from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = a_uid;
+  if (select array_agg(s ->> 'status' order by (s ->> 'round')::int) from jsonb_array_elements(winner_a -> 'owed') s)
+       is distinct from array['met','flagged','met']
+     or (winner_a -> 'owed' -> 2 ->> 'entryId')::uuid <> ea3 then
+    raise exception 'COLLATERAL 12 FAILED: the explicit round assignment is wrong: %', winner_a;
+  end if;
+  -- the first unrounded entry recorded after R2 pays round 3 (one entry, one round)
+  ea4 := pg_temp.fx_post(group_g, 'col-ea4', '100.00', cash_g, income_g);
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, ea4, a_uid));
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  select w into winner_a from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = a_uid;
+  if (select array_agg(s ->> 'status' order by (s ->> 'round')::int) from jsonb_array_elements(winner_a -> 'owed') s)
+       is distinct from array['met','met','met']
+     or (winner_a -> 'owed' -> 1 ->> 'entryId')::uuid <> ea4
+     or (res ->> 'flaggedCount')::int <> 0 then
+    raise exception 'COLLATERAL 13 FAILED: the post-R2 contribution did not meet round 3 (or paid twice): %', res;
+  end if;
+  -- a correction stops a contribution counting: derived again, flagged again
+  perform pg_temp.fx_correct(group_g, 'col-ea4-fix', ea4, '100.00', cash_g, income_g);
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  select w into winner_a from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = a_uid;
+  if winner_a -> 'owed' -> 1 ->> 'status' <> 'flagged' then
+    raise exception 'COLLATERAL 14 FAILED: a reversed contribution still counted: %', winner_a;
+  end if;
+  ea7 := pg_temp.fx_post(group_g, 'col-ea7', '100.00', cash_g, income_g);
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, ea7, a_uid));
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  select w into winner_a from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = a_uid;
+  if winner_a -> 'owed' -> 1 ->> 'status' <> 'met' or (winner_a -> 'owed' -> 1 ->> 'entryId')::uuid <> ea7 then
+    raise exception 'COLLATERAL 15 FAILED: a replacement payment did not meet round 3: %', winner_a;
+  end if;
+  -- nothing about any of this was stored
+  if (select count(*) from information_schema.columns
+      where table_schema = 'public' and table_name in ('draw_collateral_guarantees', 'draw_collateral_guarantee_events')
+        and column_name in ('status', 'state', 'flagged', 'paid')) <> 0 then
+    raise exception 'COLLATERAL 16 FAILED: a stored status column exists';
+  end if;
+  -- the view is for members of the group only
+  perform pg_temp.expect_error(outsider, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(h_uid,    format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(owner_uid, format('select public.get_draw_cycle_collateral_v1(%L)', gen_random_uuid()), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error('', format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1), 'collateral_forbidden', '42501');
+  -- cycle 2 has no reveals: no winners, nothing flagged
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_2));
+  if jsonb_array_length(res -> 'winners') <> 0 or (res ->> 'flaggedCount')::int <> 0 or (res ->> 'nextRound')::int <> 1 then
+    raise exception 'COLLATERAL 17 FAILED: an untouched cycle is not empty: %', res;
+  end if;
+
+  -- =========================================================================
+  -- COLLATERAL: guarantees. A wins round 1; B wins round 2.
+  -- =========================================================================
+  select count(*) into entries_before from public.ledger_entries where group_id = group_g;
+  select last_sequence, last_hash into head_before from public.ledger_group_heads where group_id = group_g;
+
+  -- who may propose
+  perform pg_temp.expect_error(c_uid,    format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, b_uid), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(a_uid,    format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, b_uid), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(outsider, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, b_uid), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(h_uid,    format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, b_uid), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error('',       format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, b_uid), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', gen_random_uuid(), a_uid, b_uid), 'collateral_forbidden', '42501');
+  -- what may be proposed
+  perform pg_temp.expect_error(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, c_uid, b_uid), 'collateral_winner_not_found', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_2, a_uid, b_uid), 'collateral_winner_not_found', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, a_uid), 'collateral_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,null)', cycle_1, a_uid), 'collateral_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, outsider), 'collateral_member_not_found', 'P0002');
+  perform pg_temp.expect_error(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, i_uid), 'collateral_member_not_found', 'P0002');
+  if (select count(*) from public.draw_collateral_guarantees) <> 0 then
+    raise exception 'COLLATERAL 18 FAILED: a refused proposal left a row';
+  end if;
+
+  res := pg_temp.call_as(t_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, b_uid));
+  guarantee_ab := (res -> 'guarantee' ->> 'guaranteeId')::uuid;
+  if (res ->> 'replayed')::boolean is not false
+     or res -> 'guarantee' ->> 'state' <> 'proposed'
+     or res -> 'guarantee' ->> 'winnerMemberId' <> a_uid or res -> 'guarantee' ->> 'guarantorMemberId' <> b_uid
+     or res -> 'guarantee' ->> 'proposedBy' <> t_uid or res -> 'guarantee' ->> 'stateBy' <> t_uid
+     or res -> 'guarantee' -> 'acceptedAt' <> 'null'::jsonb then
+    raise exception 'COLLATERAL 19 FAILED: unexpected proposal %', res;
+  end if;
+  if (select array_agg(k order by k) from jsonb_object_keys(res -> 'guarantee') k)
+     is distinct from array['acceptedAt','cycleId','guaranteeId','guarantorMemberId','proposedAt','proposedBy','reason','state','stateAt','stateBy','successorGuaranteeId','winnerMemberId'] then
+    raise exception 'COLLATERAL 20 FAILED: unexpected guarantee keys %', res -> 'guarantee';
+  end if;
+  res2 := pg_temp.call_as(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, b_uid));
+  if (res2 ->> 'replayed')::boolean is not true or (res2 -> 'guarantee' ->> 'guaranteeId')::uuid <> guarantee_ab then
+    raise exception 'COLLATERAL 21 FAILED: proposing the same guarantee again was not a replay: %', res2;
+  end if;
+  res := pg_temp.call_as(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, c_uid));
+  guarantee_ac := (res -> 'guarantee' ->> 'guaranteeId')::uuid;
+
+  -- THE GUARANTOR'S OWN CONSENT
+  perform pg_temp.expect_error(owner_uid, format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ab), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(t_uid,     format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ab), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(a_uid,     format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ab), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(c_uid,     format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ab), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(outsider,  format('select public.respond_collateral_guarantee_v1(%L, false)', guarantee_ab), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error('',        format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ab), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(b_uid,     format('select public.respond_collateral_guarantee_v1(%L, true)', gen_random_uuid()), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(b_uid,     format('select public.respond_collateral_guarantee_v1(%L, null)', guarantee_ab), 'collateral_invalid_request', '22023');
+  if public.sened_collateral_guarantee_state(guarantee_ab) <> 'proposed' then
+    raise exception 'COLLATERAL 22 FAILED: someone other than the guarantor changed the state';
+  end if;
+  -- the trigger holds this for a writer that skips the RPC
+  begin
+    insert into public.draw_collateral_guarantee_events (guarantee_id, group_id, event_type, actor_id)
+    values (guarantee_ab, group_g, 'accepted', owner_uid::uuid);
+    raise exception 'COLLATERAL 23 FAILED: an accepted event written by the owner was accepted';
+  exception when others then
+    if sqlerrm <> 'collateral_forbidden' then raise exception 'COLLATERAL 23 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    insert into public.draw_collateral_guarantee_events (guarantee_id, group_id, event_type, actor_id, reason)
+    values (guarantee_ab, group_g, 'declined', t_uid::uuid, null);
+    raise exception 'COLLATERAL 24 FAILED: a declined event written by the treasurer was accepted';
+  exception when others then
+    if sqlerrm <> 'collateral_forbidden' then raise exception 'COLLATERAL 24 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    insert into public.draw_collateral_guarantees (group_id, tenant_id, cycle_id, winner_member_id, guarantor_member_id, proposed_by)
+    values (group_g, tenant_g, cycle_1, c_uid::uuid, b_uid::uuid, owner_uid::uuid);
+    raise exception 'COLLATERAL 25 FAILED: a guarantee for a non-winner was accepted directly';
+  exception when others then
+    if sqlerrm <> 'collateral_winner_not_found' then raise exception 'COLLATERAL 25 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    insert into public.draw_collateral_guarantees (group_id, tenant_id, cycle_id, winner_member_id, guarantor_member_id, proposed_by)
+    values (group_g, tenant_g, cycle_1, a_uid::uuid, a_uid::uuid, owner_uid::uuid);
+    raise exception 'COLLATERAL 26 FAILED: a self-guarantee was accepted directly';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into public.draw_collateral_guarantees (group_id, tenant_id, cycle_id, winner_member_id, guarantor_member_id, proposed_by)
+    values (group_g, tenant_g, cycle_1, a_uid::uuid, b_uid::uuid, c_uid::uuid);
+    raise exception 'COLLATERAL 27 FAILED: a proposal by a plain member was accepted directly';
+  exception when others then
+    if sqlerrm <> 'collateral_forbidden' then raise exception 'COLLATERAL 27 FAILED: %', sqlerrm; end if;
+  end;
+
+  -- B accepts in their own session
+  res := pg_temp.call_as(b_uid, format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ab));
+  if (res ->> 'replayed')::boolean is not false or res -> 'guarantee' ->> 'state' <> 'accepted'
+     or res -> 'guarantee' ->> 'stateBy' <> b_uid or res -> 'guarantee' -> 'acceptedAt' = 'null'::jsonb then
+    raise exception 'COLLATERAL 28 FAILED: unexpected acceptance %', res;
+  end if;
+  res2 := pg_temp.call_as(b_uid, format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ab));
+  if (res2 ->> 'replayed')::boolean is not true then
+    raise exception 'COLLATERAL 29 FAILED: accepting twice was not a replay: %', res2;
+  end if;
+  perform pg_temp.expect_error(b_uid, format('select public.respond_collateral_guarantee_v1(%L, false)', guarantee_ab), 'collateral_state_conflict', 'P0001');
+  -- C declines (with and without a reason), once
+  res := pg_temp.call_as(c_uid, format('select public.respond_collateral_guarantee_v1(%L, false, %L)', guarantee_ac, 'I cannot take this on'));
+  if res -> 'guarantee' ->> 'state' <> 'declined' or res -> 'guarantee' ->> 'reason' <> 'I cannot take this on' then
+    raise exception 'COLLATERAL 30 FAILED: unexpected decline %', res;
+  end if;
+  perform pg_temp.expect_error(c_uid, format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ac), 'collateral_state_conflict', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.release_collateral_guarantee_v1(%L, %L)', guarantee_ac, 'Releasing something already declined'), 'collateral_state_conflict', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_collateral_guarantee_v1(%L, %L, %L)', guarantee_ac, t_uid, 'Replacing something already declined'), 'collateral_state_conflict', 'P0001');
+
+  -- release: a reason is required; the guarantor or an owner/treasurer may; a plain member may not
+  perform pg_temp.expect_error(b_uid, format('select public.release_collateral_guarantee_v1(%L, %L)', guarantee_ab, 'short'), 'collateral_invalid_request', '22023');
+  perform pg_temp.expect_error(c_uid, format('select public.release_collateral_guarantee_v1(%L, %L)', guarantee_ab, 'A plain member cannot release this'), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(a_uid, format('select public.release_collateral_guarantee_v1(%L, %L)', guarantee_ab, 'The winner cannot release their guarantor'), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(outsider, format('select public.release_collateral_guarantee_v1(%L, %L)', guarantee_ab, 'An outsider cannot release this'), 'collateral_forbidden', '42501');
+  res := pg_temp.call_as(b_uid, format('select public.release_collateral_guarantee_v1(%L, %L)', guarantee_ab, 'I can no longer vouch for this member'));
+  if res -> 'guarantee' ->> 'state' <> 'released' or res -> 'guarantee' ->> 'stateBy' <> b_uid
+     or res -> 'guarantee' -> 'acceptedAt' = 'null'::jsonb then
+    raise exception 'COLLATERAL 31 FAILED: unexpected release %', res;
+  end if;
+  res2 := pg_temp.call_as(owner_uid, format('select public.release_collateral_guarantee_v1(%L, %L)', guarantee_ab, 'Treasurer confirms the release'));
+  if (res2 ->> 'replayed')::boolean is not true then
+    raise exception 'COLLATERAL 32 FAILED: releasing twice was not a replay: %', res2;
+  end if;
+  perform pg_temp.expect_error(b_uid, format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ab), 'collateral_state_conflict', 'P0001');
+
+  -- a released guarantee does not block a fresh one; supersede names its successor
+  res := pg_temp.call_as(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, a_uid, b_uid));
+  guarantee_ab2 := (res -> 'guarantee' ->> 'guaranteeId')::uuid;
+  if guarantee_ab2 = guarantee_ab or (res ->> 'replayed')::boolean is not false then
+    raise exception 'COLLATERAL 33 FAILED: a released guarantee blocked a fresh proposal: %', res;
+  end if;
+  perform pg_temp.call_as(b_uid, format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_ab2));
+  perform pg_temp.expect_error(c_uid, format('select public.supersede_collateral_guarantee_v1(%L, %L, %L)', guarantee_ab2, c_uid, 'A plain member cannot replace a guarantor'), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(b_uid, format('select public.supersede_collateral_guarantee_v1(%L, %L, %L)', guarantee_ab2, c_uid, 'The guarantor cannot replace themselves'), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_collateral_guarantee_v1(%L, %L, %L)', guarantee_ab2, b_uid, 'Same guarantor changes nothing here'), 'collateral_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_collateral_guarantee_v1(%L, %L, %L)', guarantee_ab2, a_uid, 'The winner cannot guarantee themselves'), 'collateral_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_collateral_guarantee_v1(%L, %L, %L)', guarantee_ab2, c_uid, 'short'), 'collateral_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_collateral_guarantee_v1(%L, %L, %L)', guarantee_ab2, outsider, 'Outsider is not an active member'), 'collateral_member_not_found', 'P0002');
+  res := pg_temp.call_as(owner_uid, format('select public.supersede_collateral_guarantee_v1(%L, %L, %L)', guarantee_ab2, c_uid, 'B moved away, C will vouch instead'));
+  guarantee_succ := (res -> 'guarantee' ->> 'guaranteeId')::uuid;
+  if res -> 'superseded' ->> 'state' <> 'superseded'
+     or (res -> 'superseded' ->> 'successorGuaranteeId')::uuid <> guarantee_succ
+     or res -> 'guarantee' ->> 'state' <> 'proposed' or res -> 'guarantee' ->> 'guarantorMemberId' <> c_uid
+     or res -> 'guarantee' ->> 'winnerMemberId' <> a_uid or (res ->> 'replayed')::boolean is not false then
+    raise exception 'COLLATERAL 34 FAILED: unexpected supersede %', res;
+  end if;
+  res2 := pg_temp.call_as(owner_uid, format('select public.supersede_collateral_guarantee_v1(%L, %L, %L)', guarantee_ab2, c_uid, 'B moved away, C will vouch instead'));
+  if (res2 ->> 'replayed')::boolean is not true or (res2 -> 'guarantee' ->> 'guaranteeId')::uuid <> guarantee_succ then
+    raise exception 'COLLATERAL 35 FAILED: repeating the supersede was not a replay: %', res2;
+  end if;
+  -- the replacement still needs the new guarantor's own consent
+  perform pg_temp.expect_error(owner_uid, format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_succ), 'collateral_forbidden', '42501');
+  perform pg_temp.expect_error(b_uid, format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_succ), 'collateral_forbidden', '42501');
+  perform pg_temp.call_as(c_uid, format('select public.respond_collateral_guarantee_v1(%L, true)', guarantee_succ));
+
+  -- the derived view carries every guarantee, with its state, under the winner
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  select w into winner_a from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = a_uid;
+  if jsonb_array_length(winner_a -> 'guarantees') <> 4
+     or (select array_agg(g ->> 'state' order by g ->> 'proposedAt', g ->> 'guaranteeId') from jsonb_array_elements(winner_a -> 'guarantees') g) is null
+     or (select count(*) from jsonb_array_elements(winner_a -> 'guarantees') g where g ->> 'state' = 'accepted') <> 1
+     or (select count(*) from jsonb_array_elements(winner_a -> 'guarantees') g where g ->> 'state' = 'declined') <> 1
+     or (select count(*) from jsonb_array_elements(winner_a -> 'guarantees') g where g ->> 'state' = 'released') <> 1
+     or (select count(*) from jsonb_array_elements(winner_a -> 'guarantees') g where g ->> 'state' = 'superseded') <> 1 then
+    raise exception 'COLLATERAL 36 FAILED: the view does not carry each guarantee with its derived state: %', winner_a -> 'guarantees';
+  end if;
+
+  -- last round: a winner of the final round has nothing left to guarantee
+  reset role;
+  perform pg_temp.fx_reveal(group_g, tenant_g, cycle_1, 3, c_uid::uuid, owner_uid::uuid);
+  perform pg_temp.fx_reveal(group_g, tenant_g, cycle_1, 4, t_uid::uuid, owner_uid::uuid);
+  perform pg_temp.expect_error(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, t_uid, b_uid), 'collateral_no_remaining_rounds', 'P0001');
+  res := pg_temp.call_as(owner_uid, format('select public.propose_collateral_guarantee_v1(%L,%L,%L)', cycle_1, c_uid, b_uid));
+  if res -> 'guarantee' ->> 'state' <> 'proposed' then
+    raise exception 'COLLATERAL 37 FAILED: a round-3 winner (one round left) could not be guaranteed: %', res;
+  end if;
+  res := pg_temp.call_as(c_uid, format('select public.get_draw_cycle_collateral_v1(%L)', cycle_1));
+  if (res ->> 'nextRound') is not null and res -> 'nextRound' <> 'null'::jsonb then
+    raise exception 'COLLATERAL 38 FAILED: a finished cycle still has a next round: %', res;
+  end if;
+  select w into winner_a from jsonb_array_elements(res -> 'winners') w where w ->> 'memberId' = t_uid;
+  if jsonb_array_length(winner_a -> 'owed') <> 0 then
+    raise exception 'COLLATERAL 39 FAILED: the final-round winner owes rounds: %', winner_a;
+  end if;
+
+  -- append-only
+  begin
+    update public.draw_collateral_guarantee_events set reason = 'edited' where guarantee_id = guarantee_ab;
+    raise exception 'COLLATERAL 40 FAILED: an event was updated';
+  exception when others then
+    if sqlerrm <> 'collateral_history_immutable' then raise exception 'COLLATERAL 40 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    delete from public.draw_collateral_guarantee_events where guarantee_id = guarantee_ab;
+    raise exception 'COLLATERAL 41 FAILED: an event was deleted';
+  exception when others then
+    if sqlerrm <> 'collateral_history_immutable' then raise exception 'COLLATERAL 41 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    update public.draw_collateral_guarantees set guarantor_member_id = c_uid::uuid where id = guarantee_ab;
+    raise exception 'COLLATERAL 42 FAILED: a guarantee was updated';
+  exception when others then
+    if sqlerrm <> 'collateral_history_immutable' then raise exception 'COLLATERAL 42 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    delete from public.draw_collateral_guarantees where id = guarantee_ab;
+    raise exception 'COLLATERAL 43 FAILED: a guarantee was deleted';
+  exception when others then
+    if sqlerrm <> 'collateral_history_immutable' then raise exception 'COLLATERAL 43 FAILED: %', sqlerrm; end if;
+  end;
+  set constraints all immediate;
+  begin
+    truncate public.draw_collateral_guarantee_events;
+    raise exception 'COLLATERAL 44 FAILED: the events table was truncated';
+  exception when others then
+    if sqlerrm <> 'collateral_history_immutable' then raise exception 'COLLATERAL 44 FAILED: %', sqlerrm; end if;
+  end;
+  -- a second accepted event, and a second ending, are refused by the indexes
+  begin
+    insert into public.draw_collateral_guarantee_events (guarantee_id, group_id, event_type, actor_id)
+    values (guarantee_succ, group_g, 'accepted', c_uid::uuid);
+    raise exception 'COLLATERAL 45 FAILED: a second accepted event was accepted';
+  exception when others then
+    if sqlerrm <> 'collateral_state_conflict' then raise exception 'COLLATERAL 45 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    insert into public.draw_collateral_guarantee_events (guarantee_id, group_id, event_type, actor_id, reason)
+    values (guarantee_ab2, group_g, 'released', owner_uid::uuid, 'Releasing a guarantee that was superseded');
+    raise exception 'COLLATERAL 45 FAILED: an ended guarantee was released';
+  exception when others then
+    if sqlerrm <> 'collateral_state_conflict' then raise exception 'COLLATERAL 45 FAILED: %', sqlerrm; end if;
+  end;
+  -- client roles cannot write the tables; members read them, an outsider cannot
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  set local role authenticated;
+  begin
+    insert into public.draw_collateral_guarantee_events (guarantee_id, group_id, event_type, actor_id)
+    values (guarantee_succ, group_g, 'accepted', owner_uid::uuid);
+    raise exception 'COLLATERAL 46 FAILED: authenticated wrote an event directly';
+  exception when insufficient_privilege then null;
+  end;
+  reset role;
+  perform set_config('request.jwt.claim.sub', c_uid, true);
+  set local role authenticated;
+  select count(*) into n from public.draw_collateral_guarantee_events;
+  reset role;
+  if n < 5 then
+    raise exception 'COLLATERAL 47 FAILED: a member cannot read the events (%)', n;
+  end if;
+  perform set_config('request.jwt.claim.sub', outsider, true);
+  set local role authenticated;
+  select count(*) into n from public.draw_collateral_guarantee_events;
+  if n <> 0 or (select count(*) from public.draw_collateral_guarantees) <> 0 then
+    raise exception 'COLLATERAL 48 FAILED: an outsider reads guarantee rows';
+  end if;
+  reset role;
+
+  -- ADVISORY ONLY: no guarantee operation touched the ledger
+  select last_sequence, last_hash into head_after from public.ledger_group_heads where group_id = group_g;
+  if head_after.last_sequence <> head_before.last_sequence or head_after.last_hash <> head_before.last_hash
+     or (select count(*) from public.ledger_entries where group_id = group_g) <> entries_before then
+    raise exception 'COLLATERAL 49 FAILED: a guarantee operation changed the ledger';
+  end if;
+
+  -- grants
+  if has_function_privilege('anon', 'public.propose_collateral_guarantee_v1(uuid, uuid, uuid)', 'EXECUTE')
+     or has_function_privilege('public', 'public.respond_collateral_guarantee_v1(uuid, boolean, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.release_collateral_guarantee_v1(uuid, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.supersede_collateral_guarantee_v1(uuid, uuid, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.get_draw_cycle_collateral_v1(uuid)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_collateral_member_entries(uuid, uuid)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_collateral_guarantee_state(uuid)', 'EXECUTE') then
+    raise exception 'COLLATERAL 50 FAILED: a function is executable by a role that must not have it';
+  end if;
+  if not has_function_privilege('authenticated', 'public.propose_collateral_guarantee_v1(uuid, uuid, uuid)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.respond_collateral_guarantee_v1(uuid, boolean, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.release_collateral_guarantee_v1(uuid, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.supersede_collateral_guarantee_v1(uuid, uuid, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.get_draw_cycle_collateral_v1(uuid)', 'EXECUTE') then
+    raise exception 'COLLATERAL 51 FAILED: authenticated cannot execute a collateral RPC';
+  end if;
+end;
+$attr$;
+rollback;
+select 'ALL ATTRIBUTION AND COLLATERAL CHECKS PASSED' as result;

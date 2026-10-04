@@ -6,8 +6,14 @@ import {
   readGroupLedgerPage,
   type LedgerEntry
 } from "@/lib/ledger";
+import { recordAttribution, type AttributionResult } from "@/lib/ledger/attribution";
 import { bearerToken, getUserScopedClient } from "@/lib/supabaseServer";
-import { ledgerEntriesQuerySchema, ledgerEntryRequestSchema, parse } from "@/lib/validation";
+import {
+  ledgerEntriesQuerySchema,
+  ledgerEntryAttributionSchema,
+  ledgerEntryRequestSchema,
+  parse
+} from "@/lib/validation";
 
 export const runtime = "nodejs";
 
@@ -36,6 +42,25 @@ function publicEntry(entry: LedgerEntry): Omit<LedgerEntry, "tenantId" | "reques
     entryHash: entry.entryHash,
     postings: entry.postings
   };
+}
+
+/**
+ * What became of the optional `attribution` that rode along on a contribution
+ * post. The entry and its attribution are two writes: the ledger is the source of
+ * truth and is never held back by, or rolled back for, the second one, so a refused
+ * attribution is REPORTED (`status: "refused"` with the database's own code) and
+ * the treasurer attributes the row afterwards (`POST /api/ledger/attributions`).
+ */
+type AttributionOutcome =
+  | { readonly status: "recorded"; readonly replayed: boolean }
+  | { readonly status: "refused"; readonly error: string }
+  | { readonly status: "failed" };
+
+function describeAttribution(result: AttributionResult): AttributionOutcome {
+  if (result.status === "ok") {
+    return { status: "recorded", replayed: result.replayed };
+  }
+  return { status: "refused", error: result.status === "forbidden" ? "forbidden" : result.code };
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -84,16 +109,58 @@ export async function POST(request: Request): Promise<Response> {
     return jsonError("bad_request", 400);
   }
 
-  const parsed = parse(ledgerEntryRequestSchema, body);
+  // `attribution` is not part of the entry: it is split off before the entry is
+  // validated, fingerprinted or hashed, so it can never alter an `entryHash`.
+  let entryBody = body;
+  let attributionBody: unknown;
+  if (typeof body === "object" && body !== null && !Array.isArray(body) && "attribution" in body) {
+    const { attribution, ...rest } = body as Record<string, unknown>;
+    entryBody = rest;
+    attributionBody = attribution;
+  }
+
+  const parsed = parse(ledgerEntryRequestSchema, entryBody);
   if (!parsed.ok) {
     return jsonError("invalid_request", 400, parsed.message);
+  }
+  let attribution: ReturnType<typeof ledgerEntryAttributionSchema.parse> | undefined;
+  if (attributionBody !== undefined) {
+    const parsedAttribution = parse(ledgerEntryAttributionSchema, attributionBody);
+    if (!parsedAttribution.ok) {
+      return jsonError("invalid_request", 400, parsedAttribution.message);
+    }
+    // Only a contribution has a payer. Refused before anything is written.
+    if (parsed.data.entryType !== "contribution") {
+      return jsonError("invalid_request", 400, "Only a contribution can carry an attribution");
+    }
+    attribution = parsedAttribution.data;
   }
 
   try {
     const service = new LedgerService(new SupabaseLedgerRepository(supabase));
     const result = await service.append(parsed.data, { actorId: data.user.id });
+    let attributionOutcome: AttributionOutcome | undefined;
+    if (attribution !== undefined) {
+      try {
+        attributionOutcome = describeAttribution(
+          await recordAttribution(supabase, {
+            groupId: parsed.data.groupId,
+            entryId: result.entry.id,
+            memberUserId: attribution.memberUserId,
+            cycleId: attribution.cycleId,
+            round: attribution.round
+          })
+        );
+      } catch {
+        attributionOutcome = { status: "failed" };
+      }
+    }
     return Response.json(
-      { entry: publicEntry(result.entry), replayed: result.replayed },
+      {
+        entry: publicEntry(result.entry),
+        replayed: result.replayed,
+        ...(attributionOutcome ? { attribution: attributionOutcome } : {})
+      },
       {
         status: result.replayed ? 200 : 201,
         headers: { "Cache-Control": "no-store" }
@@ -126,11 +193,14 @@ export async function POST(request: Request): Promise<Response> {
 
 /**
  * `GET /api/ledger/entries?groupId=<uuid>[&limit=1..100][&beforeSequence=<n>]` —
- * a group's entries, newest first, each with its postings and a `provenance` field: `null`, or the
+ * a group's entries, newest first, each with its postings, an `attribution` field and a `provenance` field: `null`, or the
  * verified bank receipt that posted the entry (`{ kind: "bank_verification",
  * provider, verifiedAt, verificationId, memberUserId, referenceMasked }`, where `referenceMasked`
  * is `••••` plus the last 1-4 characters of the bank reference or `null`, never the full reference).
- * Read-only.
+ * `attribution` is `null` or who paid a contribution: `{ source: "bank_verification" | "treasurer",
+ * memberUserId, recordedBy, recordedAt, cycleId, round, revision, reason }`. `bank_verification` is the
+ * same fact as `provenance`; `treasurer` is an owner's or treasurer's record for an entry with no bank
+ * provenance, never a verification. Bank provenance wins when both exist. Read-only.
  *
  * Paging: the body is `{ entries, hasMore, nextCursor }`. `beforeSequence` is an
  * exclusive upper bound on sequence; when `hasMore` is true, `nextCursor` is the

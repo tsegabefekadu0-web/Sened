@@ -69,7 +69,7 @@ type Tamper = (path: string, body: Record<string, unknown>) => Record<string, un
  * the stored seals). Only the network and the Supabase session are replaced, so
  * what the browser verifies is what a real server would have published.
  */
-function createServer(role: Role, opts: { override?: Override; tamper?: Tamper; groups?: number; bankPaid?: boolean } = {}) {
+function createServer(role: Role, opts: { override?: Override; tamper?: Tamper; groups?: number; bankPaid?: boolean; cashPaid?: boolean } = {}) {
   const ledger = new InMemoryLedgerRepository({
     groups: [{ id: GROUP, tenantId: TENANT, members: [{ userId: TREASURER, role: "treasurer" }] }],
     accounts: [
@@ -134,7 +134,23 @@ function createServer(role: Role, opts: { override?: Override; tamper?: Tamper; 
             memberUserId: MEMBER_B
           }
         }
-      : { ...entry, provenance: null }
+      : opts.cashPaid && entry.id === "e2"
+        ? {
+            ...entry,
+            provenance: null,
+            // A cash entry whose payer the TREASURER recorded: no bank provenance.
+            attribution: {
+              source: "treasurer",
+              memberUserId: MEMBER_B,
+              recordedBy: TREASURER,
+              recordedAt: "2026-10-02T09:30:00.000Z",
+              cycleId: null,
+              round: null,
+              revision: 1,
+              reason: null
+            }
+          }
+        : { ...entry, provenance: null }
   );
 
   const fetchImpl = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -305,7 +321,7 @@ describe("signed in: cycles", () => {
     // Neither entry carries bank provenance, so nobody is credited and the note says why.
     expect(screen.queryByTestId("ledger-paid-members")).toBeNull();
     expect(screen.getByTestId("ledger-no-verified")).toHaveTextContent("no member can be shown as having paid");
-    expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("2 entries (Br 3,000.00 ETB) have no bank verification");
+    expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("2 entries (Br 3,000.00 ETB) are not attributed to any member");
     expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("does not record which round an entry belongs to");
     expect(screen.getByTestId("ledger-unattributed")).toHaveTextContent("does not mean they have not paid");
     // Members are listed at the configured amount and never marked paid.
@@ -331,7 +347,8 @@ describe("signed in: who has paid, from bank-verified entries", () => {
     expect(rows).toHaveLength(1);
     // MEMBER_B has no email in the members list, so the anonymous label is used.
     expect(rows[0]).toHaveTextContent("Member 33333333");
-    expect(rows[0]).toHaveTextContent("Br 1,000.00 ETB in 1 verified entries");
+    expect(rows[0]).toHaveTextContent("Br 1,000.00 ETB in 1 entries (1 bank-verified, 0 recorded by the treasurer)");
+    expect(within(rows[0]!).queryByTestId("ledger-treasurer-mark")).toBeNull();
     // The other in-window entry (Br 2,000.00) has no bank verification.
     expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("1 entries (Br 2,000.00 ETB)");
     expect(screen.queryByTestId("ledger-no-verified")).toBeNull();
@@ -339,6 +356,26 @@ describe("signed in: who has paid, from bank-verified entries", () => {
     expect(text).not.toMatch(/unpaid|in default|overdue/i);
     // Reading the figures never contacts anything but the two read routes.
     expect(server.calls.filter((call) => call.includes("/api/ledger"))).not.toContain("POST /api/ledger/entries");
+  });
+});
+
+describe("signed in: who has paid, from the treasurer's record for cash entries", () => {
+  it("credits the member the treasurer named, marked as recorded by the treasurer and never as bank-verified", async () => {
+    const user = userEvent.setup();
+    const server = createServer("treasurer", { cashPaid: true });
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+
+    renderAs(server, MEMBER_C);
+    const paid = await screen.findByTestId("ledger-paid-members");
+    const rows = within(paid).getAllByTestId("ledger-paid-member");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("Member 33333333");
+    expect(rows[0]).toHaveTextContent("Br 1,000.00 ETB in 1 entries (0 bank-verified, 1 recorded by the treasurer)");
+    expect(within(rows[0]!).getByTestId("ledger-treasurer-mark")).toHaveTextContent("recorded by the treasurer, not bank-verified");
+    // The other in-window entry is still nobody's.
+    expect(screen.getByTestId("ledger-unattributed-entries")).toHaveTextContent("1 entries (Br 2,000.00 ETB) are not attributed to any member");
+    expect(screen.queryByTestId("ledger-no-verified")).toBeNull();
   });
 });
 
@@ -879,5 +916,142 @@ describe("copy", () => {
       expect(dictionaries.am[k]).toBeTruthy();
       expect(translate("am", k, { id: "x", sequence: "1" })).not.toBe(dictionaries.en[k]);
     }
+  });
+});
+
+describe("signed in: collateral for each winner (advisory)", () => {
+  const WINNER = TREASURER; // the first round's winner in the fixture view
+  const T0 = "2026-10-10T09:00:00.000Z";
+  const G1 = "11111111-aaaa-4aaa-8aaa-111111111111";
+
+  function guaranteeWire(state: string, extra: Record<string, unknown> = {}) {
+    return {
+      guaranteeId: G1,
+      cycleId: "",
+      winnerMemberId: WINNER,
+      guarantorMemberId: MEMBER_B,
+      proposedBy: TREASURER,
+      proposedAt: T0,
+      state,
+      stateAt: T0,
+      stateBy: state === "accepted" ? MEMBER_B : TREASURER,
+      acceptedAt: state === "accepted" ? T0 : null,
+      reason: null,
+      successorGuaranteeId: null,
+      ...extra
+    };
+  }
+
+  /** Overrides the two collateral routes; everything else is the real fake server. */
+  function collateralOverride(state: { guarantee: string; posted: Record<string, unknown>[]; failRead?: boolean; cycleId?: string }): Override {
+    return (url, init) => {
+      const path = url.split("?")[0]!;
+      if (path === "/api/draw/collateral") {
+        if (state.failRead) return new Response("{}", { status: 500 });
+        const cycleId = new URL(url, "http://localhost").searchParams.get("cycleId")!;
+        state.cycleId = cycleId;
+        return Response.json({
+          collateral: {
+            cycleId,
+            groupId: GROUP,
+            totalRounds: 3,
+            contributionAmount: "1000.00",
+            potAmount: "3000.00",
+            reserveRatioBps: 1000,
+            startedAt: T0,
+            nextRound: 2,
+            eligibleCount: 2,
+            reserveRetained: "300.00",
+            flaggedCount: 1,
+            winners: [
+              {
+                memberId: WINNER,
+                round: 1,
+                revealedAt: T0,
+                owed: [
+                  { round: 2, status: "flagged", dueAt: T0, entryId: null, source: null },
+                  { round: 3, status: "not_due", dueAt: null, entryId: null, source: null }
+                ],
+                guarantees: [{ ...guaranteeWire(state.guarantee), cycleId }]
+              }
+            ]
+          }
+        });
+      }
+      if (path === "/api/draw/guarantees" && init.method === "POST") {
+        const body = JSON.parse(init.body as string) as Record<string, unknown>;
+        state.posted.push(body);
+        if (body.action === "accept") state.guarantee = "accepted";
+        return Response.json({ guarantee: { ...guaranteeWire(state.guarantee), cycleId: state.cycleId }, superseded: null, replayed: false });
+      }
+      return null;
+    };
+  }
+
+  it("shows the guarantor their own confirm control, sends only the guarantee id, and re-reads the derived view", async () => {
+    const user = userEvent.setup();
+    const state = { guarantee: "proposed", posted: [] as Record<string, unknown>[] };
+    const server = createServer("treasurer", { override: collateralOverride(state) });
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+
+    renderAs(server, MEMBER_B);
+    const panel = await screen.findByTestId("collateral-panel");
+    expect(await within(panel).findByTestId("collateral-winner")).toHaveTextContent("treasurer@example.test · won round 1");
+    expect(within(panel).getByTestId("collateral-advisory")).toHaveTextContent("Nothing here moves money");
+    expect(within(panel).getAllByTestId("collateral-round").map((entry) => entry.getAttribute("data-round-status"))).toEqual(["flagged", "not_due"]);
+    expect(within(panel).getByTestId("collateral-retained")).toHaveTextContent("300.00 ETB");
+    // This member IS the guarantor named, so the confirm control is theirs; the treasurer's controls are not.
+    expect(within(panel).queryByTestId("guarantee-propose")).toBeNull();
+    await user.click(within(panel).getByTestId("guarantee-accept"));
+
+    await waitFor(() => expect(state.posted).toEqual([{ action: "accept", guaranteeId: G1 }]));
+    await waitFor(() => expect(within(screen.getByTestId("collateral-panel")).getByTestId("guarantee-state")).toHaveTextContent("Confirmed by the guarantor"));
+    expect(within(screen.getByTestId("collateral-panel")).queryByTestId("guarantee-accept")).toBeNull();
+    // Nothing but the draw, ledger-read and collateral routes was called: no ledger write, no payout.
+    expect(server.calls).not.toContain("POST /api/ledger/entries");
+    expect(server.calls).not.toContain("POST /api/draw/payouts");
+  });
+
+  it("gives the treasurer propose, release and replace controls, and not the guarantor's confirm", async () => {
+    const user = userEvent.setup();
+    const state = { guarantee: "accepted", posted: [] as Record<string, unknown>[] };
+    const server = createServer("treasurer", { override: collateralOverride(state) });
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+
+    const panel = await screen.findByTestId("collateral-panel");
+    await within(panel).findByTestId("collateral-winner");
+    expect(within(panel).getByTestId("guarantee-propose")).toBeInTheDocument();
+    expect(within(panel).getByTestId("guarantee-release")).toBeInTheDocument();
+    expect(within(panel).getByTestId("guarantee-supersede")).toBeInTheDocument();
+    expect(within(panel).queryByTestId("guarantee-accept")).toBeNull();
+    expect(within(panel).queryByTestId("guarantee-decline")).toBeNull();
+  });
+
+  it("says the record is unavailable, rather than guessing, when the collateral read fails", async () => {
+    const user = userEvent.setup();
+    const state = { guarantee: "proposed", posted: [] as Record<string, unknown>[], failRead: true };
+    const server = createServer("treasurer", { override: collateralOverride(state) });
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+
+    const panel = await screen.findByTestId("collateral-panel");
+    await waitFor(() => expect(within(panel).getByTestId("collateral-status")).toHaveTextContent("could not be read"));
+    expect(within(panel).queryByTestId("collateral-winner")).toBeNull();
+    expect(within(panel).getByTestId("collateral-advisory")).toBeInTheDocument();
+  });
+
+  it("speaks Amharic when the screen does", async () => {
+    const user = userEvent.setup();
+    const state = { guarantee: "proposed", posted: [] as Record<string, unknown>[] };
+    const server = createServer("treasurer", { override: collateralOverride(state) });
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+    renderAs(server, MEMBER_B, "am");
+    const panel = await screen.findByTestId("collateral-panel");
+    await within(panel).findByTestId("collateral-winner");
+    expect(panel).toHaveTextContent(translate("am", "collateral.title"));
+    expect(panel).toHaveTextContent(translate("am", "collateral.advisory"));
   });
 });

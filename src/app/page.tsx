@@ -6,7 +6,11 @@ import { useRouter } from "next/navigation";
 import { Header } from "@/components/shell/Header";
 import { WorkspaceLinks } from "@/components/shell/WorkspaceLinks";
 import { DebterCard } from "@/components/treasury/DebterCard";
-import { ContributionFeed, type MemberContribution } from "@/components/contributions/ContributionFeed";
+import {
+  ContributionFeed,
+  type MemberContribution,
+  type PayerAttribution
+} from "@/components/contributions/ContributionFeed";
 import { BottomVoiceNav } from "@/components/navigation/BottomVoiceNav";
 import { VoiceModal } from "@/components/voice/VoiceModal";
 import { AudioDigestModal } from "@/components/voice/AudioDigestModal";
@@ -14,6 +18,7 @@ import { ProfilePanel } from "@/components/shell/ProfilePanel";
 import { TabPanel } from "@/components/shell/TabPanel";
 import { createTranslator, type Locale, type MessageKey } from "@/lib/i18n";
 import { useSession } from "@/lib/auth/useSession";
+import { attributePayer, supersedePayer } from "@/lib/ledger/clientAttribution";
 import type { HomeLedgerResult } from "@/lib/ledger/clientHome";
 import { useHomeLedger } from "@/lib/ledger/useHomeLedger";
 import { requestBankVerification } from "@/lib/voice/clientVerify";
@@ -149,6 +154,26 @@ export default function SenedHome() {
         };
         const proof = contribution.provenance;
         if (!proof) {
+          // No bank receipt. If the treasurer recorded who paid, say so, as the
+          // treasurer's record: the row stays PROVISIONAL ("Recorded in ledger"),
+          // gets no verified badge, and the payer line names its source.
+          const recorded = contribution.attribution;
+          if (recorded?.source === "treasurer") {
+            const payerAttire = memberAttire?.[recorded.memberUserId];
+            return {
+              ...base,
+              status: "PROVISIONAL" as const,
+              memberId: recorded.memberUserId,
+              ...(payerAttire === "gabi" || payerAttire === "netela" ? { attire: payerAttire } : {}),
+              treasurerPayer: {
+                memberId: recorded.memberUserId,
+                memberLabel:
+                  memberLabels?.[recorded.memberUserId] ?? t("members.anonymous", { id: recorded.memberUserId.slice(0, 8) }),
+                revision: recorded.revision,
+                recordedAtLabel: new Date(recorded.recordedAt).toLocaleString(locale === "am" ? "am-ET" : "en-US")
+              }
+            };
+          }
           return { ...base, status: "PROVISIONAL" as const };
         }
         // A verified bank receipt posted this entry. The badge's evidence is the
@@ -174,6 +199,32 @@ export default function SenedHome() {
       }),
     [ledger, memberLabels, memberAttire, t, locale]
   );
+  // The owner's / treasurer's "attribute payer" action on a ledger row. Offered
+  // only to them (the database refuses anyone else regardless).
+  const liveReady = home.kind === "live" && home.result.status === "ready" ? home.result : null;
+  const reloadHome = home.reload;
+  const payerAttribution = useMemo<PayerAttribution | undefined>(() => {
+    if (!liveReady || !liveReady.groupId || (liveReady.role !== "owner" && liveReady.role !== "treasurer")) {
+      return undefined;
+    }
+    const groupId = liveReady.groupId;
+    return {
+      members: (liveReady.attributableMembers ?? []).map((member) => ({
+        userId: member.userId,
+        label: member.email ?? t("members.anonymous", { id: member.userId.slice(0, 8) })
+      })),
+      onAttribute: async ({ entryId, memberUserId, reason }) => {
+        const result =
+          reason === undefined
+            ? await attributePayer({ groupId, entryId, memberUserId })
+            : await supersedePayer({ groupId, entryId, memberUserId, reason });
+        if (result.status === "ok") {
+          reloadHome();
+        }
+        return result;
+      }
+    };
+  }, [liveReady, reloadHome, t]);
   const contributions = [
     ...localNotes,
     ...(home.kind === "sample" ? referenceContributions : ledgerRows)
@@ -281,7 +332,7 @@ export default function SenedHome() {
 
             {/* Right Column on Desktop: Member Contribution Feed */}
             <div className="md:col-span-6">
-              <ContributionFeed contributions={contributions} />
+              <ContributionFeed contributions={contributions} locale={locale} attribution={payerAttribution} />
             </div>
           </div>
         </div>

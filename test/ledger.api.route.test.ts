@@ -208,3 +208,111 @@ describe("POST /api/ledger/entries", () => {
     expect(response.status).toBe(503);
   });
 });
+
+describe("POST /api/ledger/entries with an attribution (who paid a cash contribution)", () => {
+  const memberId = "77777777-7777-4777-8777-777777777777";
+  const cycleId = "88888888-8888-4888-8888-888888888888";
+  const attributionRow = {
+    entryId: persistedEntry.id,
+    memberUserId: memberId,
+    source: "treasurer",
+    recordedBy: actorId,
+    recordedAt: "2026-09-25T10:30:02.000Z",
+    cycleId: null,
+    round: null,
+    revision: 1,
+    reason: null
+  };
+
+  /** post_ledger_entry_v1 answers the entry; record_ledger_entry_attribution_v1 answers `attribution`. */
+  function answer(attribution: { data: unknown; error: unknown }) {
+    mocks.rpc.mockImplementation(async (name: string) =>
+      name === "record_ledger_entry_attribution_v1"
+        ? attribution
+        : { data: { entry: persistedEntry, replayed: false }, error: null }
+    );
+  }
+
+  it("posts the entry first, with the attribution split off, then records the payer for the new entry", async () => {
+    answer({ data: { attribution: attributionRow, replayed: false }, error: null });
+
+    const response = await POST(post({ ...requestBody, attribution: { memberUserId: memberId } }));
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(body.attribution).toEqual({ status: "recorded", replayed: false });
+    expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual(["post_ledger_entry_v1", "record_ledger_entry_attribution_v1"]);
+    // The entry RPC never sees the attribution: it cannot reach the hash or the fingerprint.
+    const [, entryArgs] = mocks.rpc.mock.calls[0]!;
+    expect(JSON.stringify(entryArgs)).not.toContain(memberId);
+    expect(Object.keys(entryArgs)).not.toContain("attribution");
+    expect(mocks.rpc).toHaveBeenLastCalledWith("record_ledger_entry_attribution_v1", {
+      p_group_id: groupId,
+      p_entry_id: persistedEntry.id,
+      p_member_user_id: memberId,
+      p_cycle_id: null,
+      p_round: null
+    });
+    // The public entry is unchanged by it.
+    expect(body.entry.entryHash).toBe(persistedEntry.entryHash);
+  });
+
+  it("passes the cycle and round, and reports a replayed entry's attribution as a replay", async () => {
+    answer({ data: { attribution: { ...attributionRow, cycleId, round: 2 }, replayed: true }, error: null });
+    const response = await POST(post({ ...requestBody, attribution: { memberUserId: memberId, cycleId, round: 2 } }));
+    expect((await response.json()).attribution).toEqual({ status: "recorded", replayed: true });
+    expect(mocks.rpc).toHaveBeenLastCalledWith(
+      "record_ledger_entry_attribution_v1",
+      expect.objectContaining({ p_cycle_id: cycleId, p_round: 2 })
+    );
+  });
+
+  it("REPORTS a refused attribution but keeps the posted entry: the ledger is never held back by it", async () => {
+    for (const [code, message, reported] of [
+      ["42501", "ledger_forbidden", "forbidden"],
+      ["P0002", "ledger_member_not_found", "ledger_member_not_found"],
+      ["P0001", "attribution_bank_verified", "attribution_bank_verified"]
+    ] as const) {
+      answer({ data: null, error: { code, message } });
+      const response = await POST(post({ ...requestBody, attribution: { memberUserId: memberId } }));
+      expect(response.status, message).toBe(201);
+      const body = await response.json();
+      expect(body.entry.id).toBe(persistedEntry.id);
+      expect(body.attribution).toEqual({ status: "refused", error: reported });
+    }
+    answer({ data: null, error: { code: "XX000", message: "boom" } });
+    const failed = await POST(post({ ...requestBody, attribution: { memberUserId: memberId } }));
+    expect(failed.status).toBe(201);
+    expect((await failed.json()).attribution).toEqual({ status: "failed" });
+  });
+
+  it("does not record anything when the entry itself is refused", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: { code: "42501", message: "ledger_forbidden" } });
+    const response = await POST(post({ ...requestBody, attribution: { memberUserId: memberId } }));
+    expect(response.status).toBe(403);
+    expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual(["post_ledger_entry_v1"]);
+  });
+
+  it("REJECTS (400) an attribution on anything but a contribution, and a malformed one, before any write", async () => {
+    const disbursement = { ...requestBody, entryType: "disbursement" };
+    for (const bad of [
+      { ...disbursement, attribution: { memberUserId: memberId } },
+      { ...requestBody, attribution: null },
+      { ...requestBody, attribution: {} },
+      { ...requestBody, attribution: { memberUserId: "nope" } },
+      { ...requestBody, attribution: { memberUserId: memberId, round: 2 } },
+      { ...requestBody, attribution: { memberUserId: memberId, recordedBy: actorId } },
+      { ...requestBody, attribution: { memberUserId: memberId, source: "bank_verification" } },
+      { ...requestBody, attribution: [memberId] }
+    ]) {
+      expect((await POST(post(bad))).status, JSON.stringify(bad.attribution)).toBe(400);
+    }
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("is unchanged for a post with no attribution: one RPC and no attribution field", async () => {
+    const response = await POST(post(requestBody));
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+    expect(Object.keys(await response.json()).sort()).toEqual(["entry", "replayed"]);
+  });
+});

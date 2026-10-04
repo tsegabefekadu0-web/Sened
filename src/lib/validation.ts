@@ -146,6 +146,44 @@ export const ledgerMemberAttireRequestSchema = z
   .strict();
 
 /**
+ * Who paid a contribution that did not come through a bank verification. The
+ * payer is named by the treasurer (`memberUserId`); who is RECORDING it is never a
+ * field, it is the session. `cycleId` and `round` say which round the payment is
+ * for, optionally; a round needs its cycle. All strict, so a smuggled `recordedBy`
+ * or `source` is a 400, not ignored.
+ *
+ * `ledgerEntryAttributionSchema` is the part that rides along on a ledger entry
+ * post (`POST /api/ledger/entries`, `attribution`): the entry id is not known yet.
+ */
+const attributionRoundSchema = z.number().int().min(1).max(1000);
+const attributionShape = {
+  memberUserId: uuidSchema,
+  cycleId: uuidSchema.optional(),
+  round: attributionRoundSchema.optional()
+};
+function roundNeedsCycle(value: { cycleId?: string; round?: number }, context: z.RefinementCtx): void {
+  if (value.round !== undefined && value.cycleId === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["round"], message: "A round needs its cycle" });
+  }
+}
+export const ledgerEntryAttributionSchema = z.object(attributionShape).strict().superRefine(roundNeedsCycle);
+
+export const ledgerAttributionRecordRequestSchema = z
+  .object({ groupId: uuidSchema, entryId: uuidSchema, ...attributionShape })
+  .strict()
+  .superRefine(roundNeedsCycle);
+
+export const ledgerAttributionSupersedeRequestSchema = z
+  .object({
+    groupId: uuidSchema,
+    entryId: uuidSchema,
+    ...attributionShape,
+    reason: z.string().trim().min(10).max(1000)
+  })
+  .strict()
+  .superRefine(roundNeedsCycle);
+
+/**
  * Invite links. All strict. Expiry is capped at 30 days and uses at 50, which
  * the SQL enforces again; a wrong value is a 400 here rather than a database
  * error. The token schema is a shape check only (the database decides whether
@@ -229,6 +267,43 @@ export const drawSealRequestSchema = z
 export const drawNonceRequestSchema = z
   .object({ drawId: uuidSchema, nonce: drawEntropySchema })
   .strict();
+
+/**
+ * Collateral (M4.2). `GET /api/draw/collateral?cycleId=` reads the derived view;
+ * `POST /api/draw/guarantees` carries one of five actions. All strict.
+ *
+ * No body ever names who is acting: the proposer, the guarantor answering and the
+ * releaser are the signed-in user, resolved in the database from `auth.uid()`.
+ * `accept` and `decline` take only the guarantee's id, so nobody can accept "as"
+ * someone else. A reason is required to release or supersede (10..1000
+ * characters) and optional on a decline.
+ */
+export const drawCollateralQuerySchema = z.object({ cycleId: uuidSchema }).strict();
+
+const guaranteeReasonSchema = z.string().trim().min(10).max(1000);
+export const drawGuaranteeRequestSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      action: z.literal("propose"),
+      cycleId: uuidSchema,
+      winnerMemberId: uuidSchema,
+      guarantorMemberId: uuidSchema
+    })
+    .strict(),
+  z.object({ action: z.literal("accept"), guaranteeId: uuidSchema }).strict(),
+  z
+    .object({ action: z.literal("decline"), guaranteeId: uuidSchema, reason: z.string().trim().min(1).max(1000).optional() })
+    .strict(),
+  z.object({ action: z.literal("release"), guaranteeId: uuidSchema, reason: guaranteeReasonSchema }).strict(),
+  z
+    .object({
+      action: z.literal("supersede"),
+      guaranteeId: uuidSchema,
+      newGuarantorMemberId: uuidSchema,
+      reason: guaranteeReasonSchema
+    })
+    .strict()
+]);
 
 export const drawCycleIdSchema = uuidSchema;
 export const drawSessionIdSchema = uuidSchema;

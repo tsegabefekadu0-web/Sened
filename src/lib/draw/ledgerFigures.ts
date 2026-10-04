@@ -9,27 +9,37 @@ import { formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
  * What the ledger can honestly say about a cycle's contributions.
  *
  * A ledger entry's `actor` is whoever recorded it, not whoever paid, and an
- * entry carries no cycle or round id. So the actor is never used to say who
- * paid. What can be attributed is an entry posted from a verified bank receipt:
- * the read path now returns its provenance, and the verification's own user is
- * the member who paid. For those entries, and only those, a member is credited.
+ * entry carries no cycle or round id of its own. So the actor is never used to
+ * say who paid. A payer is credited only through an ATTRIBUTION, of which there
+ * are two kinds and they are kept apart:
  *
- * Still NOT derivable, and not shown as if it were:
+ *  - `bank_verification`: the entry was posted from a verified bank receipt, and
+ *    the verification's own user is the member who paid. This is evidence.
+ *  - `treasurer`: an owner or treasurer RECORDED who paid an entry that has no
+ *    bank provenance (cash, a manual entry). This is the treasurer's word, not a
+ *    verification; it makes who-paid work for a cash group, and it is counted
+ *    and labelled separately so it is never presented as verified.
  *
- *  - who paid an entry that carries no bank provenance (a treasurer's manual
- *    entry), so such entries are counted and totalled as `unattributed`;
- *  - which round an entry belongs to, and the cycle has no cadence, so there is
- *    no per-round period: the window is "since the cycle started";
+ * Bank provenance wins when both exist (the read path already resolves that).
+ *
+ * Still NOT derivable here, and not shown as if it were:
+ *
+ *  - which round an entry belongs to unless the treasurer said so; the window
+ *    is "since the cycle started". The per-round view is the collateral view
+ *    (`collateral.ts`), which derives each winner's later rounds in the database;
  *  - whether a member is in default. A member absent from `byMember` has no
- *    bank-verified entry in the window; that is not the same as unpaid, because
- *    they may have paid in a way the ledger cannot attribute.
+ *    attributed entry in the window; that is not the same as unpaid.
  */
 
 export interface MemberPaidFigure {
-  /** The member whose bank receipt was verified. */
+  /** The member credited: the verification's user, or the member the treasurer named. */
   readonly memberUserId: string;
-  /** Bank-verified contribution entries from this member since the cycle began. */
+  /** Attributed contribution entries from this member since the cycle began (both kinds). */
   readonly count: number;
+  /** Of `count`, the entries a verified bank receipt names. */
+  readonly verifiedCount: number;
+  /** Of `count`, the entries only the treasurer's record names: not bank-verified. */
+  readonly treasurerCount: number;
   /** ETB, two decimals. */
   readonly total: string;
 }
@@ -39,9 +49,9 @@ export interface CycleLedgerFigures {
   readonly count: number;
   /** ETB, two decimals: what those entries added to the pot. */
   readonly total: string;
-  /** Members with bank-verified entries in the window, largest total first. */
+  /** Members with attributed entries in the window, largest total first. */
   readonly byMember: readonly MemberPaidFigure[];
-  /** Entries in the window with no bank provenance: nobody can be credited. */
+  /** Entries in the window nobody has attributed (no bank provenance, no treasurer's record). */
   readonly unattributedCount: number;
   /** ETB, two decimals. */
   readonly unattributedTotal: string;
@@ -57,7 +67,7 @@ export function cycleLedgerFigures(
   let count = 0;
   let unattributedTotal = 0n;
   let unattributedCount = 0;
-  const members = new Map<string, { count: number; total: bigint }>();
+  const members = new Map<string, { count: number; verified: number; total: bigint }>();
   for (const contribution of contributions) {
     if (Number.isFinite(start) && Date.parse(contribution.occurredAt) < start) {
       continue;
@@ -65,23 +75,34 @@ export function cycleLedgerFigures(
     const units = toEtbMinorUnits(contribution.amount);
     total += units;
     count += 1;
-    const memberUserId = contribution.provenance?.memberUserId;
-    if (memberUserId === undefined) {
+    // Bank provenance wins; a caller that only knows provenance still credits it.
+    const attribution = contribution.provenance
+      ? { memberUserId: contribution.provenance.memberUserId, verified: true }
+      : contribution.attribution
+        ? { memberUserId: contribution.attribution.memberUserId, verified: contribution.attribution.source === "bank_verification" }
+        : null;
+    if (attribution === null) {
       unattributedTotal += units;
       unattributedCount += 1;
       continue;
     }
-    const current = members.get(memberUserId) ?? { count: 0, total: 0n };
-    members.set(memberUserId, { count: current.count + 1, total: current.total + units });
+    const current = members.get(attribution.memberUserId) ?? { count: 0, verified: 0, total: 0n };
+    members.set(attribution.memberUserId, {
+      count: current.count + 1,
+      verified: current.verified + (attribution.verified ? 1 : 0),
+      total: current.total + units
+    });
   }
   const byMember = [...members.entries()]
-    .map(([memberUserId, figure]) => ({ memberUserId, count: figure.count, units: figure.total }))
+    .map(([memberUserId, figure]) => ({ memberUserId, count: figure.count, verified: figure.verified, units: figure.total }))
     .sort((left, right) =>
       left.units === right.units ? left.memberUserId.localeCompare(right.memberUserId) : left.units > right.units ? -1 : 1
     )
-    .map(({ memberUserId, count: entries, units }) => ({
+    .map(({ memberUserId, count: entries, verified, units }) => ({
       memberUserId,
       count: entries,
+      verifiedCount: verified,
+      treasurerCount: entries - verified,
       total: formatEtbMinorUnits(units)
     }));
   return {

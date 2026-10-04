@@ -15,6 +15,7 @@ import {
   openDraw,
   postPayout,
   randomHex,
+  readCollateral,
   readCycle,
   readDraft,
   readDrawGroup,
@@ -23,6 +24,7 @@ import {
   revealDraw,
   sealForDraw,
   sealStanding,
+  sendGuarantee,
   submitNonce,
   submitSeal,
   userIdFromAccessToken,
@@ -34,6 +36,7 @@ import {
   type DrawDraft,
   type DrawFailure,
   type DrawGroup,
+  type GuaranteeCommand,
   type MySeal,
   type PayoutReceipt,
   type WireVerify
@@ -46,6 +49,7 @@ import { formatEtbDisplay, formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/le
 
 import { usePrefersReducedMotion } from "./DrawBoard";
 import { MesobCeremony, type CeremonyPhase } from "./MesobCeremony";
+import { CollateralPanel, type CollateralOutcome, type CollateralState } from "./CollateralPanel";
 import { RiskPanel } from "./RiskPanel";
 import { VerifyPanel } from "./VerifyPanel";
 import { liveCopy, t as drawCopy, type DrawLiveKey, type Locale } from "./copy";
@@ -149,6 +153,9 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
   const [mySeal, setMySeal] = useState<MySeal | null>(null);
   const [draft, setDraft] = useState<DrawDraft | null>(null);
   const [ledger, setLedger] = useState<LedgerFiguresResult | "loading" | null>(null);
+  const [collateral, setCollateral] = useState<CollateralState>({ kind: "loading" });
+  /** Bumped after a guarantee command so the derived view is read again. */
+  const [collateralTick, setCollateralTick] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
 
@@ -338,6 +345,40 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cycleStart]);
+
+  // The derived collateral view for the selected cycle: re-read whenever the cycle's
+  // draws move (a draw opened or revealed changes what is due) and after a
+  // guarantee command. Nothing is cached or stored: the database derives it each time.
+  const collateralKey =
+    detail === null ? null : `${detail.cycle.cycleId}:${detail.draws.map((entry) => `${entry.drawId}${entry.state}`).join(",")}:${collateralTick}`;
+  useEffect(() => {
+    if (collateralKey === null || detail === null) {
+      setCollateral({ kind: "loading" });
+      return;
+    }
+    let active = true;
+    void readCollateral(detail.cycle.cycleId, deps).then((result) => {
+      if (!active) return;
+      setCollateral(result.ok ? { kind: "ready", view: result.data } : { kind: "unavailable" });
+    });
+    return () => {
+      active = false;
+    };
+    // The key already covers the cycle and its draws.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collateralKey]);
+
+  const guaranteeCommand = useCallback(
+    async (command: GuaranteeCommand): Promise<CollateralOutcome> => {
+      const result = await sendGuarantee(command, deps);
+      if (!result.ok) {
+        return { ok: false, key: drawErrorKey(result), detail: result.message };
+      }
+      setCollateralTick((value) => value + 1);
+      return { ok: true };
+    },
+    [deps]
+  );
 
   // The winner moment, or the tamper moment: this device's own recomputation.
   useEffect(() => {
@@ -778,8 +819,15 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
                             {t("drawLive.ledgerPaidRow", {
                               total: formatEtbDisplay(figure.total),
                               currency: copy.currency,
-                              count: figure.count
+                              count: figure.count,
+                              verified: figure.verifiedCount,
+                              treasurer: figure.treasurerCount
                             })}
+                            {figure.treasurerCount > 0 && figure.verifiedCount === 0 ? (
+                              <span data-testid="ledger-treasurer-mark" className="block font-semibold text-[#6B5433]">
+                                {t("drawLive.ledgerTreasurerMark")}
+                              </span>
+                            ) : null}
                           </span>
                         </li>
                       ))}
@@ -817,6 +865,19 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
               {t("drawLive.ledgerNoMember")}
             </p>
           </section>
+        ) : null}
+
+        {cycle !== null && detail !== null ? (
+          <CollateralPanel
+            locale={locale}
+            state={collateral}
+            currencyLabel={copy.currency}
+            myUserId={myUserId}
+            isTreasurer={isTreasurer}
+            members={group?.members ?? []}
+            labelFor={labelFor}
+            onCommand={guaranteeCommand}
+          />
         ) : null}
 
         {cycle !== null && detail !== null ? (

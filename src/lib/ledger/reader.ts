@@ -63,6 +63,35 @@ export interface PublicLedgerProvenance {
   readonly referenceMasked: string | null;
 }
 
+/**
+ * Who paid a contribution, and how the ledger knows.
+ *
+ * `source` is the whole point: `bank_verification` means a verified bank receipt
+ * names the payer (the same fact as `provenance`); `treasurer` means an owner or
+ * treasurer RECORDED who paid an entry that has no bank provenance, which is the
+ * treasurer's statement and never a verification. Bank provenance outranks a
+ * treasurer's record (the database picks it), so a row is never shown as the
+ * weaker thing when the stronger exists.
+ *
+ * Read through `get_ledger_entry_attributions_v1`. The attribution lives beside
+ * the hash-chained entry and is not part of `entryHash`. `revision` counts the
+ * records in the entry's history (1 = never corrected; each correction is a new
+ * record with a `reason`, and none is ever edited or deleted). `recordedBy` is
+ * the actor who recorded the entry for a bank-verified row, and the treasurer
+ * who recorded the attribution otherwise. `cycleId` and `round` say which round
+ * of which cycle the payment is for, when the treasurer said so.
+ */
+export interface PublicLedgerAttribution {
+  readonly source: "bank_verification" | "treasurer";
+  readonly memberUserId: string;
+  readonly recordedBy: string;
+  readonly recordedAt: string;
+  readonly cycleId: string | null;
+  readonly round: number | null;
+  readonly revision: number;
+  readonly reason: string | null;
+}
+
 /** What the browser sees. No tenant id, request fingerprint or idempotency key. */
 export interface PublicLedgerEntry {
   readonly id: string;
@@ -80,6 +109,12 @@ export interface PublicLedgerEntry {
   readonly postings: readonly PublicLedgerPosting[];
   /** `null` for every entry not posted from a verified bank receipt. */
   readonly provenance: PublicLedgerProvenance | null;
+  /**
+   * Who paid, when anyone has said so: bank provenance, else the treasurer's
+   * record. `null` for a contribution nobody has attributed and for every entry
+   * that is not a contribution.
+   */
+  readonly attribution: PublicLedgerAttribution | null;
 }
 
 const BANK_PROVIDERS: readonly BankProvider[] = ["telebirr", "cbe", "awash"];
@@ -189,7 +224,8 @@ function parseEntry(value: unknown, postings: readonly PublicLedgerPosting[]): P
     previousHash: str(value, "previous_hash"),
     entryHash: str(value, "entry_hash"),
     postings,
-    provenance: null
+    provenance: null,
+    attribution: null
   };
 }
 
@@ -409,7 +445,80 @@ async function readProvenance(
   return found;
 }
 
-/** Fetch the postings and provenance for already-read entry rows and join them on. */
+function parseAttribution(value: unknown): PublicLedgerAttribution & { readonly entryId: string } {
+  if (!isRecord(value)) {
+    throw integrity("Ledger read returned an invalid attribution row");
+  }
+  const source = str(value, "source");
+  if (source !== "bank_verification" && source !== "treasurer") {
+    throw integrity("Ledger read returned an invalid attribution source");
+  }
+  const recordedAt = str(value, "recordedAt");
+  if (!Number.isFinite(Date.parse(recordedAt))) {
+    throw integrity("Ledger read returned an invalid attribution time");
+  }
+  const cycleRaw = nullableStr(value, "cycleId");
+  const round = value.round;
+  if (round !== null && round !== undefined && (typeof round !== "number" || !Number.isSafeInteger(round) || round < 1)) {
+    throw integrity("Ledger read returned an invalid attribution round");
+  }
+  const revision = value.revision;
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1) {
+    throw integrity("Ledger read returned an invalid attribution revision");
+  }
+  const cycleId = cycleRaw === null ? null : cycleRaw.toLowerCase();
+  if (cycleId !== null && !isUuid(cycleId)) {
+    throw integrity("Ledger read returned an invalid attribution cycle");
+  }
+  // Only the named fields are copied: whatever else a row carried is dropped.
+  return {
+    entryId: uuid(value, "entryId"),
+    source,
+    memberUserId: uuid(value, "memberUserId"),
+    recordedBy: uuid(value, "recordedBy"),
+    recordedAt,
+    cycleId,
+    round: typeof round === "number" ? round : null,
+    revision,
+    reason: nullableStr(value, "reason")
+  };
+}
+
+/**
+ * The effective attribution of the given contribution entries, keyed by entry id.
+ * Only contributions are asked about. The RPC re-checks group membership itself.
+ */
+async function readAttributions(
+  client: SupabaseClient,
+  groupId: string,
+  rows: readonly Record<string, unknown>[]
+): Promise<ReadonlyMap<string, PublicLedgerAttribution>> {
+  const candidates = rows.filter((row) => row.entry_type === "contribution").map((row) => uuid(row, "id"));
+  const found = new Map<string, PublicLedgerAttribution>();
+  if (candidates.length === 0) {
+    return found;
+  }
+  const result = await client.rpc("get_ledger_entry_attributions_v1", {
+    p_group_id: groupId,
+    p_entry_ids: candidates
+  });
+  if (result.error) {
+    throw storageFailure(result.error);
+  }
+  if (!Array.isArray(result.data)) {
+    throw integrity("Ledger read returned an invalid attribution list");
+  }
+  for (const raw of result.data) {
+    const { entryId, ...attribution } = parseAttribution(raw);
+    if (!candidates.includes(entryId) || found.has(entryId)) {
+      throw integrity("Ledger read returned an attribution for an entry it was not asked about");
+    }
+    found.set(entryId, attribution);
+  }
+  return found;
+}
+
+/** Fetch the postings, provenance and attribution for already-read entry rows and join them on. */
 async function attachPostings(
   client: SupabaseClient,
   groupId: string,
@@ -434,18 +543,21 @@ async function attachPostings(
     const { entryId, ...posting } = parsePosting(raw);
     byEntry.set(entryId, [...(byEntry.get(entryId) ?? []), posting]);
   }
-  const provenance = await readProvenance(
-    client,
-    groupId,
-    rows.map((row) => (isRecord(row) ? row : {}))
-  );
+  const plainRows = rows.map((row) => (isRecord(row) ? row : {}));
+  const provenance = await readProvenance(client, groupId, plainRows);
+  const attributions = await readAttributions(client, groupId, plainRows);
   return rows.map((row) => {
     const parsed = parseEntry(row, []);
     const entryPostings = byEntry.get(parsed.id);
     if (!entryPostings || entryPostings.length === 0) {
       throw integrity("Ledger entry has no postings");
     }
-    return { ...parsed, postings: entryPostings, provenance: provenance.get(parsed.id) ?? null };
+    return {
+      ...parsed,
+      postings: entryPostings,
+      provenance: provenance.get(parsed.id) ?? null,
+      attribution: attributions.get(parsed.id) ?? null
+    };
   });
 }
 

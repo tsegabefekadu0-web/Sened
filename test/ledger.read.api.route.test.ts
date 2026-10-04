@@ -7,7 +7,9 @@ const mocks = vi.hoisted(() => ({
   results: {} as Record<string, Result>,
   calls: [] as Array<{ table: string; op: string; args: unknown[] }>,
   from: vi.fn(),
-  rpc: vi.fn()
+  rpc: vi.fn(),
+  /** What `get_ledger_entry_attributions_v1` answers; provenance is answered per test. */
+  attributions: { data: [], error: null } as Result
 }));
 
 vi.mock("server-only", () => ({}));
@@ -97,6 +99,13 @@ function request(query: string, headers: Record<string, string> = { authorizatio
   return new Request(`http://localhost/api/ledger/entries${query}`, { headers });
 }
 
+/** Answer the provenance RPC with `provenance` and the attribution RPC with `mocks.attributions`. */
+function answerRpc(provenance: Result) {
+  mocks.rpc.mockImplementation(async (name: string) =>
+    name === "get_ledger_entry_attributions_v1" ? mocks.attributions : provenance
+  );
+}
+
 beforeEach(() => {
   vi.unstubAllEnvs();
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://demo.supabase.co");
@@ -108,7 +117,8 @@ beforeEach(() => {
   mocks.from.mockReset();
   mocks.from.mockImplementation((table: string) => builder(table));
   mocks.rpc.mockReset();
-  mocks.rpc.mockResolvedValue({ data: [], error: null });
+  answerRpc({ data: [], error: null });
+  mocks.attributions = { data: [], error: null };
   mocks.results = {
     ledger_groups: { data: { id: groupId }, error: null },
     ledger_entries: { data: [entryRow()], error: null },
@@ -384,7 +394,7 @@ describe("GET /api/ledger/entries provenance", () => {
       error: null
     };
     mocks.results.ledger_entry_postings = { data: [...postingRows(otherEntryId), ...postingRows()], error: null };
-    mocks.rpc.mockResolvedValue({ data: [provenanceRow()], error: null });
+    answerRpc({ data: [provenanceRow()], error: null });
 
     const body = await (await GET(request(`?groupId=${groupId}`))).json();
 
@@ -405,6 +415,11 @@ describe("GET /api/ledger/entries provenance", () => {
       p_group_id: groupId,
       p_entry_ids: [otherEntryId, entryId]
     });
+    // Attribution is asked about the same page, beside provenance.
+    expect(mocks.rpc).toHaveBeenCalledWith("get_ledger_entry_attributions_v1", {
+      p_group_id: groupId,
+      p_entry_ids: [otherEntryId, entryId]
+    });
   });
 
   it("returns provenance: null on every entry when nothing was bank-verified", async () => {
@@ -417,6 +432,7 @@ describe("GET /api/ledger/entries provenance", () => {
     const body = await (await GET(request(`?groupId=${groupId}`))).json();
     expect(mocks.rpc).not.toHaveBeenCalled();
     expect(body.entries[0].provenance).toBeNull();
+    expect(body.entries[0].attribution).toBeNull();
   });
 
   it("never reaches the provenance function for a group RLS hides (cross-group isolation)", async () => {
@@ -426,17 +442,17 @@ describe("GET /api/ledger/entries provenance", () => {
   });
 
   it("refuses (502) when the database says the caller is not a member, rather than showing unverified rows", async () => {
-    mocks.rpc.mockResolvedValue({ data: null, error: { code: "42501", message: "ledger_forbidden" } });
+    answerRpc({ data: null, error: { code: "42501", message: "ledger_forbidden" } });
     expect((await GET(request(`?groupId=${groupId}`))).status).toBe(502);
   });
 
   it("refuses provenance for an entry that was not asked about", async () => {
-    mocks.rpc.mockResolvedValue({ data: [provenanceRow({ entryId: otherEntryId })], error: null });
+    answerRpc({ data: [provenanceRow({ entryId: otherEntryId })], error: null });
     expect((await GET(request(`?groupId=${groupId}`))).status).toBe(502);
   });
 
   it("refuses a malformed provenance row", async () => {
-    mocks.rpc.mockResolvedValue({ data: [provenanceRow({ provider: "paypal" })], error: null });
+    answerRpc({ data: [provenanceRow({ provider: "paypal" })], error: null });
     expect((await GET(request(`?groupId=${groupId}`))).status).toBe(502);
   });
 
@@ -446,7 +462,7 @@ describe("GET /api/ledger/entries provenance", () => {
     const ciphertext = "Y2lwaGVydGV4dC1vZi10aGUtcmVmZXJlbmNl";
     // Even if the database function ever returned more than it should, the
     // reader copies only the named fields.
-    mocks.rpc.mockResolvedValue({
+    answerRpc({
       data: [
         provenanceRow({
           providerReference: reference,
@@ -476,14 +492,14 @@ describe("GET /api/ledger/entries provenance", () => {
   });
 
   it("passes a masked reference through unchanged", async () => {
-    mocks.rpc.mockResolvedValue({ data: [provenanceRow({ referenceMasked: "\u2022\u2022\u2022\u20222F42" })], error: null });
+    answerRpc({ data: [provenanceRow({ referenceMasked: "\u2022\u2022\u2022\u20222F42" })], error: null });
     const body = await (await GET(request(`?groupId=${groupId}`))).json();
     expect(body.entries[0].provenance.referenceMasked).toBe("\u2022\u2022\u2022\u20222F42");
   });
 
   it("treats an absent masked reference (a database one migration behind) as null", async () => {
     const { referenceMasked: _omitted, ...withoutKey } = provenanceRow();
-    mocks.rpc.mockResolvedValue({ data: [withoutKey], error: null });
+    answerRpc({ data: [withoutKey], error: null });
     const body = await (await GET(request(`?groupId=${groupId}`))).json();
     expect(body.entries[0].provenance.referenceMasked).toBeNull();
   });
@@ -495,7 +511,7 @@ describe("GET /api/ledger/entries provenance", () => {
     ["a number", 2242],
     ["an empty string", ""]
   ])("refuses (502) %s in referenceMasked and returns none of it", async (_name, bad) => {
-    mocks.rpc.mockResolvedValue({ data: [provenanceRow({ referenceMasked: bad })], error: null });
+    answerRpc({ data: [provenanceRow({ referenceMasked: bad })], error: null });
     const response = await GET(request(`?groupId=${groupId}`));
     expect(response.status).toBe(502);
     const text = JSON.stringify(await response.json());
@@ -552,5 +568,99 @@ describe("GET /api/ledger/entries is metered and does not disturb POST", () => {
       new Request("http://localhost/api/ledger/entries", { method: "POST", body: "{}" })
     );
     expect(response.status).toBe(401);
+  });
+});
+
+function attributionRow(overrides: Record<string, unknown> = {}) {
+  return {
+    entryId,
+    memberUserId: payerId,
+    source: "treasurer",
+    recordedBy: userId,
+    recordedAt: "2026-10-10T09:00:00.000Z",
+    cycleId: null,
+    round: null,
+    revision: 1,
+    reason: null,
+    ...overrides
+  };
+}
+
+describe("GET /api/ledger/entries attribution", () => {
+  it("returns the treasurer's attribution beside provenance, which stays null, with exactly the documented fields", async () => {
+    mocks.attributions = { data: [{ ...attributionRow(), leaked: "no", tenantId }], error: null };
+
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+
+    expect(body.entries[0].provenance).toBeNull();
+    expect(body.entries[0].attribution).toEqual({
+      source: "treasurer",
+      memberUserId: payerId,
+      recordedBy: userId,
+      recordedAt: "2026-10-10T09:00:00.000Z",
+      cycleId: null,
+      round: null,
+      revision: 1,
+      reason: null
+    });
+    expect(JSON.stringify(body)).not.toContain("leaked");
+    expect(JSON.stringify(body)).not.toContain(tenantId);
+  });
+
+  it("carries a corrected attribution's revision, reason, cycle and round", async () => {
+    const cycle = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    mocks.attributions = {
+      data: [attributionRow({ revision: 2, reason: "Receipt book shows another member", cycleId: cycle, round: 3 })],
+      error: null
+    };
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+    expect(body.entries[0].attribution).toMatchObject({ revision: 2, reason: "Receipt book shows another member", cycleId: cycle, round: 3 });
+  });
+
+  it("reports a bank-verified attribution with its source, and keeps provenance's own shape", async () => {
+    answerRpc({ data: [provenanceRow()], error: null });
+    mocks.attributions = { data: [attributionRow({ source: "bank_verification", recordedBy: userId })], error: null };
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+    expect(body.entries[0].attribution.source).toBe("bank_verification");
+    expect(body.entries[0].provenance.kind).toBe("bank_verification");
+  });
+
+  it("does not ask about entry types that cannot have a payer", async () => {
+    mocks.results.ledger_entries = { data: [entryRow({ entry_type: "disbursement" })], error: null };
+    await GET(request(`?groupId=${groupId}`));
+    expect(mocks.rpc.mock.calls.map(([name]) => name)).not.toContain("get_ledger_entry_attributions_v1");
+  });
+
+  it("fails the read rather than hiding a malformed attribution, an unknown source or one for an unrequested entry", async () => {
+    for (const bad of [
+      attributionRow({ source: "admin" }),
+      attributionRow({ revision: 0 }),
+      attributionRow({ round: 0 }),
+      attributionRow({ recordedAt: "not a time" }),
+      attributionRow({ memberUserId: "not-a-uuid" }),
+      attributionRow({ entryId: otherEntryId }),
+      "nope"
+    ]) {
+      mocks.attributions = { data: [bad], error: null };
+      const response = await GET(request(`?groupId=${groupId}`));
+      expect(response.status, JSON.stringify(bad)).toBe(502);
+    }
+    mocks.attributions = { data: { not: "a list" }, error: null };
+    expect((await GET(request(`?groupId=${groupId}`))).status).toBe(502);
+    mocks.attributions = { data: null, error: { code: "XX000", message: "boom" } };
+    expect((await GET(request(`?groupId=${groupId}`))).status).toBe(502);
+  });
+
+  it("still rejects an unknown field on the entry itself: only `attribution` is split off the post", async () => {
+    // The entry route splits `attribution` off before validating the entry, so the
+    // strict entry schema still rejects any other unknown field.
+    const response = await POST(
+      new Request("http://localhost/api/ledger/entries", {
+        method: "POST",
+        headers: { authorization: "Bearer token", "content-type": "application/json" },
+        body: JSON.stringify({ groupId, bogus: true })
+      })
+    );
+    expect(response.status).toBe(400);
   });
 });

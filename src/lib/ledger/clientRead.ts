@@ -53,6 +53,7 @@ export interface WireEntry {
   readonly correctsEntryId?: unknown;
   readonly postings?: unknown;
   readonly provenance?: unknown;
+  readonly attribution?: unknown;
 }
 
 function minorUnits(amount: string): bigint | null {

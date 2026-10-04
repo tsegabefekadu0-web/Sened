@@ -3,8 +3,14 @@ import { fetchLedgerBalances, readEntriesPage, readMyGroup, type WireEntry } fro
 import { STANDARD_ACCOUNTS } from "./accounts";
 import { LEDGER_ENTRY_TYPES, type LedgerEntryType } from "./types";
 import { isMaskedReference } from "@/lib/banking/referenceMask";
-import { loadMembers } from "./clientInvites";
-import { summarizeContributions, type EntryProvenance, type HomeLedgerSummary, type SummaryEntry } from "./homeSummary";
+import { loadMembers, type MemberRow } from "./clientInvites";
+import {
+  summarizeContributions,
+  type EntryAttribution,
+  type EntryProvenance,
+  type HomeLedgerSummary,
+  type SummaryEntry
+} from "./homeSummary";
 import { formatEtbMinorUnits, toEtbMinorUnits } from "./money";
 
 export type HomeLedgerResult =
@@ -25,6 +31,16 @@ export type HomeLedgerResult =
        * absent: no attire is guessed.
        */
       readonly memberAttire: Readonly<Record<string, "gabi" | "netela" | "none">>;
+      /** The group the entries belong to, for the owner's / treasurer's "attribute payer" action. */
+      readonly groupId: string;
+      /** The caller's role in it (`null` when the server did not say). */
+      readonly role: string | null;
+      /**
+       * The members an owner or treasurer may name as a payer. Empty for everyone
+       * else (a plain member is never offered the action), and when the members
+       * could not be read.
+       */
+      readonly attributableMembers: readonly MemberRow[];
       /**
        * True when older entries than the contributions listed exist. The pot
        * balance still covers the whole ledger (it is computed by the server);
@@ -77,6 +93,74 @@ export function toEntryProvenance(value: unknown): EntryProvenance | null {
   };
 }
 
+/**
+ * An attribution object is trusted only when every field is present and
+ * well-formed. A partial one is dropped (the row simply has no payer shown).
+ */
+export function toEntryAttribution(value: unknown): EntryAttribution | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const cycleId = raw.cycleId ?? null;
+  const round = raw.round ?? null;
+  const reason = raw.reason ?? null;
+  if (
+    (raw.source !== "bank_verification" && raw.source !== "treasurer") ||
+    typeof raw.memberUserId !== "string" ||
+    !UUID.test(raw.memberUserId) ||
+    typeof raw.recordedBy !== "string" ||
+    !UUID.test(raw.recordedBy) ||
+    typeof raw.recordedAt !== "string" ||
+    !Number.isFinite(Date.parse(raw.recordedAt)) ||
+    (cycleId !== null && (typeof cycleId !== "string" || !UUID.test(cycleId))) ||
+    (round !== null && (typeof round !== "number" || !Number.isSafeInteger(round) || round < 1)) ||
+    typeof raw.revision !== "number" ||
+    !Number.isSafeInteger(raw.revision) ||
+    raw.revision < 1 ||
+    (reason !== null && typeof reason !== "string")
+  ) {
+    return null;
+  }
+  return {
+    source: raw.source,
+    memberUserId: raw.memberUserId,
+    recordedBy: raw.recordedBy,
+    recordedAt: raw.recordedAt,
+    cycleId: cycleId as string | null,
+    round: round as number | null,
+    revision: raw.revision,
+    reason: reason as string | null
+  };
+}
+
+/**
+ * The effective attribution of an entry as the screen should hold it. Bank
+ * provenance outranks a treasurer's record, so when the entry has provenance the
+ * attribution is the bank's (built from the provenance itself, which the verifier
+ * wrote) even if a server also sent a treasurer row; with none, the server's
+ * attribution is used only if it is complete.
+ */
+export function effectiveAttribution(
+  provenance: EntryProvenance | null,
+  attribution: EntryAttribution | null,
+  recordedBy?: string
+): EntryAttribution | null {
+  if (provenance !== null) {
+    return {
+      source: "bank_verification",
+      memberUserId: provenance.memberUserId,
+      recordedBy: attribution?.source === "bank_verification" ? attribution.recordedBy : (recordedBy ?? provenance.memberUserId),
+      recordedAt: provenance.verifiedAt,
+      cycleId: null,
+      round: null,
+      revision: 1,
+      reason: null
+    };
+  }
+  return attribution;
+}
+
 export function toSummaryEntry(entry: WireEntry): SummaryEntry | null {
   if (
     typeof entry.id !== "string" ||
@@ -106,6 +190,7 @@ export function toSummaryEntry(entry: WireEntry): SummaryEntry | null {
     }
     postings.push({ accountId: posting.accountId, direction: posting.direction, amount: posting.amount });
   }
+  const provenance = toEntryProvenance(entry.provenance);
   return {
     id: entry.id,
     sequence: entry.sequence,
@@ -113,7 +198,8 @@ export function toSummaryEntry(entry: WireEntry): SummaryEntry | null {
     entryType: entry.entryType as LedgerEntryType,
     correctsEntryId: (entry.correctsEntryId as string | null | undefined) ?? null,
     postings,
-    provenance: toEntryProvenance(entry.provenance)
+    provenance,
+    attribution: effectiveAttribution(provenance, toEntryAttribution(entry.attribution))
   };
 }
 
@@ -216,34 +302,44 @@ export async function loadHomeLedger(deps: AuthedFetchDeps = {}): Promise<HomeLe
     status: "ready",
     summary,
     feedTruncated: page.hasMore,
-    ...(await readMembers(mine.groupId, summary, deps))
+    groupId: mine.groupId,
+    role: mine.role,
+    ...(await readMembers(mine.groupId, mine.role, summary, deps))
   };
 }
 
 /**
- * Names and avatar attire for the members whose receipts were verified. Best
- * effort: if the members cannot be read the contributions are still shown as
- * verified (that comes from the ledger read), just with the anonymous label and
- * no shawl. The members API decides what a caller may see of a member; nothing
- * is added here.
+ * Names and avatar attire for the members named as payers, whether by a verified
+ * bank receipt or by the treasurer's record, and (for an owner or treasurer only)
+ * the roster the "attribute payer" action offers. Best effort: if the members
+ * cannot be read the contributions are still shown with what the ledger read
+ * said (verified stays verified, a treasurer's record stays labelled as one), just
+ * with the anonymous label and no shawl. The members API decides what a caller
+ * may see of a member; nothing is added here.
  */
 async function readMembers(
   groupId: string,
+  role: string | null,
   summary: HomeLedgerSummary,
   deps: AuthedFetchDeps
 ): Promise<{
   readonly memberLabels: Readonly<Record<string, string | null>>;
   readonly memberAttire: Readonly<Record<string, "gabi" | "netela" | "none">>;
+  readonly attributableMembers: readonly MemberRow[];
 }> {
   const wanted = new Set(
-    summary.contributions.flatMap((contribution) => (contribution.provenance ? [contribution.provenance.memberUserId] : []))
+    summary.contributions.flatMap((contribution) => {
+      const payer = contribution.attribution?.memberUserId ?? contribution.provenance?.memberUserId;
+      return payer ? [payer] : [];
+    })
   );
-  if (wanted.size === 0) {
-    return { memberLabels: {}, memberAttire: {} };
+  const manager = role === "owner" || role === "treasurer";
+  if (wanted.size === 0 && !manager) {
+    return { memberLabels: {}, memberAttire: {}, attributableMembers: [] };
   }
   const outcome = await loadMembers(groupId, deps);
   if (outcome.status !== "ready") {
-    return { memberLabels: {}, memberAttire: {} };
+    return { memberLabels: {}, memberAttire: {}, attributableMembers: [] };
   }
   const memberLabels: Record<string, string | null> = {};
   const memberAttire: Record<string, "gabi" | "netela" | "none"> = {};
@@ -253,5 +349,5 @@ async function readMembers(
       memberAttire[member.userId] = member.attire;
     }
   }
-  return { memberLabels, memberAttire };
+  return { memberLabels, memberAttire, attributableMembers: manager ? outcome.members : [] };
 }

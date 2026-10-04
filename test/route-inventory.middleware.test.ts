@@ -250,3 +250,41 @@ describe("the reconciliation drain is metered", () => {
     expect(last.status).toBe(429);
   });
 });
+
+describe("the attribution and collateral routes are metered", () => {
+  it("registers every literal bucket", () => {
+    for (const path of ["/api/ledger/attributions", "/api/draw/collateral", "/api/draw/guarantees"]) {
+      expect(RATE_LIMITED.has(path), path).toBe(true);
+      expect(isRateLimitedPath(path), path).toBe(true);
+    }
+  });
+
+  it("charges the appends the write rule and the derived collateral view the read rule", () => {
+    // POST records and PUT corrects an attribution; both append a row.
+    expect(resolveRateLimit("/api/ledger/attributions", "POST")).toEqual(WRITE_RULE);
+    expect(resolveRateLimit("/api/ledger/attributions", "PUT")).toEqual(WRITE_RULE);
+    // One POST carries propose / accept / decline / release / supersede.
+    expect(resolveRateLimit("/api/draw/guarantees", "POST")).toEqual(WRITE_RULE);
+    expect(resolveRateLimit("/api/draw/collateral", "GET")).toEqual(READ_RULE);
+  });
+
+  it("answers with the headers that match the route and throttles a hammering caller", () => {
+    const read = middleware(
+      new NextRequest(`http://localhost/api/draw/collateral?cycleId=${cycleId}`, {
+        method: "GET",
+        headers: { authorization: "Bearer t" }
+      })
+    );
+    expect(read.headers.get("X-RateLimit-Limit")).toBe(String(READ_RULE.limit));
+    const url = "http://localhost/api/draw/guarantees";
+    let last: Response | null = null;
+    for (let call = 0; call <= WRITE_RULE.limit; call += 1) {
+      last = middleware(new NextRequest(url, { method: "POST", headers: { authorization: "Bearer guarantor" } }));
+    }
+    expect(last?.status).toBe(429);
+    const attribution = middleware(
+      new NextRequest("http://localhost/api/ledger/attributions", { method: "POST", headers: { authorization: "Bearer a" } })
+    );
+    expect(attribution.headers.get("X-RateLimit-Limit")).toBe(String(WRITE_RULE.limit));
+  });
+});

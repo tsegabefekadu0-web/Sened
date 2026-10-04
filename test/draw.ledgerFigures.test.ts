@@ -56,8 +56,8 @@ describe("cycleLedgerFigures", () => {
       "2026-10-01T00:00:00.000Z"
     );
     expect(figures.byMember).toEqual([
-      { memberUserId: ALEM, count: 2, total: "2000.00" },
-      { memberUserId: BERHAN, count: 1, total: "250.50" }
+      { memberUserId: ALEM, count: 2, verifiedCount: 2, treasurerCount: 0, total: "2000.00" },
+      { memberUserId: BERHAN, count: 1, verifiedCount: 1, treasurerCount: 0, total: "250.50" }
     ]);
     // The entry before the cycle began is neither counted nor credited.
     expect(figures.count).toBe(4);
@@ -71,7 +71,7 @@ describe("cycleLedgerFigures", () => {
     );
     expect(figures.unattributedCount).toBe(1);
     expect(figures.unattributedTotal).toBe("300.00");
-    expect(figures.byMember).toEqual([{ memberUserId: ALEM, count: 1, total: "50.25" }]);
+    expect(figures.byMember).toEqual([{ memberUserId: ALEM, count: 1, verifiedCount: 1, treasurerCount: 0, total: "50.25" }]);
     // Attributed + unattributed always reconciles with the cycle total.
     expect(figures.total).toBe("350.25");
   });
@@ -80,6 +80,65 @@ describe("cycleLedgerFigures", () => {
     const figures = cycleLedgerFigures([contribution("1", "2026-10-02T09:00:00.000Z", "10.00")], "2026-10-01T00:00:00.000Z");
     expect(figures.byMember).toEqual([]);
     expect(figures.unattributedCount).toBe(1);
+  });
+});
+
+/** A cash entry whose payer the TREASURER recorded (no bank provenance). */
+const treasurerRecorded = (sequence: string, occurredAt: string, amount: string, payer: string): HomeContribution => ({
+  id: `entry-${sequence}`,
+  sequence,
+  occurredAt,
+  amount,
+  provenance: null,
+  attribution: {
+    source: "treasurer",
+    memberUserId: payer,
+    recordedBy: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    recordedAt: occurredAt,
+    cycleId: null,
+    round: null,
+    revision: 1,
+    reason: null
+  }
+});
+
+describe("cycleLedgerFigures: treasurer attribution for cash groups", () => {
+  it("credits the member the treasurer named, and counts it apart from bank-verified entries", () => {
+    const figures = cycleLedgerFigures(
+      [
+        treasurerRecorded("4", "2026-10-04T09:00:00.000Z", "500.00", BERHAN),
+        contribution("3", "2026-10-03T09:00:00.000Z", "1000.00", ALEM),
+        treasurerRecorded("2", "2026-10-02T09:00:00.000Z", "1000.00", ALEM),
+        contribution("1", "2026-10-01T09:00:00.000Z", "300.00")
+      ],
+      "2026-10-01T00:00:00.000Z"
+    );
+    expect(figures.byMember).toEqual([
+      { memberUserId: ALEM, count: 2, verifiedCount: 1, treasurerCount: 1, total: "2000.00" },
+      { memberUserId: BERHAN, count: 1, verifiedCount: 0, treasurerCount: 1, total: "500.00" }
+    ]);
+    // Only the entry nobody attributed stays unattributed.
+    expect(figures.unattributedCount).toBe(1);
+    expect(figures.unattributedTotal).toBe("300.00");
+    expect(figures.total).toBe("2800.00");
+  });
+
+  it("lets bank provenance win when an entry somehow carries both", () => {
+    const both: HomeContribution = {
+      ...contribution("1", "2026-10-02T09:00:00.000Z", "100.00", ALEM),
+      attribution: treasurerRecorded("1", "2026-10-02T09:00:00.000Z", "100.00", BERHAN).attribution
+    };
+    const figures = cycleLedgerFigures([both], "2026-10-01T00:00:00.000Z");
+    expect(figures.byMember).toEqual([{ memberUserId: ALEM, count: 1, verifiedCount: 1, treasurerCount: 0, total: "100.00" }]);
+  });
+
+  it("treats a bank_verification attribution without provenance as verified", () => {
+    const row = treasurerRecorded("1", "2026-10-02T09:00:00.000Z", "100.00", ALEM);
+    const figures = cycleLedgerFigures(
+      [{ ...row, attribution: { ...row.attribution!, source: "bank_verification" } }],
+      "2026-10-01T00:00:00.000Z"
+    );
+    expect(figures.byMember[0]).toMatchObject({ verifiedCount: 1, treasurerCount: 0 });
   });
 });
 
@@ -142,6 +201,65 @@ describe("loadCycleLedgerFigures", () => {
         unattributedCount: 1,
         unattributedTotal: "40.00"
       }
+    });
+  });
+
+  it("credits a wire entry to the member the treasurer named, as the treasurer's record and never as verified", async () => {
+    const payer = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const recorder = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const cash = {
+      ...entry("2", "2026-10-02T00:00:00.000Z", "1000.00"),
+      actorId: recorder,
+      provenance: null,
+      attribution: {
+        source: "treasurer",
+        memberUserId: payer,
+        recordedBy: recorder,
+        recordedAt: "2026-10-02T08:00:00.000Z",
+        cycleId: null,
+        round: null,
+        revision: 1,
+        reason: null
+      }
+    };
+    const result = await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", deps([cash, entry("3", "2026-10-03T00:00:00.000Z", "40.00")]));
+    expect(result).toMatchObject({
+      status: "ready",
+      figures: {
+        byMember: [{ memberUserId: payer, count: 1, verifiedCount: 0, treasurerCount: 1, total: "1000.00" }],
+        unattributedCount: 1
+      }
+    });
+  });
+
+  it("drops a malformed attribution and a treasurer row beside provenance, so bank evidence wins", async () => {
+    const bank = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const other = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const both = {
+      ...entry("2", "2026-10-02T00:00:00.000Z", "100.00"),
+      provenance: {
+        kind: "bank_verification",
+        provider: "cbe",
+        verifiedAt: "2026-10-02T00:00:05.000Z",
+        verificationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        memberUserId: bank
+      },
+      attribution: {
+        source: "treasurer",
+        memberUserId: other,
+        recordedBy: other,
+        recordedAt: "2026-10-02T00:00:00.000Z",
+        cycleId: null,
+        round: null,
+        revision: 1,
+        reason: null
+      }
+    };
+    const partial = { ...entry("3", "2026-10-03T00:00:00.000Z", "10.00"), attribution: { source: "treasurer", memberUserId: other } };
+    const result = await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", deps([both, partial]));
+    expect(result).toMatchObject({
+      status: "ready",
+      figures: { byMember: [{ memberUserId: bank, verifiedCount: 1, treasurerCount: 0 }], unattributedCount: 1 }
     });
   });
 

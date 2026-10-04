@@ -14,6 +14,9 @@ export const RATE_LIMITED = new Set([
   "/api/ledger/entries",
   "/api/ledger/balances",
   "/api/ledger/member-roles",
+  // Who paid a contribution with no bank verification (POST records, PUT corrects
+  // with a reason): small appends beside the ledger, metered as writes.
+  "/api/ledger/attributions",
   // A member's own avatar attire: a small write, read back through the members list.
   "/api/ledger/member-attire",
   // Invite links: create/list share one path (the method picks the rule),
@@ -43,6 +46,10 @@ export const RATE_LIMITED = new Set([
   "/api/draw/draws/[drawId]",
   "/api/draw/seals",
   "/api/draw/nonces",
+  // Collateral (M4.2): the derived read, and one POST carrying propose / accept /
+  // decline / release / supersede for a guarantee. Advisory only; nothing moves money.
+  "/api/draw/collateral",
+  "/api/draw/guarantees",
   // A4: Wave 2's sync route. The branch in `resolveRateLimit` already existed
   // and was unreachable until this entry existed.
   "/api/sync",
@@ -108,7 +115,12 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
   if (pathname === "/api/ledger/members" || pathname === "/api/ledger/balances") {
     return READ_RULE;
   }
-  if (pathname === "/api/bank-verifications" || pathname === "/api/ledger/member-roles" || pathname === "/api/ledger/member-attire") {
+  if (
+    pathname === "/api/bank-verifications" ||
+    pathname === "/api/ledger/member-roles" ||
+    pathname === "/api/ledger/member-attire" ||
+    pathname === "/api/ledger/attributions"
+  ) {
     return WRITE_RULE;
   }
   if (isBankVerificationReadPath(pathname)) {
@@ -136,8 +148,16 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
   if (pathname === "/api/draw/cycles") {
     return method === "GET" ? READ_RULE : WRITE_RULE;
   }
-  if (pathname === "/api/draw/draws" || pathname === "/api/draw/seals" || pathname === "/api/draw/nonces") {
+  if (
+    pathname === "/api/draw/draws" ||
+    pathname === "/api/draw/seals" ||
+    pathname === "/api/draw/nonces" ||
+    pathname === "/api/draw/guarantees"
+  ) {
     return WRITE_RULE;
+  }
+  if (pathname === "/api/draw/collateral") {
+    return READ_RULE;
   }
   if (isDrawCyclePath(pathname) || isDrawSessionPath(pathname)) {
     return READ_RULE;

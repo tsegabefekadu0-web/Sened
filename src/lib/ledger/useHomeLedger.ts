@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { SessionState } from "@/lib/auth/useSession";
 import { loadHomeLedger, type HomeLedgerResult } from "./clientHome";
@@ -18,9 +18,13 @@ export type HomeLedgerView =
   | { readonly kind: "loading" }
   | { readonly kind: "live"; readonly result: HomeLedgerResult };
 
-export function useHomeLedger(session: SessionState): HomeLedgerView {
+export function useHomeLedger(session: SessionState): HomeLedgerView & { readonly reload: () => void } {
   const signedIn = session.status === "signed-in";
   const [result, setResult] = useState<HomeLedgerResult | null>(null);
+  const [round, setRound] = useState(0);
+  // Re-read the ledger in place (after the treasurer records a payer) without
+  // flashing the loading state: the rows stay until the fresh read replaces them.
+  const reload = useCallback(() => setRound((value) => value + 1), []);
 
   useEffect(() => {
     if (!signedIn) {
@@ -28,7 +32,9 @@ export function useHomeLedger(session: SessionState): HomeLedgerView {
       return;
     }
     let active = true;
-    setResult(null);
+    if (round === 0) {
+      setResult(null);
+    }
     void loadHomeLedger().then((next) => {
       if (active) {
         setResult(next);
@@ -37,13 +43,13 @@ export function useHomeLedger(session: SessionState): HomeLedgerView {
     return () => {
       active = false;
     };
-  }, [signedIn]);
+  }, [signedIn, round]);
 
   if (session.status === "loading") {
-    return { kind: "loading" };
+    return { kind: "loading", reload };
   }
   if (!signedIn) {
-    return { kind: "sample" };
+    return { kind: "sample", reload };
   }
-  return result === null ? { kind: "loading" } : { kind: "live", result };
+  return result === null ? { kind: "loading", reload } : { kind: "live", result, reload };
 }

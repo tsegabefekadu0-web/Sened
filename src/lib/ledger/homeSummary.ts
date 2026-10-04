@@ -36,6 +36,24 @@ export interface EntryProvenance {
   readonly referenceMasked: string | null;
 }
 
+/**
+ * Who paid a contribution (see `PublicLedgerAttribution`). `bank_verification` is
+ * a verified bank receipt; `treasurer` is an owner's or treasurer's record for an
+ * entry with no bank provenance, which is the treasurer's word and never a
+ * verification. Bank provenance outranks a treasurer's record.
+ */
+export interface EntryAttribution {
+  readonly source: "bank_verification" | "treasurer";
+  readonly memberUserId: string;
+  readonly recordedBy: string;
+  readonly recordedAt: string;
+  readonly cycleId: string | null;
+  readonly round: number | null;
+  /** 1 = never corrected; each correction is a new record and the earlier ones are kept. */
+  readonly revision: number;
+  readonly reason: string | null;
+}
+
 export interface SummaryEntry {
   readonly id: string;
   readonly sequence: string;
@@ -45,6 +63,8 @@ export interface SummaryEntry {
   readonly postings: readonly SummaryPosting[];
   /** Absent or `null` for an entry with no bank-verification provenance. */
   readonly provenance?: EntryProvenance | null;
+  /** Absent or `null` for a contribution nobody has said the payer of. */
+  readonly attribution?: EntryAttribution | null;
 }
 
 export interface SummaryAccount {
@@ -60,6 +80,12 @@ export interface HomeContribution {
   readonly amount: string;
   /** Set only when a verified bank receipt posted this entry; otherwise `null`. */
   readonly provenance: EntryProvenance | null;
+  /**
+   * Who paid, when anyone has said so: the bank verification, else the
+   * treasurer's record. Optional so a caller that only knows provenance still
+   * type-checks; consumers fall back to provenance when it is absent.
+   */
+  readonly attribution?: EntryAttribution | null;
 }
 
 export interface HomeLedgerSummary {
@@ -114,7 +140,8 @@ export function summarizeContributions(entries: readonly SummaryEntry[], potAcco
         sequence: entry.sequence,
         occurredAt: entry.occurredAt,
         amount: formatEtbMinorUnits(added),
-        provenance: entry.provenance ?? null
+        provenance: entry.provenance ?? null,
+        attribution: entry.attribution ?? null
       });
     }
   }

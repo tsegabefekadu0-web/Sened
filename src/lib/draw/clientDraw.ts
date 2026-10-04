@@ -16,6 +16,7 @@ import type { MessageKey } from "@/lib/i18n";
 
 import { webDrawHasher, type DrawVerificationTranscript } from "./canonical";
 import { sealMemberContribution, verifyTranscript } from "./engine";
+import { parseCycleCollateral, parseGuarantee, type CycleCollateral, type Guarantee } from "./collateral";
 import { assessDrawRisk, planReserve } from "./risk";
 import {
   isDrawLifecycleState,
@@ -136,6 +137,14 @@ const ERROR_KEYS: Readonly<Record<string, MessageKey>> = {
   integrity_failure: "drawLive.error.integrity",
   storage_failure: "drawLive.error.storage",
   draw_failed: "drawLive.error.storage",
+  collateral_winner_not_found: "collateralLive.error.winnerNotFound",
+  collateral_no_remaining_rounds: "collateralLive.error.noRemainingRounds",
+  collateral_cycle_closed: "collateralLive.error.cycleClosed",
+  collateral_exists: "collateralLive.error.exists",
+  collateral_limit: "collateralLive.error.limit",
+  collateral_state_conflict: "collateralLive.error.stateConflict",
+  collateral_member_not_found: "collateralLive.error.memberNotFound",
+  collateral_invalid_request: "drawLive.error.invalidRequest",
   bad_response: "drawLive.error.badResponse",
   network: "drawLive.error.network"
 };
@@ -416,6 +425,48 @@ export async function readCycle(
   const { cycle, draws } = result.data;
   if (!isCycle(cycle) || !Array.isArray(draws) || !draws.every(isListEntry)) return badResponse(result.status);
   return { ok: true, status: result.status, data: { cycle, draws } };
+}
+
+/**
+ * `GET /api/draw/collateral?cycleId=` — any member: the DERIVED collateral view of
+ * the cycle (winners, the rounds they owe with a met / flagged / not_due status,
+ * their guarantees, the reserve retained). Advisory; it never moves money.
+ */
+export async function readCollateral(cycleId: string, deps: AuthedFetchDeps = {}): Promise<DrawResult<CycleCollateral>> {
+  const result = await call(`/api/draw/collateral?cycleId=${encodeURIComponent(cycleId)}`, { method: "GET" }, deps);
+  if (!result.ok) return result;
+  const collateral = parseCycleCollateral(result.data.collateral);
+  if (collateral === null) return badResponse(result.status);
+  return { ok: true, status: result.status, data: collateral };
+}
+
+export type GuaranteeCommand =
+  | { readonly action: "propose"; readonly cycleId: string; readonly winnerMemberId: string; readonly guarantorMemberId: string }
+  | { readonly action: "accept"; readonly guaranteeId: string }
+  | { readonly action: "decline"; readonly guaranteeId: string; readonly reason?: string }
+  | { readonly action: "release"; readonly guaranteeId: string; readonly reason: string }
+  | {
+      readonly action: "supersede";
+      readonly guaranteeId: string;
+      readonly newGuarantorMemberId: string;
+      readonly reason: string;
+    };
+
+/**
+ * `POST /api/draw/guarantees` — propose (owner/treasurer), accept or decline (ONLY
+ * the guarantor, from their own session: the body carries no member id), release
+ * (the guarantor or an owner/treasurer) or supersede (owner/treasurer). No user id
+ * is ever sent for the actor; the server uses the session.
+ */
+export async function sendGuarantee(
+  command: GuaranteeCommand,
+  deps: AuthedFetchDeps = {}
+): Promise<DrawResult<{ readonly guarantee: Guarantee; readonly replayed: boolean }>> {
+  const result = await call("/api/draw/guarantees", { method: "POST", body: JSON.stringify(command) }, deps);
+  if (!result.ok) return result;
+  const guarantee = parseGuarantee(result.data.guarantee);
+  if (guarantee === null) return badResponse(result.status);
+  return { ok: true, status: result.status, data: { guarantee, replayed: result.data.replayed === true } };
 }
 
 /** `POST /api/draw/draws` — owner or treasurer. The server creates the draw id. */

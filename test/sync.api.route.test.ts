@@ -73,7 +73,7 @@ function post(handler: typeof POST_SYNC, body: unknown, bearer = "token"): Reque
 function installFakeLedger() {
   const store = new Map<string, ReturnType<typeof buildLedgerEntry>>();
   mocks.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
-    if (name === "get_ledger_entry_provenance_v1") {
+    if (name === "get_ledger_entry_provenance_v1" || name === "get_ledger_entry_attributions_v1") {
       return { data: [], error: null };
     }
     expect(name).toBe("post_ledger_entry_v1");
@@ -354,28 +354,36 @@ describe("POST /api/sync — pull", () => {
     expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "gt", args: ["sequence", "0"] });
     expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "lte", args: ["sequence", "3"] });
     expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "order", args: ["sequence", { ascending: true }] });
-    // The only RPC a pull makes is the read-only provenance lookup; none of
-    // these entries was bank-verified, so each carries `provenance: null`.
-    expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual(["get_ledger_entry_provenance_v1"]);
+    // The only RPCs a pull makes are the read-only provenance and attribution
+    // lookups; none of these entries was bank-verified or attributed, so each
+    // carries `provenance: null` and `attribution: null`.
+    expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
+      "get_ledger_entry_provenance_v1",
+      "get_ledger_entry_attributions_v1"
+    ]);
     expect(body.entries.map((e: { provenance: unknown }) => e.provenance)).toEqual([null, null, null]);
+    expect(body.entries.map((e: { attribution: unknown }) => e.attribution)).toEqual([null, null, null]);
   });
 
   it("carries bank-verification provenance on a pulled entry, and never a reference", async () => {
     const verificationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const payerId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    mocks.rpc.mockResolvedValue({
-      data: [
-        {
-          entryId: "55555552-5555-4555-8555-555555555555",
-          verificationId,
-          provider: "cbe",
-          verifiedAt: "2026-09-25T10:30:05.000Z",
-          memberUserId: payerId,
-          providerReferenceHmac: "d".repeat(64)
-        }
-      ],
+    mocks.rpc.mockImplementation(async (name: string) => ({
+      data:
+        name === "get_ledger_entry_attributions_v1"
+          ? []
+          : [
+              {
+                entryId: "55555552-5555-4555-8555-555555555555",
+                verificationId,
+                provider: "cbe",
+                verifiedAt: "2026-09-25T10:30:05.000Z",
+                memberUserId: payerId,
+                providerReferenceHmac: "d".repeat(64)
+              }
+            ],
       error: null
-    });
+    }));
     const body = await (await POST_SYNC(post(POST_SYNC, pullBody))).json();
     expect(body.entries[1].provenance).toEqual({
       kind: "bank_verification",

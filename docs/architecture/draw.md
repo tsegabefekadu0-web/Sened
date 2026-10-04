@@ -507,6 +507,8 @@ mode only, behind a demo banner; see §14 for the signed-in flow.
 | `POST /api/draw/verify` | **any member** | deliberately not role-gated |
 | `GET /api/draw/rounds/[roundId]` | any member | published round + transcript |
 | `POST /api/draw/payouts` | owner / treasurer | posts through `LedgerService.append` |
+| `GET /api/draw/collateral?cycleId=` | any member | the derived collateral view (§17): winners, later rounds with `met` / `flagged` / `not_due`, guarantees, reserve retained |
+| `POST /api/draw/guarantees` | see §17.5 | `{ action: "propose" \| "accept" \| "decline" \| "release" \| "supersede", ... }`; accept and decline only by the guarantor |
 
 `/verify` and the round read are authenticated but **not** role-gated. A member
 who cannot open the ledger still has to be able to check the draw; that is the
@@ -535,7 +537,11 @@ so the method picks).
 `draw.fairness.test.ts`, `draw.rpc-contract.test.ts`, `draw.live.test.tsx`,
 `draw.nonce-binding.test.ts`, and for M4.4 `draw.sessions.test.ts`,
 `draw.cycles.api.route.test.ts`, `draw.sql-parity.test.ts`,
-`draw.ledgerFigures.test.ts`). The SQL itself is proven by
+`draw.ledgerFigures.test.ts`, and for M4.2's completion `draw.collateral.test.ts`,
+`draw.collateral.api.route.test.ts`, `draw.collateral.ui.test.tsx`,
+`draw.collateral.client.test.ts`, `ledger.attribution.rpc-contract.test.ts`,
+`ledger.attribution.api.route.test.ts`, `ledger.clientAttribution.test.ts`,
+`contribution-feed.attribution.test.tsx`, `home.attribution.test.tsx`). The SQL itself is proven by
 `scripts/verify-migrations.sql` against a real Postgres 16, not by vitest. Counts
 are in the report that accompanied the change; run `npx vitest run` for the current
 total.
@@ -645,14 +651,18 @@ at the service level.
 - ~~A member-seal endpoint and a UI to show who has sealed~~ — done (§16, M4.4).
 - ~~Contribution amounts and pot typed by the treasurer~~ — the cycle defines
   them; the commit takes them from the cycle (§16.2).
-- **Per-member payment status.** Partly delivered (§16.5): an entry posted from a
-  verified bank receipt now carries provenance naming the member whose receipt it
-  was, so those entries are credited to that member. An entry with no bank
-  provenance (a treasurer's manual entry) still has only an actor, who recorded it
-  and did not necessarily pay, so it is shown as unattributed. Entries still carry
-  no cycle or round id and a cycle has no cadence, so there is no per-round
-  figure and no unpaid/default status. A complete answer needs a member (and
-  cycle) reference on every contribution posting.
+- **Per-member payment status.** Delivered in two parts. An entry posted from a
+  verified bank receipt carries provenance naming the member whose receipt it was
+  (§16.5). An entry with no bank provenance (cash, a manual entry) can now be
+  attributed to the member who paid by an owner or treasurer, as an append-only
+  record beside the entry that is labelled as the treasurer's record and never as
+  verified (§17.1). Per-round status is derived for each winner's later rounds
+  (§17.3). Still open: entries carry no cycle or round id of their own, so for
+  anyone who is not a winner there is no per-round figure (only the window "since
+  the cycle started"), and a payer the treasurer never recorded stays unattributed.
+- **Collateral beyond a record.** Guarantees are advisory (§17): nothing debits a
+  guarantor or moves money, and the database does not stop the next round from
+  being drawn while a winner is flagged. Enforcement is the group's decision.
 - **Closing a cycle.** `draw_cycles.closed_at` exists but the table is append-only
   and there is no closing RPC; a cycle is complete when every round is drawn.
 - **Draws committed before M4.4** have no stored nonces. They can be read and
@@ -795,6 +805,11 @@ round id, so there is no per-round period, and a member who is not listed has no
 bank-verified entry in the window, which is not the same as unpaid. Member labels are
 the members API's own (email for the owner, "Member xxxxxxxx" otherwise).
 
+**Update (M4.2 completion, §17.1).** Provenance is now one of two sources of an
+`attribution` on each entry; the figures credit `attribution.memberUserId`, count
+`verifiedCount` and `treasurerCount` apart, and label a treasurer-only member "recorded
+by the treasurer, not bank-verified". The paragraph above describes the bank half.
+
 **Large groups.** Entries are read newest first, 100 per page, following `nextCursor`
 (`beforeSequence`) until a page's oldest entry was *recorded* before the cycle began
 (sequence and recording time rise together on the append-only chain; `occurredAt`
@@ -824,3 +839,228 @@ guards that.
 Apply the migration together with the application release. The previous
 application called `commit_draw_v1`, which is no longer callable by clients.
 
+
+## 17. M4.2 completion: who paid a cash contribution, and collateral
+
+`supabase/migrations/20261010100000_contribution_attribution_and_collateral.sql`,
+proven by the "ATTRIBUTION" and "COLLATERAL" checks in `scripts/verify-migrations.sql`
+(success marker `ALL ATTRIBUTION AND COLLATERAL CHECKS PASSED`, also required by
+`scripts/verify-migrations.ps1`).
+
+### 17.1 Member attribution for contributions with no bank verification
+
+**Problem.** A ledger entry's actor is whoever *recorded* it, not who paid. Only an
+entry posted from a verified bank receipt named a payer (provenance). A treasurer's
+cash entry named nobody.
+
+**Data model.** `ledger_entry_attributions` (append-only, beside the entry; the
+hash-chained entry format is untouched and `entry_hash`, `previous_hash`, the postings
+and the chain head never change):
+
+| column | meaning |
+|---|---|
+| `id`, `entry_id`, `group_id`, `tenant_id` | the row, and the entry it is about (composite FK to `ledger_entries (id, group_id)`) |
+| `member_user_id` | the member who paid |
+| `recorded_by`, `recorded_at` | who recorded it (always `auth.uid()`) and when |
+| `cycle_id`, `round` | optional: which round of which cycle the payment is for (a round needs a cycle; the cycle must be this group's) |
+| `supersedes_id`, `reason` | null on the first record; on a correction, the record it replaces and why (10..1000 characters) |
+
+One first record per entry (unique index on `entry_id where supersedes_id is null`),
+each record superseded at most once (unique index on `supersedes_id`), so the history
+of an entry is one line and its current value is the last row. A mistake is never
+edited or deleted: update, delete and truncate are refused by triggers (the same
+pattern as the draw tables), and `authenticated` has `select` only.
+
+**Rules** (in the RPC, and again in a before-insert trigger for any writer): only an
+owner or treasurer of the entry's group (`sened_ledger_can_manage_group`); only a
+`contribution` entry of that group (another group's entry reads "not found", like an
+absent one); the member must be an *active* member of the group; a contribution
+already reversed by a correction cannot be newly attributed.
+
+**Precedence: bank provenance wins.** A manual attribution is refused on an entry
+that has a VERIFIED bank verification linked to it (`attribution_bank_verified`),
+first record and supersede alike. If a bank link appears *after* a manual record
+exists, the read still reports the bank (`sened_effective_attribution` orders bank
+first); the manual row stays in the history, unused. The client does the same
+(`effectiveAttribution`), so a response carrying both is read as bank-verified.
+
+**Read path.** `get_ledger_entry_attributions_v1(group, entry ids)` (any active
+member) returns, for each contribution that has one, the effective attribution.
+`GET /api/ledger/entries` and the `/api/sync` pull attach it as `attribution`, next
+to `provenance` (whose shape is unchanged):
+
+```
+attribution: null | {
+  source: "bank_verification" | "treasurer",
+  memberUserId, recordedBy, recordedAt,
+  cycleId: string | null, round: number | null,
+  revision: number,          // 1 = never corrected
+  reason: string | null      // the latest correction's reason
+}
+```
+
+For `bank_verification`, `memberUserId` and `recordedAt` are the verification's own
+user and time and `recordedBy` is the actor who recorded the entry.
+
+**Writing it.**
+
+| | Who | Body |
+|---|---|---|
+| `POST /api/ledger/attributions` | owner / treasurer | `{ groupId, entryId, memberUserId, cycleId?, round? }`; 201, or 200 for a repeat |
+| `PUT /api/ledger/attributions` | owner / treasurer | the same plus `reason` (10..1000); appends a superseding record |
+| `POST /api/ledger/entries` | owner / treasurer | optional `attribution: { memberUserId, cycleId?, round? }` on a **contribution**: the entry is posted first (the `attribution` is split off before validation, fingerprint and hash), then attributed; a refusal is *reported* in the response (`attribution: { status: "refused", error }`) and never rolls the entry back |
+
+The body never names who is recording or the source (a 400). Errors carry the
+database's code: 403 `forbidden`; 404 `ledger_entry_not_found`,
+`ledger_member_not_found`, `ledger_cycle_not_found`, `attribution_not_found`; 422
+`attribution_not_contribution`; 409 `attribution_bank_verified`,
+`attribution_entry_corrected`, `attribution_exists`, `attribution_unchanged`,
+`attribution_conflict`.
+
+**Where it is used.**
+
+- *Home feed.* A row with a treasurer record reads "Paid by <member> · Recorded by the
+  treasurer · not bank-verified". It keeps the plain "Recorded in ledger" badge and can
+  never show the verified badge, the verified "Paid by" line or the verified detail
+  title, even if a caller sets `status: "VERIFIED"` without a verifier (`isVerified`
+  fails closed). The owner or treasurer gets a "Who paid this?" control in a ledger
+  row's detail (a member picker; correcting an existing record also asks for a reason
+  and says the earlier record stays). A plain member sees no control (and the database
+  refuses them anyway); a verified row offers none, because a bank's word cannot be
+  overridden.
+- */draw cycle figures.* `cycleLedgerFigures` credits `attribution.memberUserId`, so
+  who-paid works for a cash group. Each member shows `verifiedCount` and
+  `treasurerCount`; a member with only treasurer records is marked "recorded by the
+  treasurer, not bank-verified". Entries nobody attributed stay unattributed.
+
+**Posting-time attribution: what exists and what does not.** The API supports it
+(`attribution` on a contribution post). The only UI that posts a ledger entry today is
+the correction form in `m2-dashboard.tsx`, and a correction is not attributable (only a
+`contribution` has a payer); there is no contribution form, and voice contributions go
+through bank verification, which carries its own provenance. So the treasurer attributes
+from the ledger row, afterwards. **Offline drafts are not extended**: a `ledger-draft`
+payload goes through the strict entry schema and the sync result contract
+(`ACCEPTED` / `REPLAYED` per mutation) has no place to report a refused second write,
+so it does not fit cleanly; after a draft syncs, the treasurer attributes the row.
+
+### 17.2 Collateral: guarantors
+
+**Data model.**
+
+- `draw_collateral_guarantees`: one immutable *proposal* (`cycle_id`, `winner_member_id`,
+  `guarantor_member_id`, `proposed_by`, `proposed_at`). `guarantor <> winner` is a
+  CHECK.
+- `draw_collateral_guarantee_events`: append-only events `accepted`, `declined`,
+  `released`, `superseded` (`actor_id`, `reason`, `successor_guarantee_id`, an identity
+  `seq`). **The state is the latest event** (`proposed` while there is none): no status
+  column exists to edit. `released` and `superseded` need a reason of 10..1000
+  characters; a guarantee is accepted at most once and ends at most once (unique
+  indexes); update, delete and truncate are refused by triggers.
+
+**A guarantee needs the guarantor's own consent.** `accepted` and `declined` can only
+be written with `actor_id = guarantor_member_id`: `respond_collateral_guarantee_v1`
+takes no member argument and refuses anyone but the guarantor (an owner, a treasurer,
+the winner and an outsider all get `collateral_forbidden`), and a trigger holds the
+same rule for any other writer. The guarantor must still be an active member.
+
+**Rules.** Only an owner or treasurer proposes or supersedes. The winner must have
+actually won a round of *that* cycle (`draw_commitments` joined to `draw_reveals`),
+with rounds left (`collateral_no_remaining_rounds` for the last round's winner). The
+guarantor must be an active member and not the winner. At most one open guarantee per
+(cycle, winner, guarantor) (a repeat is a replay) and five open per winner. A released
+guarantee does not block a new one. `release` is by the guarantor (withdrawing their
+own word) or an owner/treasurer; `supersede` is owner/treasurer, ends the old
+guarantee pointing at its successor and opens a new proposal that the new guarantor
+must accept themselves.
+
+### 17.3 Post-win obligations and the default rule
+
+Nothing about "paid" or "in default" is stored. `get_draw_cycle_collateral_v1` derives it
+on every read, for each winner and for each round *after* the one they won (the rounds
+they still owe):
+
+| status | meaning |
+|---|---|
+| `met` | a qualifying contribution is assigned to the round |
+| `flagged` | **not** met, and the round's draw has been **opened** (a `draw_sessions` row, or a legacy commitment, exists for that round) |
+| `not_due` | not met, and no draw for that round has been opened |
+
+**The default rule.** *A winner is flagged for round r when the draw for round r has
+been opened (or committed) and no qualifying contribution is assigned to that round for
+that winner.* A **qualifying contribution** is a contribution entry that:
+
+1. is not reversed by a correction;
+2. is attributed to the winner: bank provenance, else the current treasurer record
+   (the same precedence as §17.1);
+3. moved at least the cycle's contribution amount into `POT_CASH` (the sum of its debit
+   postings on `POT_CASH`; a cycle with no contribution on record uses 0.01);
+4. was *recorded* (server time, which cannot be backdated; not `occurredAt`) on or after
+   the cycle's start;
+5. is not attributed to a different cycle.
+
+It is *assigned* to a round **explicitly** (a treasurer attribution carrying this cycle
+and that round; it may be a round not yet due, which is then `met`) or **by order**: the
+winner's remaining entries, oldest first, each fill the earliest still-unmet *due* round
+whose previous round had been revealed *before the entry was recorded* (so a payment
+made before the previous reveal cannot pay a later round, and a payment from before the
+win pays nothing); one entry pays one round.
+
+`flagged` is a flag, not a verdict. It says the ledger cannot show the contribution,
+not that the member did not pay: they may have paid in a way not yet recorded, and the
+flag clears by itself the moment an attributed entry exists (or returns if that entry
+is later reversed). The screen says so beside the flag.
+
+### 17.4 What `/draw` shows
+
+A collateral panel (`CollateralPanel`, between the ledger figures and the draw list),
+re-read whenever the cycle's draws change and after every guarantee command. It opens
+with "Advisory only. Nothing here moves money or debits anyone...". It shows, in exact
+ETB minor units:
+
+- *reserve retained so far* (the sum of the reserves withheld from revealed payouts),
+  *winners still owe* (contribution times each winner's unmet rounds), *overdue*
+  (contribution times flagged rounds), whether the retained reserve covers the overdue
+  amount, and *the reserve planned for the next payout* (the existing `planReserve`
+  heuristic, §7, with the roster that remains);
+- per winner: the round they won, their later rounds with each status (and, for a met
+  round, whether the payer is bank-verified or recorded by the treasurer), and their
+  guarantors, each with their own state ("Waiting for the guarantor's own confirmation",
+  "Confirmed by the guarantor", declined, released, replaced);
+- controls by role: the **guarantor** alone gets "I confirm I vouch for this member" and
+  "Decline"; the owner or treasurer gets propose, release and replace (with reasons);
+  nobody else gets any. An owner or treasurer is never shown a way to confirm on someone
+  else's behalf.
+
+All of it is in `en` and `am` (`collateral.*`, `collateralLive.error.*`,
+`shell.feed.attribute.*`).
+
+### 17.5 Who can call what
+
+| RPC | Caller | Identity |
+|---|---|---|
+| `record_ledger_entry_attribution_v1`, `supersede_ledger_entry_attribution_v1` | owner or treasurer | `auth.uid()` via `sened_ledger_can_manage_group`; no "recorded by" argument |
+| `get_ledger_entry_attributions_v1` | any active member | `sened_ledger_can_access_group` |
+| `propose_collateral_guarantee_v1`, `supersede_collateral_guarantee_v1` | owner or treasurer | `auth.uid()` |
+| `respond_collateral_guarantee_v1` | **the guarantor, only** | `auth.uid()` must equal the guarantee's guarantor |
+| `release_collateral_guarantee_v1` | the guarantor, or an owner/treasurer | `auth.uid()` |
+| `get_draw_cycle_collateral_v1` | any active member | `sened_ledger_can_access_group` |
+
+All are SECURITY DEFINER with `search_path = public, pg_temp`, revoked from `public` and
+`anon`, granted to `authenticated`; the helpers are granted to nobody. The tables have RLS
+on, every privilege revoked and `select` granted back with a group-access policy (the
+events table through its guarantee's group).
+
+### 17.6 Advisory, and what it does not do
+
+Nothing here debits a guarantor, moves money, writes the ledger or a posting, or
+blocks a draw (a test asserts the ledger head and entry count are unchanged by every
+guarantee operation, and the contract test asserts the SQL never writes `ledger_*`).
+The reserve is still a heuristic (§7), not a proven equilibrium model; the guarantee is
+a social record, not collateral that can be seized. A member who pays by a route that
+is never attributed will be flagged until someone records it.
+
+### 17.7 Deploy order
+
+Apply the migration together with the application release: `GET /api/ledger/entries`
+and the `/api/sync` pull call `get_ledger_entry_attributions_v1`, so a release against a
+database without the migration fails those reads.

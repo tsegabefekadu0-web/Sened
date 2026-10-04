@@ -251,6 +251,21 @@ test.describe("the ledger review route", () => {
   });
 });
 
+test.describe("the record-contribution section", () => {
+  test("is reachable, offers a signed-out visitor no form, and does not widen the page", async ({ page }) => {
+    await page.goto("/ledger#record-contribution");
+
+    await expect(page.getByRole("heading", { name: "Record a contribution" })).toBeVisible();
+    await expect(page.getByTestId("record-state")).toHaveText(/Sign in as the group's owner or treasurer/);
+    // No controls and nothing posted: a form that cannot work is not shown.
+    await expect(page.getByLabel("Amount in birr")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Record contribution" })).toHaveCount(0);
+    // Phone width: the section must not add a horizontal scrollbar.
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+});
+
 test.describe("the fair draw route", () => {
   test("renders the three ceremony steps and runs SHA-256 in the browser", async ({ page }) => {
     await page.goto("/draw");

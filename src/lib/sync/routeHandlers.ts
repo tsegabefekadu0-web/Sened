@@ -6,7 +6,9 @@ import {
   isLedgerError,
   readLedgerChainSlice
 } from "@/lib/ledger";
+import { recordAttribution, type AttributionResult } from "@/lib/ledger/attribution";
 import {
+  ledgerEntryAttributionSchema,
   ledgerEntryRequestSchema,
   parse,
   syncPullRequestSchema,
@@ -24,6 +26,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * key is the envelope's (the contract's), and the RPC's unique
  * (group, key) row plus request fingerprint is what makes a replay return the
  * original entry (`REPLAYED`) rather than a second one.
+ *
+ * A `ledger-draft` payload may carry an `attribution` (who paid, and for which
+ * cycle round), split off before the entry is validated, fingerprinted or hashed,
+ * exactly as `POST /api/ledger/entries` does. It is a second write after the
+ * entry: the entry's verdict (`ACCEPTED` / `REPLAYED`) is never changed by it, and
+ * the outcome is reported beside it as `attribution: { outcome: "RECORDED" |
+ * "REFUSED", error? }`. A replay attempts the attribution again; the database's
+ * `record_ledger_entry_attribution_v1` answers an identical record with the
+ * existing one (`replayed: true`, so `RECORDED`) rather than writing a second.
  */
 
 // 25 envelopes of up to ~100 postings each; the entries route caps one at 32 KiB.
@@ -66,6 +77,8 @@ type PushResult =
       readonly serverEntryId: string;
       readonly serverEntryHash: string;
       readonly serverSequence: string;
+      /** Present only when the draft's payload carried an `attribution`. */
+      readonly attribution?: PushAttribution;
     }
   | {
       readonly mutationId: string;
@@ -73,6 +86,17 @@ type PushResult =
       readonly error: string;
       readonly retryAfterMs?: number;
     };
+
+type PushAttribution =
+  | { readonly outcome: "RECORDED" }
+  | { readonly outcome: "REFUSED"; readonly error: string };
+
+function describeAttribution(result: AttributionResult): PushAttribution {
+  if (result.status === "ok") {
+    return { outcome: "RECORDED" };
+  }
+  return { outcome: "REFUSED", error: result.status === "forbidden" ? "forbidden" : result.code };
+}
 
 function rejected(mutationId: string, error: string, retryAfterMs?: number): PushResult {
   return { mutationId, outcome: "REJECTED", error, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) };
@@ -107,6 +131,7 @@ function mapLedgerFailure(mutationId: string, error: unknown): PushResult {
 
 async function pushOne(
   service: LedgerService,
+  client: SupabaseClient,
   actorId: string,
   envelope: {
     readonly mutationId: string;
@@ -121,9 +146,28 @@ async function pushOne(
     // honest; reporting them as accepted would be a fabricated success.
     return rejected(envelope.mutationId, "unsupported_mutation_kind");
   }
-  const parsed = parse(ledgerEntryRequestSchema, envelope.payload);
+  // `attribution` is not part of the entry: it is split off before the entry is
+  // validated, so the strict entry schema (and the entry's hash) never sees it.
+  let entryPayload = envelope.payload;
+  let attributionPayload: unknown;
+  if (typeof entryPayload === "object" && entryPayload !== null && !Array.isArray(entryPayload) && "attribution" in entryPayload) {
+    const { attribution, ...rest } = entryPayload as Record<string, unknown>;
+    entryPayload = rest;
+    attributionPayload = attribution;
+  }
+  const parsed = parse(ledgerEntryRequestSchema, entryPayload);
   if (!parsed.ok) {
     return rejected(envelope.mutationId, "invalid_request");
+  }
+  let attribution: ReturnType<typeof ledgerEntryAttributionSchema.parse> | undefined;
+  if (attributionPayload !== undefined && attributionPayload !== null) {
+    const parsedAttribution = parse(ledgerEntryAttributionSchema, attributionPayload);
+    // Only a contribution has a payer. A malformed one is that draft's rejection
+    // before anything is written, the same as on the entries route.
+    if (!parsedAttribution.ok || parsed.data.entryType !== "contribution") {
+      return rejected(envelope.mutationId, "invalid_request");
+    }
+    attribution = parsedAttribution.data;
   }
   // The envelope's group is what the client matches results on; the payload's
   // is what the ledger acts on. They must be the same thing.
@@ -136,12 +180,31 @@ async function pushOne(
   const request = { ...parsed.data, idempotencyKey: envelope.idempotencyKey };
   try {
     const result = await service.append(request, { actorId });
+    let attributionResult: PushAttribution | undefined;
+    if (attribution !== undefined) {
+      try {
+        attributionResult = describeAttribution(
+          await recordAttribution(client, {
+            groupId: parsed.data.groupId,
+            entryId: result.entry.id,
+            memberUserId: attribution.memberUserId,
+            cycleId: attribution.cycleId,
+            round: attribution.round
+          })
+        );
+      } catch {
+        // The attribution write itself failed. The entry is posted and stays
+        // posted; this is reported as a refusal the treasurer can retry.
+        attributionResult = { outcome: "REFUSED", error: "attribution_failed" };
+      }
+    }
     return {
       mutationId: envelope.mutationId,
       outcome: result.replayed ? "REPLAYED" : "ACCEPTED",
       serverEntryId: result.entry.id,
       serverEntryHash: result.entry.entryHash,
-      serverSequence: result.entry.sequence
+      serverSequence: result.entry.sequence,
+      ...(attributionResult ? { attribution: attributionResult } : {})
     };
   } catch (error) {
     return mapLedgerFailure(envelope.mutationId, error);
@@ -159,7 +222,7 @@ async function handlePush(client: SupabaseClient, actorId: string, body: unknown
   // neighbours.
   const results: PushResult[] = [];
   for (const envelope of parsed.data.mutations) {
-    results.push(await pushOne(service, actorId, envelope));
+    results.push(await pushOne(service, client, actorId, envelope));
   }
   return Response.json({ results }, { headers: { "Cache-Control": "no-store" } });
 }

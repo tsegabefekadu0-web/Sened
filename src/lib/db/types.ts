@@ -3,6 +3,7 @@ import type {
   LedgerEntryLike,
   OfflineMutationKind,
   OfflineSyncState,
+  SyncAttributionOutcome,
   SyncDivergence
 } from "@/lib/offline/contract";
 
@@ -88,6 +89,18 @@ export interface SpokenNoteRow {
 export type LedgerDraftStatus = "draft" | "queued";
 
 /**
+ * Who paid a contribution draft, and for which cycle round. Rides in the outbox
+ * payload as `attribution` and is recorded by the server after the entry posts.
+ * Deliberately NOT part of `LedgerEntryRequest`: it never reaches the entry's
+ * fingerprint or hash.
+ */
+export interface DraftAttribution {
+  readonly memberUserId: string;
+  readonly cycleId?: string;
+  readonly round?: number;
+}
+
+/**
  * A ledger entry the treasurer composed while offline.
  *
  * `request` has already been through `normalizeLedgerEntryRequest`, so it is
@@ -105,6 +118,12 @@ export interface LedgerDraftRow {
   readonly updatedBy: string;
   /** Non-null only once queued. Points at the outbox row that carries it. */
   readonly outboxId: string | null;
+  /**
+   * The payer, when the treasurer named one. Absent or null on a draft saved
+   * before schema version 2 (or without a payer): such a draft is still valid and
+   * is sent as a plain entry.
+   */
+  readonly attribution?: DraftAttribution | null;
 }
 
 export interface OutboxRow {
@@ -129,6 +148,15 @@ export interface OutboxRow {
   readonly serverEntryId: string | null;
   readonly serverEntryHash: string | null;
   readonly serverSequence: string | null;
+  /**
+   * What the server said about the payer attribution that rode along on this
+   * mutation: `RECORDED`, `REFUSED` (the entry is posted regardless), or null when
+   * there was none or the server did not say. Absent on rows saved before schema
+   * version 2.
+   */
+  readonly attributionOutcome?: SyncAttributionOutcome | null;
+  /** The server's code for a `REFUSED` attribution. */
+  readonly attributionError?: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly settledAt: string | null;

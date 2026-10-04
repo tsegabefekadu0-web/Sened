@@ -1,4 +1,5 @@
 import { authedFetch, NotSignedInError, type AuthedFetchDeps } from "@/lib/auth/authedFetch";
+import { attributeCodeFromServer, type AttributeFailureCode as SharedFailureCode } from "./attributionCodes";
 
 /**
  * Browser side of "who paid this contribution" (M4.2): the owner's or
@@ -19,17 +20,7 @@ export interface AttributeInput {
   readonly round?: number;
 }
 
-export type AttributeFailureCode =
-  | "bank_verified"
-  | "corrected"
-  | "exists"
-  | "unchanged"
-  | "not_contribution"
-  | "entry_not_found"
-  | "member_not_found"
-  | "cycle_not_found"
-  | "attribution_not_found"
-  | "other";
+export type AttributeFailureCode = Exclude<SharedFailureCode, "forbidden">;
 
 export type AttributeResult =
   | { readonly status: "ok"; readonly replayed: boolean; readonly revision: number }
@@ -38,18 +29,6 @@ export type AttributeResult =
   | { readonly status: "unauthorized" }
   | { readonly status: "rate-limited" }
   | { readonly status: "error" };
-
-const CODES: Readonly<Record<string, AttributeFailureCode>> = {
-  attribution_bank_verified: "bank_verified",
-  attribution_entry_corrected: "corrected",
-  attribution_exists: "exists",
-  attribution_unchanged: "unchanged",
-  attribution_not_contribution: "not_contribution",
-  ledger_entry_not_found: "entry_not_found",
-  ledger_member_not_found: "member_not_found",
-  ledger_cycle_not_found: "cycle_not_found",
-  attribution_not_found: "attribution_not_found"
-};
 
 async function send(
   method: "POST" | "PUT",
@@ -77,11 +56,10 @@ async function send(
         return { status: "rate-limited" };
       case 404:
       case 409:
-      case 422:
-        return {
-          status: "refused",
-          code: typeof payload?.error === "string" ? (CODES[payload.error] ?? "other") : "other"
-        };
+      case 422: {
+        const code = attributeCodeFromServer(payload?.error);
+        return { status: "refused", code: code === "forbidden" ? "other" : code };
+      }
       default:
         return { status: "error" };
     }

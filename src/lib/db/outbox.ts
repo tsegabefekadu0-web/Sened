@@ -4,6 +4,7 @@ import {
   SyncError,
   type OfflineMutationKind,
   type OfflineSyncState,
+  type SyncAttributionOutcome,
   type SyncPushResult
 } from "@/lib/offline/contract";
 import { mapStorageError } from "./database";
@@ -71,6 +72,8 @@ export async function enqueue(
     serverEntryId: null,
     serverEntryHash: null,
     serverSequence: null,
+    attributionOutcome: null,
+    attributionError: null,
     createdAt: timestamp,
     updatedAt: timestamp,
     settledAt: null
@@ -254,6 +257,10 @@ export async function settleSynced(
     serverEntryId: result.serverEntryId,
     serverEntryHash: result.serverEntryHash,
     serverSequence: result.serverSequence ?? null,
+    // What the server said about the payer riding on this entry. The entry is
+    // synced either way; a refused payer is surfaced, never swallowed.
+    attributionOutcome: result.attribution?.outcome ?? null,
+    attributionError: result.attribution?.outcome === "REFUSED" ? (result.attribution.error ?? null) : null,
     lastErrorCode: null,
     lastErrorMessage: null,
     updatedAt: input.now.toISOString(),
@@ -394,8 +401,39 @@ export async function requeueTerminal(
     serverEntryId: null,
     serverEntryHash: null,
     serverSequence: null,
+    attributionOutcome: null,
+    attributionError: null,
     updatedAt: now.toISOString(),
     settledAt: null
+  };
+  await db.outbox.put(next);
+  return next;
+}
+
+/**
+ * Record the result of retrying a refused attribution against an entry that is
+ * already synced. Touches nothing but the attribution fields: the entry's state,
+ * ids and hash are the server's and stay as they were.
+ */
+export async function recordAttributionOutcome(
+  db: SenedDatabase,
+  id: string,
+  outcome: SyncAttributionOutcome,
+  error: string | null,
+  now: Date
+): Promise<OutboxRow> {
+  const row = await db.outbox.get(id);
+  if (!row) {
+    throw new SyncError("LOCAL_RECORD_NOT_FOUND", "Queued mutation was not found on this device");
+  }
+  if (row.state !== "synced") {
+    throw new SyncError("SYNC_PROTECTED_ROW", "Only an entry the server already holds can have its payer retried");
+  }
+  const next: OutboxRow = {
+    ...row,
+    attributionOutcome: outcome,
+    attributionError: outcome === "REFUSED" ? error : null,
+    updatedAt: now.toISOString()
   };
   await db.outbox.put(next);
   return next;

@@ -136,7 +136,11 @@ export interface SyncPushEnvelope {
   readonly idempotencyKey: string;
   readonly kind: OfflineMutationKind;
   readonly groupId: string;
-  /** Kind-specific body. For `ledger-draft` this is a `LedgerEntryRequest`. */
+  /**
+   * Kind-specific body. For `ledger-draft` this is a `LedgerEntryRequest`,
+   * optionally with an `attribution: { memberUserId, cycleId?, round? }` that is
+   * split off before the entry is validated, fingerprinted or hashed.
+   */
   readonly payload: unknown;
   /** When this device recorded the mutation. Never used for conflict ordering. */
   readonly clientRecordedAt: string;
@@ -146,6 +150,26 @@ export const SYNC_PUSH_OUTCOMES = ["ACCEPTED", "REPLAYED", "REJECTED"] as const;
 
 export type SyncPushOutcome = (typeof SYNC_PUSH_OUTCOMES)[number];
 
+/**
+ * What became of the optional payer attribution that rode along on a ledger
+ * draft (`payload.attribution`), reported beside an accepted entry.
+ *
+ * The entry and its attribution are two writes and the ledger is the source of
+ * truth: a `REFUSED` attribution never turns an `ACCEPTED`/`REPLAYED` entry into a
+ * rejection (the entry IS posted). `error` is the database's own code, for example
+ * `attribution_bank_verified`, or `forbidden`, or `attribution_failed` when the
+ * attribution write itself failed and nothing says it was refused.
+ */
+export const SYNC_ATTRIBUTION_OUTCOMES = ["RECORDED", "REFUSED"] as const;
+
+export type SyncAttributionOutcome = (typeof SYNC_ATTRIBUTION_OUTCOMES)[number];
+
+export interface SyncPushAttribution {
+  readonly outcome: SyncAttributionOutcome;
+  /** Present for `REFUSED`. */
+  readonly error?: string;
+}
+
 export interface SyncPushResult {
   readonly mutationId: string;
   readonly outcome: SyncPushOutcome;
@@ -153,6 +177,12 @@ export interface SyncPushResult {
   readonly serverEntryId?: string;
   readonly serverEntryHash?: string;
   readonly serverSequence?: string;
+  /**
+   * Additive: present only for an ACCEPTED/REPLAYED `ledger-draft` whose payload
+   * carried an `attribution`. Absent for every other result, and from servers
+   * that predate it, so a client that ignores it keeps working.
+   */
+  readonly attribution?: SyncPushAttribution;
   /** Machine code from the server, e.g. `unprocessable_ledger_entry`. */
   readonly error?: string;
   /** Server-requested wait. Honoured over the computed backoff. */

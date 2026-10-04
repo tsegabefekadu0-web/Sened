@@ -114,6 +114,42 @@ failure is that item's `REJECTED` + `error` (`invalid_request`, `forbidden`,
 turns into a bounded retry rather than a dead end. Only `ledger-draft` has a
 server path; `spoken-note` and `roster-member` are refused, never faked.
 
+**Payer on a draft (additive).** A `ledger-draft` payload may carry
+`attribution: { memberUserId, cycleId?, round? }` (a **contribution** only). It is split
+off before the entry is validated, fingerprinted or hashed, then, after the entry posts,
+recorded through `record_ledger_entry_attribution_v1`. The per-item result is extended
+additively; every new field is optional, so an old client ignores it and an old payload
+(no `attribution`) behaves exactly as before:
+
+```ts
+interface SyncPushResult {
+  mutationId: string;
+  outcome: "ACCEPTED" | "REPLAYED" | "REJECTED";
+  serverEntryId?: string; serverEntryHash?: string; serverSequence?: string;
+  // NEW, present only for an ACCEPTED/REPLAYED draft whose payload carried an attribution:
+  attribution?: { outcome: "RECORDED" | "REFUSED"; error?: string };
+  error?: string; retryAfterMs?: number;
+}
+```
+
+- `RECORDED`: the payer is recorded (a replay of an identical record is `RECORDED`, not
+  an error and not a second record).
+- `REFUSED` + `error`: the entry **is posted** and the verdict stays `ACCEPTED` /
+  `REPLAYED`; `error` is the database's code (`attribution_bank_verified`,
+  `attribution_entry_corrected`, `attribution_exists`, `ledger_member_not_found`,
+  `ledger_cycle_not_found`, ...), `forbidden`, or `attribution_failed` when the write
+  itself failed and nothing says it was refused.
+- A malformed attribution, or one on a non-contribution, is `REJECTED` /
+  `invalid_request`, with nothing written.
+- `HttpSyncTransport` reads an attribution it cannot parse as `REFUSED` /
+  `attribution_unreadable`: never as recorded, and never a reason to doubt the entry.
+- A replay attempts the attribution again, so an entry whose first attribution never
+  landed gets it on the next send.
+
+The engine stores the report on the outbox row (`attributionOutcome`,
+`attributionError`); the row is `synced` either way. A new client needs a server that
+has this change (an older server's strict schema refuses a payload with an extra key).
+
 **Pull.** Reads under the caller's JWT (RLS): the group's `ledger_group_heads`
 row, then entries with `sequence > sinceSequence` and `<= head.lastSequence`
 ascending (so head and slice are one snapshot), `limit` 1..500, `hasMore` from a
@@ -422,6 +458,24 @@ lattice. The maskable variant keeps its mark inside the 80% safe circle.
 
 ---
 
+### Schema version 2: the payer on a draft
+
+`DATABASE_SCHEMA_VERSION` is 2. No index changed. `LedgerDraftRow.attribution` (a
+`DraftAttribution` or null) and `OutboxRow.attributionOutcome` / `attributionError` are
+new optional fields; the version-2 upgrade (`schema.ts`) gives every existing draft
+`attribution: null` and every existing outbox row `attributionOutcome: null`,
+`attributionError: null`, and touches nothing else, so a draft saved before it is still
+valid, queues as a bare request and syncs as it always did. `saveDraft` takes an optional
+`attribution`, checked for shape on the device (`src/lib/db/attribution.ts`: a UUID
+member, an optional UUID cycle, an optional round of 1..1000 that needs its cycle,
+contributions only); `queueDraft` puts it in the outbox payload.
+
+**Retry.** `retryDraftAttribution` (`src/lib/offline/attributionRetry.ts`) sends only the
+attribution (`POST /api/ledger/attributions`, the existing attribute action) for a
+*synced* draft's server entry id and records the outcome on the row; the entry is never
+pushed again. A refusal stores its reason; an unreachable server, a signed-out session or
+a rate limit changes nothing.
+
 ## 8. The console at `/offline`
 
 Route-agnostic, per §11: it is my own mount point, not `page.tsx`.
@@ -524,6 +578,12 @@ mistakes:
 - **The console resolves the signed-in user's group** (via `/api/my-groups`) and
   falls back to a fixed local UUID (`LOCAL_GROUP_ID`) when signed out or when the
   group cannot be resolved; a plain `member` cannot queue entries.
+- **The payer list on a draft is the last copy the device saw online.** Members and
+  draw cycles are read when the device is online and cached per group in
+  `localStorage` (`src/lib/ledger/payerChoiceCache.ts`), labelled as such in the console.
+  A device that has never been online cannot name a payer; the draft still saves, and the
+  treasurer attributes it after it syncs. The server re-checks the member and cycle when
+  the draft syncs. The retry of a refused attribution is a button, not automatic.
 - **Only `ledger-draft` mutations have a server path.** Spoken notes and roster
   edits stay on the device.
 - **No audio blobs are persisted.** A 25 MB base64 string in IndexedDB is how a

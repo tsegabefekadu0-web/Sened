@@ -321,6 +321,20 @@ export default function SenedHome() {
               )}
               <DebterCard potBalance={potBalance} onDrawClick={() => router.push("/draw")} />
               <WorkspaceLinks />
+              {/* Owner / treasurer only (the same gate as "attribute payer"): a quick way in
+                  to the record-contribution form on the ledger page. */}
+              {payerAttribution ? (
+                <p className="px-4 md:px-0">
+                  <Link
+                    href="/ledger#record-contribution"
+                    data-testid="home-record-contribution"
+                    className="flex min-h-11 w-full flex-col justify-center rounded-2xl border border-[#C6532B]/40 bg-[#FBEFE6] px-4 py-2.5 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
+                  >
+                    <span className="text-sm font-bold text-[#8A4B2A]">{t("home.record.cta")}</span>
+                    <span className="text-xs leading-5 text-[#6B5B4E]">{t("home.record.ctaHelp")}</span>
+                  </Link>
+                </p>
+              ) : null}
               <p className="px-4 md:px-0 text-center">
                 <Link
                   href="/sign-in"

@@ -43,6 +43,7 @@ import { postCorrection, type PostCorrectionResult } from "@/lib/ledger/clientCo
 import { buildCorrectionRequest, CorrectionBuildError, newCorrectionIdempotencyKey } from "@/lib/ledger/correction";
 import { TibebHeaderPattern } from "@/components/cultural/TibebPattern";
 import { GroupMembersPanel } from "@/components/ledger/GroupMembersPanel";
+import { RecordContributionForm } from "@/components/ledger/RecordContributionForm";
 
 type Translator = ReturnType<typeof createTranslator>;
 type StatusTone = "verified" | "pending" | "danger" | "warning" | "neutral" | "info";
@@ -561,6 +562,9 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
             <a href="#history" className="inline-flex min-h-11 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
               {t("m2.nav.ledger")}
             </a>
+            <a href="#record-contribution" className="inline-flex min-h-11 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
+              {t("m2.nav.record")}
+            </a>
             <a href="#correction" className="inline-flex min-h-11 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
               {t("m2.nav.corrections")}
             </a>
@@ -846,6 +850,8 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
               )}
             </div>
           </section>
+
+          <RecordContributionForm locale={locale} />
 
           <section id="correction" aria-labelledby="correction-heading" className="scroll-mt-8 border-t border-coffee-900/10 py-12 sm:py-16">
             <div className="grid gap-10 lg:grid-cols-[0.72fr_1.28fr] lg:items-start">

@@ -937,15 +937,59 @@ database's code: 403 `forbidden`; 404 `ledger_entry_not_found`,
   `treasurerCount`; a member with only treasurer records is marked "recorded by the
   treasurer, not bank-verified". Entries nobody attributed stay unattributed.
 
-**Posting-time attribution: what exists and what does not.** The API supports it
-(`attribution` on a contribution post). The only UI that posts a ledger entry today is
-the correction form in `m2-dashboard.tsx`, and a correction is not attributable (only a
-`contribution` has a payer); there is no contribution form, and voice contributions go
-through bank verification, which carries its own provenance. So the treasurer attributes
-from the ledger row, afterwards. **Offline drafts are not extended**: a `ledger-draft`
-payload goes through the strict entry schema and the sync result contract
-(`ACCEPTED` / `REPLAYED` per mutation) has no place to report a refused second write,
-so it does not fit cleanly; after a draft syncs, the treasurer attributes the row.
+**Posting-time attribution.** Two screens record a contribution with its payer, and
+both use the `attribution` on `POST /api/ledger/entries` or its `/api/sync` twin.
+
+*The record-contribution form* (`src/components/ledger/RecordContributionForm.tsx`,
+mounted on `/ledger` as `#record-contribution`; the home feed links to it for an owner
+or treasurer). Only an owner or treasurer gets controls; a plain member and a signed-out
+visitor get read-only text, and the database refuses everyone else regardless. Fields:
+amount (exact decimal ETB, validated with `isEtbAmount` / `formatEtbAmount`, never a
+float), date paid (not in the future), the payer (the group's active members from
+`GET /api/ledger/members`), and optionally a cycle (`GET /api/draw/cycles`) and a round
+within `1..totalRounds`; choosing a cycle offers its per-member contribution as the
+amount if none is typed. The request is `buildContributionRequest`: a balanced
+`contribution` (debit `POT_CASH`, credit `CONTRIBUTION_INCOME`, the group's own account
+ids from `/api/my-groups`), plus `attribution: { memberUserId, cycleId?, round? }`. The
+channel and a free-text note are not recorded, because a contribution's entry schema has
+neither (`rationale` is accepted for corrections only).
+
+The idempotency key is per *attempt*: the same values resubmitted after a failure or an
+unknown outcome reuse the key and the timestamp, so the request is byte-identical and
+the ledger can post it only once; a changed value is a new attempt; a definite answer
+(invalid, conflict) retires the key; a double click while a request is in flight is
+ignored. The result is one of:
+
+| result | what the screen says |
+|---|---|
+| posted and attributed | entry number, and "Payer recorded ... recorded by the treasurer, never as bank-verified" |
+| posted, attribution refused | the entry is posted, the database's reason (for example the entry is bank-verified), and **Retry recording the payer**, which calls `POST /api/ledger/attributions` for that entry only: the entry is never posted again for it |
+| posted, attribution write failed | the same, with "saving the payer failed and nothing says it was refused" |
+| failed (invalid, forbidden, conflict, rate-limited, unknown) | nothing is shown as recorded; the typed values stay; an unknown outcome says resubmitting the same attempt cannot post twice |
+
+A response that says nothing about the attribution is read as *not* recorded, never as
+recorded.
+
+*Offline drafts.* A contribution draft may carry the same payer, cycle and round
+(`LedgerDraftRow.attribution`; shape-checked on the device by
+`normalizeDraftAttribution`, which mirrors `ledgerEntryAttributionSchema`). It rides in
+the outbox payload as `payload.attribution`, beside the request and outside it, so it is
+never part of the entry's fingerprint or hash. `POST /api/sync` splits it off exactly as
+the entries route does, appends the entry, then calls `record_ledger_entry_attribution_v1`
+and reports the outcome beside the entry's verdict (see `offline-pwa.md` §3 for the
+contract). A malformed attribution, or one on a non-contribution, is that draft's
+`REJECTED` / `invalid_request` before anything is written. **Replay:** the entry is
+`REPLAYED` by the ledger's idempotency, and the attribution is attempted again; the
+RPC answers an identical record with the existing one (`replayed: true`, so `RECORDED`),
+so a replay never writes a second record, and a replay whose first attribution never
+landed records it now. A replay naming a *different* payer gets `attribution_exists`
+(`REFUSED`) and the first record stays.
+
+**What does not exist.** There is no channel or note on a contribution. The offline
+member and cycle lists are a per-device copy of the last online read (labelled as such);
+the server re-checks the member and cycle when the draft syncs. The retry of a refused
+attribution is a button on `/offline` (or on the form), not automatic. Voice
+contributions still go through bank verification, which carries its own provenance.
 
 ### 17.2 Collateral: guarantors
 

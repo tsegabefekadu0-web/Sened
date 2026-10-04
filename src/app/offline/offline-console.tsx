@@ -8,6 +8,11 @@ import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
 import { useSession } from "@/lib/auth/useSession";
 import { useActiveGroup } from "@/lib/groups/useActiveGroup";
 import { readMyGroup } from "@/lib/ledger/clientRead";
+import { loadPayerChoices, type PayerChoices } from "@/lib/ledger/clientContribution";
+import { readCachedPayerChoices, writeCachedPayerChoices } from "@/lib/ledger/payerChoiceCache";
+import { attributionFromPayload } from "@/lib/db/attribution";
+import { attributionRefusalCode, retryDraftAttribution } from "@/lib/offline/attributionRetry";
+import { translate, type MessageKey } from "@/lib/i18n";
 import { isContentHashingAvailable } from "@/lib/offline/hash";
 import { offlineCopy, type OfflineLocale } from "@/lib/offline/copy";
 import {
@@ -285,6 +290,39 @@ export function OfflineConsole(props: OfflineConsoleProps) {
   }, [accessToken, email, groupReady, activeGroupId]);
 
   const GROUP_ID = group.status === "ready" ? group.groupId : LOCAL_GROUP_ID;
+
+  // The members and cycles a treasurer can name as a payer on a draft. Read from
+  // the server when the device is online and cached per group, so a draft can still
+  // name a payer with no connection; the cache is labelled as such and the server
+  // re-checks the member and cycle when the draft syncs.
+  const [payers, setPayers] = useState<{ readonly choices: Extract<PayerChoices, { status: "ready" }>; readonly fromCache: boolean } | null>(null);
+  const writerGroupId = group.status === "ready" && group.role !== "member" ? group.groupId : null;
+  useEffect(() => {
+    setPayers(null);
+    if (!writerGroupId) {
+      return;
+    }
+    const cached = readCachedPayerChoices(writerGroupId);
+    if (cached) {
+      setPayers({ choices: cached, fromCache: true });
+    }
+  }, [writerGroupId]);
+  useEffect(() => {
+    if (!writerGroupId || !accessToken || connectivity === "offline") {
+      return;
+    }
+    let active = true;
+    void loadPayerChoices(writerGroupId, { getToken: async () => accessToken }).then((read) => {
+      if (active && read.status === "ready") {
+        writeCachedPayerChoices(writerGroupId, read);
+        setPayers({ choices: read, fromCache: false });
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [writerGroupId, accessToken, connectivity]);
+
   const authorization = props.authorization ?? (accessToken ? `Bearer ${accessToken}` : undefined);
 
   /** Why a signed-in device may not queue entries yet, or `null` when it may. */
@@ -523,6 +561,37 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     });
   }
 
+  async function retryAttribution(outboxId: string): Promise<void> {
+    await run(async () => {
+      if (!authorization) {
+        return t("offline.sync.needsToken");
+      }
+      const token = authorization.replace(/^Bearer\s+/i, "");
+      const result = await retryDraftAttribution(db as SenedDatabase, outboxId, { deps: { getToken: async () => token } });
+      switch (result.status) {
+        case "recorded":
+          return t("offline.attribution.retryDone");
+        case "refused":
+          return t("offline.attribution.retryFailed", { reason: attributionReason(locale, result.code) });
+        case "nothing-to-retry":
+          return null;
+        case "unavailable":
+          return t("offline.attribution.retryFailed", {
+            reason: translate(
+              locale,
+              (result.cause === "unauthorized"
+                ? "shell.feed.attribute.error.unauthorized"
+                : result.cause === "rate-limited"
+                  ? "shell.feed.attribute.error.rate_limited"
+                  : result.cause === "forbidden"
+                    ? "shell.feed.attribute.error.forbidden"
+                    : "shell.feed.attribute.error.error") as MessageKey
+            )
+          });
+      }
+    });
+  }
+
   async function recordDraft(input: {
     amount: string;
     entryType: (typeof ENTRY_TYPES)[number];
@@ -530,6 +599,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     incomeAccountId: string;
     occurredAt: string;
     queueNow: boolean;
+    attribution?: { memberUserId: string; cycleId?: string; round?: number };
   }) {
     await run(async () => {
       if (!db) {
@@ -542,6 +612,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
       }
       const draft = await saveDraft(db, {
         updatedBy: email ?? "this-device",
+        ...(input.attribution ? { attribution: input.attribution } : {}),
         request: {
           groupId: GROUP_ID,
           idempotencyKey: `offline-${Date.now().toString(36)}`,
@@ -723,6 +794,11 @@ export function OfflineConsole(props: OfflineConsoleProps) {
           desk={desk}
           t={t}
           onRecord={recordDraft}
+          onRetryAttribution={retryAttribution}
+          payers={payers}
+          locale={locale}
+          connectivity={connectivity}
+          busy={busy}
           defaultCashAccountId={group.status === "ready" ? group.cashAccountId : null}
           defaultIncomeAccountId={group.status === "ready" ? group.incomeAccountId : null}
         />
@@ -889,11 +965,60 @@ function NotesPanel({ notes, t, onDelete }: { readonly notes: readonly SpokenNot
   );
 }
 
-function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAccountId }: { readonly defaultCashAccountId: string | null; readonly defaultIncomeAccountId: string | null; readonly desk: DeskState; readonly t: TFn; readonly onRecord: (input: { amount: string; entryType: (typeof ENTRY_TYPES)[number]; cashAccountId: string; incomeAccountId: string; occurredAt: string; queueNow: boolean }) => Promise<void> }) {
+type PayersState = { readonly choices: Extract<PayerChoices, { status: "ready" }>; readonly fromCache: boolean } | null;
+
+/** A refusal code as a sentence a person can act on, in the console's language. */
+function attributionReason(locale: OfflineLocale, error: string | null | undefined): string {
+  if (error === "attribution_failed") {
+    return offlineCopy(locale, "offline.attribution.reason.failed");
+  }
+  if (error === "attribution_unreadable") {
+    return offlineCopy(locale, "offline.attribution.reason.unreadable");
+  }
+  return translate(locale, `shell.feed.attribute.error.${attributionRefusalCode(error)}` as MessageKey);
+}
+
+interface DraftFormInput {
+  amount: string;
+  entryType: (typeof ENTRY_TYPES)[number];
+  cashAccountId: string;
+  incomeAccountId: string;
+  occurredAt: string;
+  queueNow: boolean;
+  attribution?: { memberUserId: string; cycleId?: string; round?: number };
+}
+
+function DraftsPanel({
+  desk,
+  t,
+  locale,
+  onRecord,
+  onRetryAttribution,
+  payers,
+  connectivity,
+  busy,
+  defaultCashAccountId,
+  defaultIncomeAccountId
+}: {
+  readonly defaultCashAccountId: string | null;
+  readonly defaultIncomeAccountId: string | null;
+  readonly desk: DeskState;
+  readonly t: TFn;
+  readonly locale: OfflineLocale;
+  readonly payers: PayersState;
+  readonly connectivity: Connectivity;
+  readonly busy: boolean;
+  readonly onRecord: (input: DraftFormInput) => Promise<void>;
+  readonly onRetryAttribution: (outboxId: string) => Promise<void>;
+}) {
   const [amount, setAmount] = useState("");
   const [entryType, setEntryType] = useState<(typeof ENTRY_TYPES)[number]>("contribution");
   const [cashAccountId, setCashAccountId] = useState(defaultCashAccountId ?? PLACEHOLDER_CASH_ACCOUNT);
   const [incomeAccountId, setIncomeAccountId] = useState(defaultIncomeAccountId ?? PLACEHOLDER_INCOME_ACCOUNT);
+  const [payer, setPayer] = useState("");
+  const [cycleId, setCycleId] = useState("");
+  const [round, setRound] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
   // The group's own chart replaces the placeholder ids once it is known.
   useEffect(() => {
     if (defaultCashAccountId) {
@@ -903,7 +1028,73 @@ function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAcc
       setIncomeAccountId(defaultIncomeAccountId);
     }
   }, [defaultCashAccountId, defaultIncomeAccountId]);
+  // A different group's members are not this group's: forget the choice when the lists change.
+  const memberKey = (payers?.choices.members ?? []).map((member) => member.userId).join(",");
+  useEffect(() => {
+    setPayer("");
+    setCycleId("");
+    setRound("");
+  }, [memberKey]);
   const [occurredAt, setOccurredAt] = useState(() => new Date().toISOString().slice(0, 16));
+
+  const members = payers?.choices.members ?? [];
+  const cycles = payers?.choices.cycles ?? [];
+  const cycle = cycles.find((candidate) => candidate.cycleId === cycleId) ?? null;
+  const payerLabel = (userId: string): string => {
+    const known = members.find((member) => member.userId === userId);
+    return known?.email ?? translate(locale, "members.anonymous", { id: userId.slice(0, 8) });
+  };
+
+  /** The attribution the form describes, `null` for none, or an error message key. */
+  function readAttribution(): { readonly memberUserId: string; readonly cycleId?: string; readonly round?: number } | null | "payer" | "round" {
+    if (entryType !== "contribution") {
+      return null;
+    }
+    if (payer === "") {
+      return cycleId !== "" || round.trim() !== "" ? "payer" : null;
+    }
+    let roundNumber: number | undefined;
+    if (round.trim() !== "") {
+      roundNumber = /^\d{1,4}$/.test(round.trim()) ? Number(round.trim()) : Number.NaN;
+      const limit = cycle?.totalRounds ?? 1000;
+      if (cycleId === "" || !Number.isInteger(roundNumber) || roundNumber < 1 || roundNumber > limit) {
+        return "round";
+      }
+    }
+    return {
+      memberUserId: payer,
+      ...(cycleId === "" ? {} : { cycleId }),
+      ...(roundNumber === undefined ? {} : { round: roundNumber })
+    };
+  }
+
+  function submit(queueNow: boolean) {
+    const attribution = readAttribution();
+    if (attribution === "payer") {
+      setFormError(offlineCopy(locale, "offline.drafts.payerRequired"));
+      return;
+    }
+    if (attribution === "round") {
+      setFormError(offlineCopy(locale, "offline.drafts.roundError"));
+      return;
+    }
+    setFormError(null);
+    void onRecord({
+      amount,
+      entryType,
+      cashAccountId,
+      incomeAccountId,
+      occurredAt,
+      queueNow,
+      ...(attribution ? { attribution } : {})
+    });
+    setAmount("");
+    setPayer("");
+    setCycleId("");
+    setRound("");
+  }
+
+  const inputClass = "rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm";
 
   return (
     <Panel title={t("offline.drafts.title")}>
@@ -913,6 +1104,8 @@ function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAcc
         <ul className="mt-3 flex flex-col gap-2">
           {desk.drafts.map(({ draft, outbox }) => {
             const state: OfflineSyncState = outbox ? outbox.state : "local-draft";
+            const named = draft.attribution ?? (outbox ? attributionFromPayload(outbox.payload) : null);
+            const label = named ? payerLabel(named.memberUserId) : "";
             return (
               <li key={draft.id} className={`rounded-xl border px-3 py-2 text-sm ${stateClassName(state)}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -933,6 +1126,35 @@ function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAcc
                 {outbox?.serverEntryHash ? (
                   <p className="offline-hash mt-1 opacity-80">{outbox.serverEntryHash}</p>
                 ) : null}
+                {named ? (
+                  <div className="mt-1 text-xs" data-testid="draft-attribution">
+                    {state !== "synced" ? (
+                      <p>{t("offline.attribution.pending", { payer: label })}</p>
+                    ) : outbox?.attributionOutcome === "RECORDED" ? (
+                      <p data-testid="draft-attribution-recorded">{t("offline.attribution.recorded", { payer: label })}</p>
+                    ) : (
+                      <>
+                        {outbox?.attributionOutcome === "REFUSED" ? (
+                          <p role="alert" data-testid="draft-attribution-refused">
+                            {t("offline.attribution.refused", { reason: attributionReason(locale, outbox.attributionError) })}
+                          </p>
+                        ) : (
+                          <p data-testid="draft-attribution-unknown">{t("offline.attribution.unknown", { payer: label })}</p>
+                        )}
+                        {outbox ? (
+                          <button
+                            type="button"
+                            disabled={busy || connectivity === "offline"}
+                            onClick={() => void onRetryAttribution(outbox.id)}
+                            className="mt-1 rounded-full border border-terracotta-500 px-3 py-1 text-xs disabled:opacity-50"
+                          >
+                            {t("offline.attribution.retry")}
+                          </button>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
+                ) : null}
               </li>
             );
           })}
@@ -943,8 +1165,7 @@ function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAcc
         className="mt-4 flex flex-col gap-3"
         onSubmit={(event) => {
           event.preventDefault();
-          void onRecord({ amount, entryType, cashAccountId, incomeAccountId, occurredAt, queueNow: true });
-          setAmount("");
+          submit(true);
         }}
       >
         <div className="flex flex-wrap gap-3">
@@ -954,7 +1175,7 @@ function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAcc
               value={amount}
               inputMode="decimal"
               onChange={(event) => setAmount(event.target.value)}
-              className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+              className={inputClass}
             />
           </label>
           <label className="flex flex-1 flex-col gap-1 text-xs">
@@ -962,7 +1183,7 @@ function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAcc
             <select
               value={entryType}
               onChange={(event) => setEntryType(event.target.value as (typeof ENTRY_TYPES)[number])}
-              className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+              className={inputClass}
             >
               {ENTRY_TYPES.map((option) => (
                 <option key={option} value={option}>
@@ -978,7 +1199,7 @@ function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAcc
             <input
               value={cashAccountId}
               onChange={(event) => setCashAccountId(event.target.value)}
-              className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+              className={inputClass}
             />
           </label>
           <label className="flex flex-1 flex-col gap-1 text-xs">
@@ -986,7 +1207,7 @@ function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAcc
             <input
               value={incomeAccountId}
               onChange={(event) => setIncomeAccountId(event.target.value)}
-              className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+              className={inputClass}
             />
           </label>
         </div>
@@ -996,23 +1217,89 @@ function DraftsPanel({ desk, t, onRecord, defaultCashAccountId, defaultIncomeAcc
             type="datetime-local"
             value={occurredAt}
             onChange={(event) => setOccurredAt(event.target.value)}
-            className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+            className={inputClass}
           />
         </label>
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() =>
-            void onRecord({ amount, entryType, cashAccountId, incomeAccountId, occurredAt, queueNow: false })
-          }
-          className="rounded-full border border-offline-quiet/50 px-4 py-1.5 text-xs"
-        >
-          {t("offline.drafts.save")}
-        </button>
-        <button type="submit" className="rounded-full border border-terracotta-500 px-4 py-1.5 text-xs">
-          {t("offline.drafts.queue")}
-        </button>
-      </div>
+        {entryType === "contribution" && payers ? (
+          <>
+            <div className="flex flex-wrap gap-3">
+              <label className="flex flex-1 flex-col gap-1 text-xs">
+                <span className="text-offline-quiet">{t("offline.drafts.payerLabel")}</span>
+                <select value={payer} onChange={(event) => setPayer(event.target.value)} className={inputClass}>
+                  <option value="">{t("offline.drafts.payerNone")}</option>
+                  {members.map((member) => (
+                    <option key={member.userId} value={member.userId}>
+                      {payerLabel(member.userId)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {payers.choices.cyclesLoaded && cycles.length > 0 ? (
+                <>
+                  <label className="flex flex-1 flex-col gap-1 text-xs">
+                    <span className="text-offline-quiet">{t("offline.drafts.cycleLabel")}</span>
+                    <select
+                      value={cycleId}
+                      onChange={(event) => {
+                        setCycleId(event.target.value);
+                        setRound("");
+                      }}
+                      className={inputClass}
+                    >
+                      <option value="">{t("offline.drafts.cycleNone")}</option>
+                      {cycles.map((candidate) => (
+                        <option key={candidate.cycleId} value={candidate.cycleId}>
+                          {candidate.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-1 flex-col gap-1 text-xs">
+                    <span className="text-offline-quiet">{t("offline.drafts.roundLabel")}</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={cycle?.totalRounds}
+                      step={1}
+                      value={round}
+                      disabled={cycle === null}
+                      onChange={(event) => setRound(event.target.value)}
+                      className={`${inputClass} disabled:opacity-50`}
+                    />
+                  </label>
+                </>
+              ) : null}
+            </div>
+            {payers.fromCache ? (
+              <p className="text-xs text-offline-quiet" data-testid="offline-payers-cached">
+                {t("offline.drafts.payerCached")}
+              </p>
+            ) : null}
+          </>
+        ) : null}
+        {entryType === "contribution" && !payers ? (
+          <p className="text-xs text-offline-quiet" data-testid="offline-payers-unavailable">
+            {t("offline.drafts.payerUnavailable")}
+          </p>
+        ) : null}
+        {formError ? (
+          <p className="text-xs text-terracotta-400" role="alert" data-testid="offline-draft-form-error">
+            {formError}
+          </p>
+        ) : null}
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => submit(false)}
+            className="rounded-full border border-offline-quiet/50 px-4 py-1.5 text-xs"
+          >
+            {t("offline.drafts.save")}
+          </button>
+          <button type="submit" className="rounded-full border border-terracotta-500 px-4 py-1.5 text-xs">
+            {t("offline.drafts.queue")}
+          </button>
+        </div>
       </form>
     </Panel>
   );

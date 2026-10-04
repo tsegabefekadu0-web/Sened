@@ -17,6 +17,8 @@ import { READ_RULE, WRITE_RULE, resetRateLimits } from "@/lib/rateLimit";
  */
 
 const roundId = "44444444-4444-4444-8444-444444444444";
+const cycleId = "66666666-6666-4666-8666-666666666666";
+const drawId = "77777777-7777-4777-8777-777777777777";
 
 beforeEach(() => {
   resetRateLimits();
@@ -72,6 +74,62 @@ describe("the draw routes are metered", () => {
 
   it("does not mistake a non-uuid round segment for a round", () => {
     expect(isRateLimitedPath("/api/draw/rounds/not-a-uuid")).toBe(false);
+  });
+});
+
+describe("the cycle, draw, seal and nonce routes are metered", () => {
+  it("registers every literal bucket", () => {
+    for (const path of [
+      "/api/draw/cycles",
+      "/api/draw/cycles/[cycleId]",
+      "/api/draw/draws",
+      "/api/draw/draws/[drawId]",
+      "/api/draw/seals",
+      "/api/draw/nonces"
+    ]) {
+      expect(RATE_LIMITED.has(path), path).toBe(true);
+      expect(isRateLimitedPath(path), path).toBe(true);
+    }
+  });
+
+  it("charges the writes the write rule and the reads the read rule", () => {
+    // Creating a cycle, opening a draw, sealing and releasing a nonce all write
+    // state a ceremony depends on.
+    expect(resolveRateLimit("/api/draw/cycles", "POST")).toEqual(WRITE_RULE);
+    expect(resolveRateLimit("/api/draw/draws", "POST")).toEqual(WRITE_RULE);
+    expect(resolveRateLimit("/api/draw/seals", "POST")).toEqual(WRITE_RULE);
+    expect(resolveRateLimit("/api/draw/nonces", "POST")).toEqual(WRITE_RULE);
+    // The cycles path carries both the list and the create, so the method picks.
+    expect(resolveRateLimit("/api/draw/cycles", "GET")).toEqual(READ_RULE);
+    expect(resolveRateLimit(`/api/draw/cycles/${cycleId}`, "GET")).toEqual(READ_RULE);
+    expect(resolveRateLimit(`/api/draw/draws/${drawId}`, "GET")).toEqual(READ_RULE);
+  });
+
+  it("matches a concrete id as well as the bracket form, and not a non-uuid", () => {
+    expect(isRateLimitedPath(`/api/draw/cycles/${cycleId}`)).toBe(true);
+    expect(isRateLimitedPath(`/api/draw/draws/${drawId}`)).toBe(true);
+    expect(isRateLimitedPath("/api/draw/cycles/not-a-uuid")).toBe(false);
+    expect(isRateLimitedPath("/api/draw/draws/not-a-uuid")).toBe(false);
+  });
+
+  it("answers with the headers that match the method", () => {
+    const read = middleware(
+      new NextRequest("http://localhost/api/draw/cycles?groupId=x", { method: "GET", headers: { authorization: "Bearer t" } })
+    );
+    expect(read.headers.get("X-RateLimit-Limit")).toBe(String(READ_RULE.limit));
+    const write = middleware(
+      new NextRequest("http://localhost/api/draw/seals", { method: "POST", headers: { authorization: "Bearer t" } })
+    );
+    expect(write.headers.get("X-RateLimit-Limit")).toBe(String(WRITE_RULE.limit));
+  });
+
+  it("throttles a member who hammers the seal route", () => {
+    const url = "http://localhost/api/draw/seals";
+    let last: Response | null = null;
+    for (let call = 0; call <= WRITE_RULE.limit; call += 1) {
+      last = middleware(new NextRequest(url, { method: "POST", headers: { authorization: "Bearer sealer" } }));
+    }
+    expect(last?.status).toBe(429);
   });
 });
 

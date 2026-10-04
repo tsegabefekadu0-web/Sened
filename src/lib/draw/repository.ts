@@ -1,12 +1,17 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { DrawError, isDrawError } from "./errors";
-import { DRAW_CURRENT_PROTOCOL_VERSION, isDrawProtocolVersion, type DrawErrorCode } from "./types";
+import { isDrawLifecycleState, isDrawProtocolVersion, type DrawErrorCode } from "./types";
 import type {
   DrawCommitment,
+  DrawCycleRecord,
+  DrawListEntry,
+  DrawMemberNonce,
   DrawPayout,
   DrawReveal,
-  DrawRound
+  DrawRound,
+  DrawSessionSeal,
+  DrawSessionView
 } from "./types";
 
 export interface DrawActorContext {
@@ -42,178 +47,77 @@ export interface DrawRepository {
    * searching seeds for a preferred winner.
    */
   countSupersededCommitments(drawId: string, context: DrawActorContext): Promise<number>;
-}
 
-export interface InMemoryDrawRepositoryOptions {
-  readonly clock?: () => Date;
-}
+  // -- cycles, draws, and the member side of the ceremony ------------------------
+  // Authorisation for every method below is decided by the database from the
+  // caller's own JWT (`auth.uid()`); the arguments never name the acting member.
 
-function requireUuid(value: string, label: string): string {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
-    throw new DrawError("INVALID_REQUEST", `${label} must be a UUID`);
-  }
-  return value.toLowerCase();
-}
-
-export class InMemoryDrawRepository implements DrawRepository {
-  private readonly commitments = new Map<string, DrawCommitment>();
-  private readonly commitmentKeys = new Map<string, string>();
-  private readonly commitmentsPerRound = new Map<string, number>();
-  private readonly reveals = new Map<string, DrawReveal>();
-  private readonly payouts = new Map<string, DrawPayout>();
-  private readonly clock: () => Date;
-
-  constructor(options: InMemoryDrawRepositoryOptions = {}) {
-    this.clock = options.clock ?? (() => new Date());
-  }
-
-  private project(commitment: DrawCommitment): DrawRound {
-    const reveal = this.reveals.get(commitment.drawId) ?? null;
-    const payout = this.payouts.get(commitment.drawId) ?? null;
-    return {
-      ...commitment,
-      state: payout !== null ? "paid" : reveal !== null ? "revealed" : "committed",
-      reveal,
-      payout
-    };
-  }
-
-  async saveCommitment(
-    commitment: DrawCommitment,
+  /** Owner or treasurer. The pot is the contribution times the active members, computed by the database. */
+  createCycle(
+    input: {
+      readonly groupId: string;
+      readonly name: string;
+      readonly contributionAmount: string;
+      readonly totalRounds: number;
+      readonly reserveRatioBps: number;
+      readonly startedAt?: string;
+      readonly idempotencyKey: string;
+    },
     context: DrawActorContext
-  ): Promise<{ readonly round: DrawRound; readonly replayed: boolean }> {
-    requireUuid(context.userId, "userId");
-    requireUuid(commitment.drawId, "drawId");
-    requireUuid(commitment.groupId, "groupId");
-    // Mirrors the database: a new commitment must be the current protocol. v2
-    // let the treasurer grind the winner, so it is readable but never writable.
-    if (commitment.protocolVersion !== DRAW_CURRENT_PROTOCOL_VERSION) {
-      throw new DrawError(
-        "INVALID_REQUEST",
-        `New draws must use protocol ${DRAW_CURRENT_PROTOCOL_VERSION}; ${commitment.protocolVersion} is read-only history.`
-      );
-    }
-
-    const key = `${commitment.groupId}:${commitment.idempotencyKey}`;
-    const existingDrawId = this.commitmentKeys.get(key);
-    if (existingDrawId !== undefined) {
-      const existing = this.commitments.get(existingDrawId);
-      if (existing !== undefined) {
-        if (existing.commitment !== commitment.commitment) {
-          throw new DrawError(
-            "IDEMPOTENCY_CONFLICT",
-            "This idempotency key was already used for a different commitment"
-          );
-        }
-        return { round: this.project(existing), replayed: true };
-      }
-    }
-
-    if (this.commitments.has(commitment.drawId)) {
-      const existing = this.commitments.get(commitment.drawId);
-      if (existing !== undefined && existing.commitment !== commitment.commitment) {
-        throw new DrawError(
-          "ALREADY_COMMITTED",
-          "This draw already has a different commitment recorded"
-        );
-      }
-    }
-
-    this.commitments.set(commitment.drawId, commitment);
-    this.commitmentKeys.set(key, commitment.drawId);
-    const roundKey = `${commitment.cycleId}:${commitment.round}`;
-    this.commitmentsPerRound.set(roundKey, (this.commitmentsPerRound.get(roundKey) ?? 0) + 1);
-    void this.clock();
-    return { round: this.project(commitment), replayed: false };
-  }
-
-  async saveReveal(reveal: DrawReveal, context: DrawActorContext): Promise<DrawRound> {
-    requireUuid(context.userId, "userId");
-    const commitment = this.commitments.get(reveal.drawId);
-    if (commitment === undefined) {
-      throw new DrawError("NOT_COMMITTED", "There is no commitment to reveal for this draw");
-    }
-    if (reveal.commitment !== commitment.commitment) {
-      throw new DrawError(
-        "COMMITMENT_MISMATCH",
-        "The reveal does not carry the commitment that was recorded"
-      );
-    }
-    const existing = this.reveals.get(reveal.drawId);
-    if (existing !== undefined && existing.transcriptDigest !== reveal.transcriptDigest) {
-      throw new DrawError(
-        "ALREADY_REVEALED",
-        "This draw has already been revealed with a different transcript"
-      );
-    }
-    this.reveals.set(reveal.drawId, reveal);
-    return this.project(commitment);
-  }
-
-  async savePayout(payout: DrawPayout, context: DrawActorContext): Promise<DrawRound> {
-    requireUuid(context.userId, "userId");
-    const commitment = this.commitments.get(payout.drawId);
-    if (commitment === undefined) {
-      throw new DrawError("NOT_COMMITTED", "There is no commitment for this draw");
-    }
-    if (!this.reveals.has(payout.drawId)) {
-      throw new DrawError(
-        "NOT_COMMITTED",
-        "A draw must be revealed before a payout can be posted"
-      );
-    }
-    this.payouts.set(payout.drawId, payout);
-    return this.project(commitment);
-  }
-
-  async getRound(drawId: string, context: DrawActorContext): Promise<DrawRound | null> {
-    requireUuid(context.userId, "userId");
-    const commitment = this.commitments.get(drawId.toLowerCase());
-    return commitment === undefined ? null : this.project(commitment);
-  }
-
-  async findByIdempotencyKey(
-    groupId: string,
-    idempotencyKey: string,
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }>;
+  /** Any member of the group. */
+  listCycles(groupId: string, context: DrawActorContext): Promise<readonly DrawCycleRecord[]>;
+  /** Any member of the cycle's group: the cycle and every draw in it. */
+  getCycleDetail(
+    cycleId: string,
     context: DrawActorContext
-  ): Promise<DrawRound | null> {
-    requireUuid(context.userId, "userId");
-    const drawId = this.commitmentKeys.get(`${groupId.toLowerCase()}:${idempotencyKey}`);
-    if (drawId === undefined) {
-      return null;
-    }
-    const commitment = this.commitments.get(drawId);
-    return commitment === undefined ? null : this.project(commitment);
-  }
-
-  async listCycle(cycleId: string, context: DrawActorContext): Promise<readonly DrawRound[]> {
-    requireUuid(context.userId, "userId");
-    return Array.from(this.commitments.values())
-      .filter((commitment) => commitment.cycleId === cycleId.toLowerCase())
-      .map((commitment) => this.project(commitment))
-      .sort((left, right) => left.round - right.round);
-  }
-
-  async countSupersededCommitments(
-    drawId: string,
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly draws: readonly DrawListEntry[] }>;
+  /** Owner or treasurer. The server creates the draw id; the draw starts in `sealing`. */
+  openDraw(
+    input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
     context: DrawActorContext
-  ): Promise<number> {
-    requireUuid(context.userId, "userId");
-    const commitment = this.commitments.get(drawId.toLowerCase());
-    if (commitment === undefined) {
-      return 0;
-    }
-    const created = this.commitmentsPerRound.get(`${commitment.cycleId}:${commitment.round}`) ?? 0;
-    return Math.max(0, created - 1);
-  }
+  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean }>;
+  /** Any member of the group: seal hashes, and per member only whether a nonce was released. */
+  getSession(drawId: string, context: DrawActorContext): Promise<DrawSessionView>;
+  /** The signed-in member seals for themselves, while the draw is sealing. */
+  submitSeal(
+    input: { readonly drawId: string; readonly sealed: string },
+    context: DrawActorContext
+  ): Promise<{ readonly memberId: string; readonly sealed: string; readonly replaced: boolean }>;
+  /** The signed-in member releases their own nonce, only after the commitment. Never echoes it. */
+  submitNonce(
+    input: { readonly drawId: string; readonly nonce: string },
+    context: DrawActorContext
+  ): Promise<{ readonly memberId: string; readonly replayed: boolean }>;
+  /**
+   * Owner or treasurer asks for the reveal with the seed. The database checks the
+   * seed against the commitment, then publishes the seed and the stored nonces to
+   * the group in one step, and returns the nonces. The only method that does.
+   * Returns null for a draw committed before sessions existed (no stored nonces).
+   */
+  requestReveal(
+    input: { readonly drawId: string; readonly seed: string },
+    context: DrawActorContext
+  ): Promise<{ readonly memberNonces: readonly DrawMemberNonce[]; readonly replayed: boolean } | null>;
 }
+
+export { InMemoryDrawRepository } from "./memoryRepository";
+export type { InMemoryDrawRepositoryOptions, InMemoryGroup } from "./memoryRepository";
 
 function mapSupabaseError(error: { readonly code?: string; readonly message?: string } | null): DrawError {
   const message = error?.message ?? "draw_storage_failure";
   const tableMissing = error?.code === "PGRST202" || error?.code === "42P01";
   const unavailable = error?.code === "57014" || tableMissing;
 
-  if (message === "draw_group_not_found") return new DrawError("NOT_FOUND", message);
+  if (message === "draw_group_not_found" || message === "draw_not_found") return new DrawError("NOT_FOUND", message);
+  if (message === "draw_invalid_request") return new DrawError("INVALID_REQUEST", message);
+  if (message === "draw_already_committed") return new DrawError("ALREADY_COMMITTED", message);
+  if (message === "draw_not_eligible") return new DrawError("NOT_ELIGIBLE", message);
+  if (message === "draw_nonce_too_early") return new DrawError("NONCE_TOO_EARLY", message);
+  if (message === "draw_cycle_complete" || message === "draw_cycle_closed") return new DrawError("CYCLE_COMPLETE", message);
+  if (message === "draw_cycle_rounds_exceed_members" || message === "draw_roster_mismatch") {
+    return new DrawError("INVALID_REQUEST", message);
+  }
   if (message === "draw_forbidden") return new DrawError("FORBIDDEN", message);
   if (message === "draw_idempotency_conflict") return new DrawError("IDEMPOTENCY_CONFLICT", message);
   if (message === "draw_repeat_winner") return new DrawError("REPEAT_WINNER", message);
@@ -280,6 +184,92 @@ function parseRound(value: unknown): DrawRound {
   };
 }
 
+const malformed = (what: string): DrawError =>
+  new DrawError("INTEGRITY_FAILURE", `Draw storage returned a malformed ${what}`);
+
+function str(value: unknown, what: string): string {
+  if (typeof value !== "string") throw malformed(what);
+  return value;
+}
+
+function int(value: unknown, what: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) throw malformed(what);
+  return value;
+}
+
+/** Explicit field copy: nothing else the database returns is passed through. */
+function parseCycle(value: unknown): DrawCycleRecord {
+  if (typeof value !== "object" || value === null) throw malformed("cycle");
+  const row = value as Record<string, unknown>;
+  return {
+    cycleId: str(row.cycleId, "cycle"),
+    groupId: str(row.groupId, "cycle"),
+    name: str(row.name, "cycle"),
+    contributionAmount: typeof row.contributionAmount === "string" ? row.contributionAmount : null,
+    potAmount: str(row.potAmount, "cycle"),
+    totalRounds: int(row.totalRounds, "cycle"),
+    reserveRatioBps: int(row.reserveRatioBps, "cycle"),
+    startedAt: str(row.startedAt, "cycle"),
+    closedAt: typeof row.closedAt === "string" ? row.closedAt : null,
+    createdAt: str(row.createdAt, "cycle"),
+    roundsRevealed: int(row.roundsRevealed, "cycle"),
+    roundsPaid: int(row.roundsPaid, "cycle"),
+    nextRound: typeof row.nextRound === "number" ? row.nextRound : null
+  };
+}
+
+function parseListEntry(value: unknown): DrawListEntry {
+  if (typeof value !== "object" || value === null) throw malformed("draw");
+  const row = value as Record<string, unknown>;
+  if (!isDrawLifecycleState(row.state)) throw malformed("draw");
+  return {
+    drawId: str(row.drawId, "draw"),
+    round: int(row.round, "draw"),
+    state: row.state,
+    openedAt: str(row.openedAt, "draw"),
+    committedAt: typeof row.committedAt === "string" ? row.committedAt : null,
+    revealedAt: typeof row.revealedAt === "string" ? row.revealedAt : null,
+    winnerMemberId: typeof row.winnerMemberId === "string" ? row.winnerMemberId : null,
+    sealCount: int(row.sealCount, "draw"),
+    nonceCount: int(row.nonceCount, "draw"),
+    revealRequested: row.revealRequested === true,
+    superseded: row.superseded === true,
+    legacy: row.legacy === true
+  };
+}
+
+function parseSession(value: unknown): DrawSessionView {
+  if (typeof value !== "object" || value === null) throw malformed("draw session");
+  const row = value as Record<string, unknown>;
+  if (!isDrawLifecycleState(row.state) || !Array.isArray(row.eligible) || !Array.isArray(row.seals) || !Array.isArray(row.nonces)) {
+    throw malformed("draw session");
+  }
+  const seals: DrawSessionSeal[] = (row.seals as Record<string, unknown>[]).map((seal) => ({
+    memberId: str(seal.memberId, "seal"),
+    sealed: str(seal.sealed, "seal"),
+    ...(typeof seal.sealedAt === "string" ? { sealedAt: seal.sealedAt } : {})
+  }));
+  return {
+    drawId: str(row.drawId, "draw session"),
+    groupId: str(row.groupId, "draw session"),
+    cycleId: str(row.cycleId, "draw session"),
+    round: int(row.round, "draw session"),
+    state: row.state,
+    openedBy: str(row.openedBy, "draw session"),
+    openedAt: str(row.openedAt, "draw session"),
+    committedAt: typeof row.committedAt === "string" ? row.committedAt : null,
+    cycle: parseCycle(row.cycle),
+    eligible: (row.eligible as unknown[]).map((id) => str(id, "draw session")),
+    seals,
+    // Two fields only: whether a member released, never what they released.
+    nonces: (row.nonces as Record<string, unknown>[]).map((entry) => ({
+      memberId: str(entry.memberId, "draw session"),
+      released: entry.released === true
+    })),
+    revealRequested: row.revealRequested === true
+  };
+}
+
 export class SupabaseDrawRepository implements DrawRepository {
   constructor(private readonly client: SupabaseClient) {}
 
@@ -287,26 +277,20 @@ export class SupabaseDrawRepository implements DrawRepository {
     commitment: DrawCommitment,
     context: DrawActorContext
   ): Promise<{ readonly round: DrawRound; readonly replayed: boolean }> {
-    const { data, error } = await this.client.rpc("commit_draw_v1", {
-      p_group_id: commitment.groupId,
-      p_cycle_id: commitment.cycleId,
-      p_round: commitment.round,
+    // `commit_draw_from_seals_v1` takes ONLY what the treasurer computes: the
+    // commitment and the digests it binds. The group, cycle, round, pot, reserve,
+    // total rounds and the sealed set are read by the database from the draw's
+    // session, the cycle and the stored seals, and the roster is verified against
+    // the group's members. There is no argument through which a caller could
+    // supply a different sealed set, which is the point. (The previous
+    // `commit_draw_v1` took one from the caller and is revoked from clients.)
+    const { data, error } = await this.client.rpc("commit_draw_from_seals_v1", {
       p_draw_id: commitment.drawId,
       p_commitment: commitment.commitment,
       p_commitment_nonce: commitment.commitmentNonce,
       p_roster_digest: commitment.rosterDigest,
-      // The member contributions are what make the draw fair rather than merely
-      // honest, so they go to the database with the commitment. The RPC refuses
-      // an empty set: reaching this function without them would produce exactly
-      // the row the fairness property depends on not existing.
       p_member_digest: commitment.memberDigest,
-      p_member_commitments: commitment.memberCommitments.map((contribution) => ({
-        ...contribution
-      })),
       p_participants: commitment.participants.map((participant) => ({ ...participant })),
-      p_pot_amount: commitment.potAmount,
-      p_total_rounds: commitment.totalRounds,
-      p_reserve_ratio_bps: commitment.reserveRatioBps,
       p_idempotency_key: commitment.idempotencyKey,
       p_occurred_at: commitment.committedAt,
       // Pinned in the database so the derivation cannot be relabelled later.
@@ -408,6 +392,134 @@ export class SupabaseDrawRepository implements DrawRepository {
     }
     return typeof data === "number" ? data : 0;
   }
+
+  async createCycle(
+    input: {
+      readonly groupId: string;
+      readonly name: string;
+      readonly contributionAmount: string;
+      readonly totalRounds: number;
+      readonly reserveRatioBps: number;
+      readonly startedAt?: string;
+      readonly idempotencyKey: string;
+    },
+    _context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
+    const { data, error } = await this.client.rpc("create_draw_cycle_v1", {
+      p_group_id: input.groupId,
+      p_name: input.name,
+      p_contribution_amount: input.contributionAmount,
+      p_total_rounds: input.totalRounds,
+      p_reserve_ratio_bps: input.reserveRatioBps,
+      p_started_at: input.startedAt ?? null,
+      p_idempotency_key: input.idempotencyKey
+    });
+    if (error) throw mapSupabaseError(error);
+    const payload = data as { readonly cycle?: unknown; readonly replayed?: unknown } | null;
+    if (typeof payload?.replayed !== "boolean") {
+      throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed cycle result");
+    }
+    return { cycle: parseCycle(payload.cycle), replayed: payload.replayed };
+  }
+
+  async listCycles(groupId: string, _context: DrawActorContext): Promise<readonly DrawCycleRecord[]> {
+    const { data, error } = await this.client.rpc("list_draw_cycles_v1", { p_group_id: groupId });
+    if (error) throw mapSupabaseError(error);
+    if (!Array.isArray(data)) throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed cycle list");
+    return data.map(parseCycle);
+  }
+
+  async getCycleDetail(
+    cycleId: string,
+    _context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly draws: readonly DrawListEntry[] }> {
+    const { data, error } = await this.client.rpc("get_draw_cycle_v1", { p_cycle_id: cycleId });
+    if (error) throw mapSupabaseError(error);
+    const payload = data as { readonly cycle?: unknown; readonly draws?: unknown } | null;
+    if (!payload || !Array.isArray(payload.draws)) {
+      throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed cycle");
+    }
+    return { cycle: parseCycle(payload.cycle), draws: payload.draws.map(parseListEntry) };
+  }
+
+  async openDraw(
+    input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
+    _context: DrawActorContext
+  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean }> {
+    const { data, error } = await this.client.rpc("open_draw_v1", {
+      p_cycle_id: input.cycleId,
+      p_round: input.round ?? null,
+      p_idempotency_key: input.idempotencyKey
+    });
+    if (error) throw mapSupabaseError(error);
+    const payload = data as { readonly session?: unknown; readonly replayed?: unknown } | null;
+    if (typeof payload?.replayed !== "boolean") {
+      throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed draw");
+    }
+    return { session: parseSession(payload.session), replayed: payload.replayed };
+  }
+
+  async getSession(drawId: string, _context: DrawActorContext): Promise<DrawSessionView> {
+    const { data, error } = await this.client.rpc("get_draw_session_v1", { p_draw_id: drawId });
+    if (error) throw mapSupabaseError(error);
+    return parseSession(data);
+  }
+
+  async submitSeal(
+    input: { readonly drawId: string; readonly sealed: string },
+    _context: DrawActorContext
+  ): Promise<{ readonly memberId: string; readonly sealed: string; readonly replaced: boolean }> {
+    // No member argument exists: the database seals for `auth.uid()`.
+    const { data, error } = await this.client.rpc("submit_draw_seal_v1", {
+      p_draw_id: input.drawId,
+      p_sealed: input.sealed
+    });
+    if (error) throw mapSupabaseError(error);
+    const row = data as Record<string, unknown> | null;
+    if (!row || typeof row.memberId !== "string" || typeof row.sealed !== "string" || typeof row.replaced !== "boolean") {
+      throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed seal result");
+    }
+    return { memberId: row.memberId, sealed: row.sealed, replaced: row.replaced };
+  }
+
+  async submitNonce(
+    input: { readonly drawId: string; readonly nonce: string },
+    _context: DrawActorContext
+  ): Promise<{ readonly memberId: string; readonly replayed: boolean }> {
+    const { data, error } = await this.client.rpc("submit_draw_nonce_v1", {
+      p_draw_id: input.drawId,
+      p_nonce: input.nonce
+    });
+    if (error) throw mapSupabaseError(error);
+    const row = data as Record<string, unknown> | null;
+    if (!row || typeof row.memberId !== "string" || typeof row.replayed !== "boolean") {
+      throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed nonce result");
+    }
+    // Deliberately copies two fields: the stored nonce is never passed back out.
+    return { memberId: row.memberId, replayed: row.replayed };
+  }
+
+  async requestReveal(
+    input: { readonly drawId: string; readonly seed: string },
+    _context: DrawActorContext
+  ): Promise<{ readonly memberNonces: readonly DrawMemberNonce[]; readonly replayed: boolean } | null> {
+    const { data, error } = await this.client.rpc("open_draw_reveal_v1", {
+      p_draw_id: input.drawId,
+      p_seed: input.seed
+    });
+    if (error) throw mapSupabaseError(error);
+    const row = data as { readonly memberNonces?: unknown; readonly replayed?: unknown } | null;
+    if (!row || !Array.isArray(row.memberNonces) || typeof row.replayed !== "boolean") {
+      throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed reveal request");
+    }
+    const memberNonces = (row.memberNonces as Record<string, unknown>[]).map((entry) => {
+      if (typeof entry.memberId !== "string" || typeof entry.nonce !== "string") {
+        throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed nonce");
+      }
+      return { memberId: entry.memberId, nonce: entry.nonce };
+    });
+    return { memberNonces, replayed: row.replayed };
+  }
 }
 
 export function mapDrawError(error: unknown): DrawError {
@@ -423,8 +535,12 @@ export function drawErrorStatus(code: DrawErrorCode): number {
     case "NOT_COMMITTED":
       return 404;
     case "FORBIDDEN":
+    case "NOT_ELIGIBLE":
       return 403;
     case "REPEAT_WINNER":
+    case "CYCLE_COMPLETE":
+    // A nonce before the commit: the request is fine, the draw is not there yet.
+    case "NONCE_TOO_EARLY":
     case "ALREADY_COMMITTED":
     case "ALREADY_REVEALED":
     case "IDEMPOTENCY_CONFLICT":

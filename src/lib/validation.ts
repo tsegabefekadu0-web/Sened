@@ -146,8 +146,69 @@ export const ledgerInviteRedeemRequestSchema = z
 
 export const ledgerInviteRevokeRequestSchema = z.object({ inviteId: uuidSchema }).strict();
 
+/**
+ * Draw cycles and the member side of a draw. All strict: an unknown field is a
+ * 400, so a client cannot believe it chose something the server reads from the
+ * database (the roster, the pot, which member a seal belongs to).
+ *
+ * `POST /api/draw/seals` and `POST /api/draw/nonces` carry NO member id. The
+ * member is the signed-in user, resolved in the database from `auth.uid()`; a body
+ * that names one is rejected here before it reaches the database.
+ */
+const drawHex64Schema = z.string().regex(/^[0-9a-f]{64}$/, "Expected a 64-character lowercase SHA-256 digest");
+const drawEntropySchema = z
+  .string()
+  .min(16)
+  .max(256)
+  .refine((value) => /^[!-~]+$/.test(value), "Entropy must be printable ASCII");
+const drawIdempotencyKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+
+export const drawCycleCreateRequestSchema = z
+  .object({
+    groupId: uuidSchema,
+    name: z.string().trim().min(1).max(120),
+    contributionAmount: amountSchema,
+    totalRounds: z.number().int().min(1).max(1000),
+    reserveRatioBps: z.number().int().min(0).max(3333),
+    startedAt: z
+      .string()
+      .max(35)
+      .datetime({ offset: true })
+      .transform((value) => new Date(value).toISOString())
+      .optional(),
+    idempotencyKey: drawIdempotencyKeySchema
+  })
+  .strict();
+
+export const drawOpenRequestSchema = z
+  .object({
+    cycleId: uuidSchema,
+    round: z.number().int().min(1).max(1000).optional(),
+    idempotencyKey: drawIdempotencyKeySchema
+  })
+  .strict();
+
+export const drawSealRequestSchema = z
+  .object({ drawId: uuidSchema, sealed: drawHex64Schema })
+  .strict();
+
+export const drawNonceRequestSchema = z
+  .object({ drawId: uuidSchema, nonce: drawEntropySchema })
+  .strict();
+
+export const drawCycleIdSchema = uuidSchema;
+export const drawSessionIdSchema = uuidSchema;
+
 /** Query of `GET /api/ledger/invites` and `GET /api/ledger/members`. */
 export const ledgerGroupQuerySchema = z.object({ groupId: uuidSchema }).strict();
+
+/** Query of `GET /api/draw/cycles`. */
+export const drawCycleListQuerySchema = ledgerGroupQuerySchema;
 
 /**
  * `POST /api/sync` bodies (the offline outbox drain and the chain pull share

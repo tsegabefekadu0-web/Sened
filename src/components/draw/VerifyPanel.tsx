@@ -4,10 +4,13 @@ import React from "react";
 
 import type { DrawVerificationTranscript } from "@/lib/draw/canonical";
 import type { DrawVerificationResult } from "@/lib/draw/types";
+import { translate, type Locale, type MessageKey } from "@/lib/i18n";
 
 import "./draw.css";
 
 export interface VerifyPanelProps {
+  /** Amharic unless told otherwise, as the panel has always been. */
+  readonly locale?: Locale;
   readonly transcript: DrawVerificationTranscript;
   readonly verification: DrawVerificationResult;
   readonly isRunning: boolean;
@@ -22,7 +25,8 @@ export interface VerifyPanelProps {
  * it. The published digests are rendered as selectable monospace text so two
  * members standing together can read them aloud and compare.
  */
-export function VerifyPanel({ transcript, verification, isRunning, error }: VerifyPanelProps) {
+export function VerifyPanel({ locale = "am", transcript, verification, isRunning, error }: VerifyPanelProps) {
+  const tr = (key: MessageKey, variables?: Record<string, string | number>): string => translate(locale, key, variables);
   const codes = new Set(verification.codes);
   const tampered = codes.has("commitment_mismatch") || codes.has("roster_mismatch");
   const selectionWrong = codes.has("selection_mismatch");
@@ -30,20 +34,20 @@ export function VerifyPanel({ transcript, verification, isRunning, error }: Veri
   return (
     <section
       className="sened-draw-shell rounded-[22px] border border-[#DCCFC7] p-4 shadow-card"
-      aria-label="የእጣ ማረጋገጫ (Draw verification)"
+      aria-label={tr("drawVerify.aria")}
       data-draw-panel="verify"
     >
       <header className="flex items-center justify-between gap-3">
         <h3 className="font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]">
-          ደረጃ 3 — ነጻ በስልክህ ማረጋገጥ
+          {tr("drawVerify.title")}
         </h3>
         <span className="rounded-full bg-[#F5EFEB] px-2 py-1 text-[10px] font-semibold tracking-wide text-[#6F625D]">
-          በመሣሪያዎ ብቻ
+          {tr("drawVerify.badge")}
         </span>
       </header>
 
       <p className="mt-2 text-[12px] leading-5 text-[#6F625D]">
-        ከዚህ በታች ያለውን አሃዞች አንድ ሰው ሌላ ሰው ሲል በእጅጉ ይርምራል። አገልግሎቱ በመኖሩ ላይ አይተካም።
+        {tr("drawVerify.intro")}
       </p>
 
       {error ? (
@@ -84,12 +88,12 @@ export function VerifyPanel({ transcript, verification, isRunning, error }: Veri
         />
         <span className="text-[13px] font-bold tracking-wide">
           {isRunning
-            ? "በመሮጥን ላይ…"
+            ? tr("drawVerify.running")
             : tampered || selectionWrong
-              ? "ማስተካከል ተለይቷል"
+              ? tr("drawVerify.tampered")
               : verification.verified
-                ? "ተረጋግጧል"
-                : "ገና አልተረጋግጠም"}
+                ? tr("drawVerify.verified")
+                : tr("drawVerify.unverified")}
         </span>
       </div>
 
@@ -97,36 +101,51 @@ export function VerifyPanel({ transcript, verification, isRunning, error }: Veri
         <ul className="mt-2 space-y-1.5">
           {verification.errors.map((entry, index) => (
             <li key={index} className="text-[12px] leading-5 text-[#863214]">
-              • {entry.detail}
+              • {tr(`drawVerify.err.${entry.code}` as MessageKey)}
+              {/* The engine's own wording, kept as technical detail: it names the exact value that failed. */}
+              <span lang="en" className="block pl-3 text-[11px] leading-4 text-[#6F625D]">
+                {entry.detail}
+              </span>
             </li>
           ))}
         </ul>
       ) : null}
 
-      {verification.warnings.length > 0 ? (
+      {verification.warnings.length > 0 || (verification.warningItems?.length ?? 0) > 0 ? (
         <ul className="mt-2 space-y-1.5 rounded-xl bg-[#FBF3E2] px-3 py-2">
-          {verification.warnings.map((warning, index) => (
-            <li key={index} className="text-[12px] leading-5 text-[#6B4E16]">
-              • {warning}
-            </li>
-          ))}
+          {/* Structured warnings are said in the member's language; a result that
+              carries only the engine's English strings falls back to those. */}
+          {verification.warningItems && verification.warningItems.length > 0
+            ? verification.warningItems.map((item, index) => (
+                <li key={index} className="text-[12px] leading-5 text-[#6B4E16]">
+                  •{" "}
+                  {item.code === "abandoned_commitments"
+                    ? tr("drawVerify.warn.abandoned_commitments", { count: item.count })
+                    : tr(`drawVerify.warn.${item.code}` as MessageKey)}
+                </li>
+              ))
+            : verification.warnings.map((warning, index) => (
+                <li key={index} className="text-[12px] leading-5 text-[#6B4E16]">
+                  • {warning}
+                </li>
+              ))}
         </ul>
       ) : null}
 
       {verification.verified && !isRunning ? (
         <dl className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-[12px]">
-          <dt className="font-ethiopic text-[#6F625D]">አሸናፊ</dt>
+          <dt className="font-ethiopic text-[#6F625D]">{tr("drawVerify.winner")}</dt>
           <dd className="sened-hash font-sans font-semibold">{verification.winnerMemberId}</dd>
-          <dt className="font-ethiopic text-[#6F625D]">ትሪት</dt>
+          <dt className="font-ethiopic text-[#6F625D]">{tr("drawVerify.ticket")}</dt>
           <dd className="sened-hash">{verification.winningTicket}</dd>
-          <dt className="font-ethiopic text-[#6F625D]">የግል ድምር</dt>
+          <dt className="font-ethiopic text-[#6F625D]">{tr("drawVerify.digest")}</dt>
           <dd className="sened-hash">{verification.transcriptDigest}</dd>
         </dl>
       ) : null}
 
       <details className="mt-3 rounded-xl border border-[#DCCFC7] bg-[#FAF7F2] px-3 py-2">
         <summary className="cursor-pointer select-text text-[12px] font-semibold text-[#1C1410]">
-          የተወጡ ሁሉንም አሃዞች አሳይ (Show every published value)
+          {tr("drawVerify.showAll")}
         </summary>
         <dl className="mt-2 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5">
           {[
@@ -138,9 +157,9 @@ export function VerifyPanel({ transcript, verification, isRunning, error }: Veri
             ["protocolVersion", transcript.protocolVersion ?? "v2"],
             ["rosterDigest", transcript.rosterDigest],
             ["commitmentNonce", transcript.commitmentNonce],
-            ["seed", transcript.seed || "(አልተገለጠም — not revealed)"],
-            ["nonceDigest", verification.nonceDigest ?? "(n/a)"],
-            ["transcriptDigest", verification.transcriptDigest ?? "(አልተሰላም)"]
+            ["seed", transcript.seed || tr("drawVerify.notRevealed")],
+            ["nonceDigest", verification.nonceDigest ?? tr("drawVerify.notApplicable")],
+            ["transcriptDigest", verification.transcriptDigest ?? tr("drawVerify.notComputed")]
           ].map(([label, value]) => (
             <React.Fragment key={label}>
               <dt className="text-[11px] font-semibold text-[#6F625D]">{label}</dt>
@@ -149,7 +168,7 @@ export function VerifyPanel({ transcript, verification, isRunning, error }: Veri
           ))}
         </dl>
         <p className="mt-2 text-[11px] leading-4 text-[#6F625D]">
-          ትሪቶች — ለእያንዳንዱ አባላት ከስሙ ብቻ የሚለወጥ ናቸው።
+          {tr("drawVerify.ticketsNote")}
         </p>
         <ul className="mt-1 space-y-1">
           {transcript.participants.map((participant) => {
@@ -172,8 +191,8 @@ export function VerifyPanel({ transcript, verification, isRunning, error }: Veri
 
       <p className="sr-only" aria-live="polite">
         {verification.verified
-          ? "The draw verified on this device."
-          : `The draw did not verify. ${verification.errors.map((entry) => entry.detail).join(" ")}`}
+          ? tr("drawVerify.srVerified")
+          : `${tr("drawVerify.srFailed")} ${verification.errors.map((entry) => entry.detail).join(" ")}`}
       </p>
     </section>
   );

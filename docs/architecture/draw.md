@@ -212,16 +212,19 @@ under the grindable rules by calling it by hand.
 (`20261004100000_draw_protocol_v3.sql`; apply it before deploying the
 application that sends `p_protocol_version`.)
 
-### 5.4 Protocol ordering (what the UI enforces)
+### 5.4 Protocol ordering (what the database enforces)
 
 The guarantee holds only if a member releases their nonce **after** the
-commitment is published. `LiveDraw` therefore does not render a member's opening
-line until the draw's published commitment (`/api/draw/verify`) contains that
-member's own sealed hash; before that it shows why, offers a "has the treasurer
-committed?" check, and warns if a commitment exists but omits the member's seal.
-The opening is also withheld from the DOM, not merely hidden. This is a
-usability guard, not a cryptographic one: a member who pastes the nonce out of
-`localStorage` early defeats it for themselves, and the docs say so.
+commitment is published. Since M4.4 that ordering is enforced by the database, not
+by the screen: `submit_draw_nonce_v1` raises `draw_nonce_too_early` (HTTP 409
+`nonce_too_early`) unless a commitment row exists for the draw, and then accepts
+the nonce only if it hashes to the caller's *own* committed seal (§16). `LiveDraw`
+still withholds the release button until the published, frozen sealed set contains
+the member's own seal exactly as this device holds it, and shows why it is
+withheld, but that is now a usability guard on top of a server rule. The nonce is
+generated and kept on the member's device, and is never rendered: a member who
+copies it out of `localStorage` early defeats the property for themselves, and
+the docs say so.
 
 ### 5.5 Residual properties (honest list)
 
@@ -234,9 +237,14 @@ usability guard, not a cryptographic one: a member who pastes the nonce out of
    so it adds no information.
 2. **Last-revealer abort (withholding).** After the commit, whoever sees the
    other nonces and the seed can compute the outcome before deciding to
-   proceed. In this product the treasurer collects the openings and holds the
-   seed, so the treasurer can compute the winner from the nonces they receive and
-   *abort* (never reveal, re-commit with a new seed) if they dislike it. A member
+   proceed. Before M4.4 the treasurer collected the openings by hand and could do
+   exactly that. Now the treasurer never receives a nonce: the only way to obtain
+   them is `open_draw_reveal_v1`, which requires the seed to reproduce the
+   commitment and publishes the seed and the nonces to every group member in the
+   same step (§16.4), so the treasurer cannot learn the outcome before the group
+   can. What remains is the veto: having requested the reveal, the treasurer can
+   decline to finish it and open a new draw. That leaves the trace below, plus a
+   `revealRequested` draw that never reached `revealed`. A member
    who refuses to reveal likewise makes the draw refuse
    (`MEMBER_COMMITMENT_MISSING`). Withholding is a veto, not a choice: it cannot
    select a winner, it can only discard an outcome. A veto repeated until the
@@ -248,18 +256,26 @@ usability guard, not a cryptographic one: a member who pastes the nonce out of
    deliberately kept; `verified` stays a mathematical fact, honouring the draw is
    governance. A lone member can only abort, never bias, but each abort costs the
    treasurer a visible re-commit, not the member.
-3. **Nonce leakage before the commit** (a member screenshotting or sharing it
-   early, or the server logging it) re-opens the v2 hole for that member's share
-   of the entropy. The UI withholds it; nothing can make a human keep a secret.
+3. **Nonce leakage before the commit** (a member sharing it early, or the server
+   logging it) re-opens the v2 hole for that member's share of the entropy. The
+   server holds a member's nonce between their release and the reveal, in a table
+   no client role can read (§16.4); it is not hidden from the database owner or a
+   service-role key, so the property assumes the treasurer is not also the
+   database administrator. Nothing can make a human keep a secret.
 4. **The server still sees nonces at reveal.** It cannot change the winner
    (every member recomputes it), but it is trusted to *publish* them.
-5. **The database does not recompute the derivation.** `reveal_draw_v1` checks
-   structure (opened set equals the sealed set for v3, nonce length, digest
-   equality) and the existing trigger pins the winner to the committed roster and
-   index, but neither the nonce-to-seal hash nor the seed-to-winner derivation is
-   reimplemented in plpgsql (see `20260926110000_draw_reveal_binding.sql` for why).
-   Those are enforced by `verifyRound` on the server and, independently, by every
-   member's browser.
+5. **The database does not recompute the winner derivation.** `reveal_draw_v1`
+   checks structure (opened set equals the sealed set for v3, nonce length, digest
+   equality, and, for a server-created draw, that seed and nonces equal what
+   `open_draw_reveal_v1` published) and the existing trigger pins the winner to
+   the committed roster and index. Since M4.4 the database *does* recompute four
+   plain length-prefixed hashes (member seal, member-set digest, commitment v3,
+   ticket) to check a nonce against its seal and a seed against the commitment;
+   they are pinned to the TypeScript engine by golden vectors (§16.6). The
+   transcript digest and the rejection sampler that pick the winner are still not
+   reimplemented in plpgsql (see `20260926110000_draw_reveal_binding.sql` for
+   why); those are enforced by `verifyRound` on the server and, independently, by
+   every member's browser.
 
 ### 5.6 Earlier options (kept for the record)
 
@@ -360,9 +376,12 @@ tables, `revoke all … from anon, authenticated`, and the repo's
 `drop policy if exists` / `create policy` pattern reusing A1's
 `sened_ledger_can_access_group` and `sened_ledger_can_manage_group`.
 
-Tables: `draw_cycles`, `draw_commitments`, `draw_reveals`, `draw_payouts`.
-Append-only is enforced by `sened_draw_block_mutation` on every table. Rotation
-and the reserve split are re-checked in the database, not trusted from the app.
+Tables: `draw_cycles`, `draw_commitments`, `draw_reveals`, `draw_payouts`, and
+(M4.4, §16) `draw_sessions`, `draw_seals`, `draw_nonces`, `draw_reveal_openings`.
+Append-only is enforced by `sened_draw_block_mutation` on every table except
+`draw_seals`, which may be replaced while a draw is still sealing and never after.
+Rotation and the reserve split are re-checked in the database, not trusted from
+the app.
 
 ### The migration was actually run
 
@@ -435,6 +454,14 @@ for demonstration.
 maps them onto the `DrawCopy` field names the components use. Both `am` and
 `en` are present (§12.6).
 
+`VerifyPanel` and `RiskPanel` take a `locale` (Amharic by default, as before) and
+say everything through the `drawVerify.*` / `drawRisk.*` keys. The engine's risk
+notes and the follow-ups on a verification result (`DrawRiskAssessment.noteItems`,
+`DrawVerificationResult.warningItems`) are structured data alongside the English
+strings, so the screen can say them in either language; verification *errors* are
+said by code, with the engine's English detail kept underneath as technical
+detail.
+
 The page states plainly that it runs on-device and does not depend on the server
 — because that is true, and because a demo that quietly implied server
 verification would be a fabricated trust signal. That demo is now the signed-out
@@ -442,34 +469,52 @@ mode only, behind a demo banner; see §14 for the signed-in flow.
 
 ## 11. API
 
-| Route | Role | Notes |
+| Route | Who | Notes |
 |---|---|---|
-| `POST /api/draw/commits` | treasurer | publishes commitment + roster |
-| `POST /api/draw/reveals` | treasurer | publishes the seed, fixes the winner |
+| `POST /api/draw/cycles` | owner / treasurer | creates a cycle; the pot is computed by the database |
+| `GET /api/draw/cycles?groupId=` | any member | the group's cycles |
+| `GET /api/draw/cycles/[cycleId]` | any member | the cycle and every draw in it, with each draw's state |
+| `POST /api/draw/draws` | owner / treasurer | opens a draw (the server creates its id) for sealing |
+| `GET /api/draw/draws/[drawId]` | any member | a draw in progress: seal hashes, and per member only whether a nonce was released |
+| `POST /api/draw/seals` | any eligible member, **for themselves** | `{ drawId, sealed }`; no member id |
+| `POST /api/draw/nonces` | any sealed member, **for themselves** | `{ drawId, nonce }`; only after the commit; never echoed |
+| `POST /api/draw/commits` | owner / treasurer | `{ drawId, seed?, commitmentNonce?, idempotencyKey }`; everything else is read from the database |
+| `POST /api/draw/reveals` | owner / treasurer | `{ drawId, seed, idempotencyKey }`; the nonces are the stored ones |
 | `POST /api/draw/verify` | **any member** | deliberately not role-gated |
 | `GET /api/draw/rounds/[roundId]` | any member | published round + transcript |
-| `POST /api/draw/payouts` | treasurer | posts through `LedgerService.append` |
+| `POST /api/draw/payouts` | owner / treasurer | posts through `LedgerService.append` |
 
 `/verify` and the round read are authenticated but **not** role-gated. A member
 who cannot open the ledger still has to be able to check the draw; that is the
-social contract. Commit/reveal/payout use `canWriteLedger`, matching the ledger
-and banking lanes.
+social contract. The role is the caller's role *in the group*, decided in SQL from
+`auth.uid()` (`sened_ledger_can_manage_group`), never from a JWT claim or a body
+field. Every body schema is `.strict()`: a commit that still carries `members`,
+`potAmount` or `memberCommitments`, a reveal that carries `memberNonces`, or a
+seal or nonce that names a member is a 400.
 
 Handler factories (`createCommitHandler(serviceFactory)`) follow the banking
 lane's Style B, so tests inject a fake service and the production path is
-exercised separately to prove it 503s when Supabase is unconfigured.
+exercised separately to prove it 503s when Supabase is unconfigured. The new
+schemas (`drawCycleCreateRequestSchema`, `drawOpenRequestSchema`,
+`drawSealRequestSchema`, `drawNonceRequestSchema`) live in `src/lib/validation.ts`;
+the commit and reveal schemas stay in `src/lib/draw/schemas.ts`.
 
-**Rate limiting:** every `/api/draw/*` path, including `rounds/[roundId]` via a
-UUID regex, is in `src/middleware.ts`'s `RATE_LIMITED` with write or read rules
-(request **R-1**, resolved).
+**Rate limiting:** every `/api/draw/*` path, including `rounds/[roundId]`,
+`cycles/[cycleId]` and `draws/[drawId]` via a UUID regex, is in
+`src/middleware.ts`'s `RATE_LIMITED`: cycle create, draw open, seal and nonce take
+the write rule, the lists and reads the read rule (`/api/draw/cycles` carries both,
+so the method picks).
 
 ## 12. Tests
 
-`test/draw.*.test.ts` — **182 tests across 8 files** as of 2026-10-04 (the
-table below lists the main ones; `draw.fairness.test.ts`,
-`draw.rpc-contract.test.ts`, `draw.live.test.tsx` and
-`draw.nonce-binding.test.ts` were added later). The full suite is 1124 tests in
-64 files.
+`test/draw.*.test.ts*` (the table below lists the main ones; later additions:
+`draw.fairness.test.ts`, `draw.rpc-contract.test.ts`, `draw.live.test.tsx`,
+`draw.nonce-binding.test.ts`, and for M4.4 `draw.sessions.test.ts`,
+`draw.cycles.api.route.test.ts`, `draw.sql-parity.test.ts`,
+`draw.ledgerFigures.test.ts`). The SQL itself is proven by
+`scripts/verify-migrations.sql` against a real Postgres 16, not by vitest. Counts
+are in the report that accompanied the change; run `npx vitest run` for the current
+total.
 
 | File | Tests | Covers |
 |---|---|---|
@@ -496,7 +541,7 @@ effect did *not* happen** — `expect(service.commit).not.toHaveBeenCalled()`.
 
 ## 14. The signed-in ceremony (UI wired to the API)
 
-`/draw` now has two modes, chosen by `useSession`:
+`/draw` has two modes, chosen by `useSession`:
 
 - **Signed out, or no Supabase configured** — the on-device demo (`DrawBoard`),
   with a fixture roster. It carries a `data-testid="draw-demo-banner"` label in
@@ -506,15 +551,20 @@ effect did *not* happen** — `expect(service.commit).not.toHaveBeenCalled()`.
   refuses on no group or several groups) and the roster comes from
   `GET /api/ledger/members`.
 
-Sequence, and who may do each step:
+The screen is organised around a **cycle** (picked from the group's list, or
+created by the owner/treasurer) and the **draws** in it. Sequence, and who may do
+each step (see §16 for the state machine):
 
 | # | Step | Call | Who |
 |---|---|---|---|
-| 0 | Seal a nonce for a draw id | none (on-device; only the hash is shared) | any member |
-| 1 | Commit | `POST /api/draw/commits` | owner / treasurer |
-| 2 | Reveal | `POST /api/draw/reveals`, then `POST /api/draw/verify` | owner / treasurer |
-| 3 | Verify | `POST /api/draw/verify` | any member |
-| 4 | Payout | `POST /api/draw/payouts` (after an explicit confirmation) | owner / treasurer |
+| 0 | Create a cycle (contribution, rounds, reserve) | `POST /api/draw/cycles` | owner / treasurer |
+| 1 | Open the draw for the next round | `POST /api/draw/draws` | owner / treasurer |
+| 2 | **Seal** a nonce made on this device | `POST /api/draw/seals` | each eligible member, for themselves |
+| 3 | Commit | `POST /api/draw/commits` | owner / treasurer |
+| 4 | **Release** the nonce, once the commitment is published | `POST /api/draw/nonces` | each sealed member, for themselves |
+| 5 | Reveal with the seed | `POST /api/draw/reveals`, then `POST /api/draw/verify` | owner / treasurer |
+| 6 | Verify | `POST /api/draw/verify` | any member |
+| 7 | Payout (after an explicit confirmation) | `POST /api/draw/payouts` | owner / treasurer |
 
 Notes on how it behaves:
 
@@ -524,50 +574,188 @@ Notes on how it behaves:
   every member nonce opens its sealed hash, and the payout/reserve split
   (`planReserve`). The result is *compared* with the server's verdict, winner,
   transcript digest and amounts; any difference is shown as a disagreement and
-  the payout is withheld. `/api/draw/verify` now also returns `memberNonces` so
-  the openings can be checked on the device.
+  the payout is withheld. `/api/draw/verify` returns `memberNonces` once the draw
+  is revealed so the openings can be checked on the device.
 - **Payout** is offered only to owner/treasurer, only when this device verified
   the draw and agrees with the server. It shows the winner, the amount, the
   reserve and the `PAYOUT_EXPENSE` (debit) and `POT_CASH` (credit) account ids
   from `/api/my-groups`, and the button stays disabled until a confirmation box
   is ticked.
-- **Member seals travel out-of-band.** There is no endpoint for a member to
-  submit a seal to the server; a seal exists only inside the treasurer's commit
-  request. So a member seals on their device (the draw id is bound into the
-  seal, so the treasurer creates the id first and shares it), and sends the
-  treasurer the `memberId:hash` line, later the `memberId:nonce` opening. The UI
-  requires at least one seal from a member other than the committer. A member's
-  opening line is not shown until the published commitment contains their seal
-  (§5.4).
-- The treasurer's seed lives in `localStorage` on the treasurer's device until
-  the reveal (the server never returns one it generated), and is wiped after.
-- The commit endpoint takes the seed in clear because the server computes the
-  commitment; the seed is not stored until the reveal, but the server does see it.
+- **Members' buttons appear only when the server will accept them.** "Seal my
+  nonce" while the draw is sealing and the member is eligible; "Release my nonce"
+  only when the draw is committed, the frozen sealed set contains this member's
+  seal exactly as this device holds it, and the reveal has not been requested.
+  Otherwise the screen says why (not eligible; seal missing from the commitment;
+  this device no longer holds the nonce; reveal already requested). The nonce is
+  generated here, persisted before the seal is sent, kept until released, and
+  never rendered.
+- **Progress** is shown to everyone: "n of m eligible members have sealed" and,
+  once committed, "n of m sealed members have released", with a per-member badge.
+  The treasurer's Commit is disabled until a member other than the committer has
+  sealed, and Reveal until every sealed member has released.
+- **Contribution, pot and reserve are not typed.** They come from the cycle
+  (§16.2). The cycle card shows each member's expected contribution, the pot (and
+  how many members it was sized for, with a notice if the group has since grown),
+  and what the ledger shows (§16.5).
+- The treasurer's seed lives in `localStorage` (per draw) on the treasurer's
+  device until the reveal (the server never returns one it generated), and is
+  wiped after. The commit endpoint takes the seed in clear because the server
+  computes the commitment; the seed is not stored until the reveal, but the server
+  does see it.
+- The roster published with a commit is the group's active members who have not
+  yet won this cycle. Display names are `Member <8 hex>`: an email is never
+  published (members have not agreed to show it).
 - Error codes from the routes are mapped to bilingual messages
   (`drawErrorKey`); the server's own `message` is shown beneath.
-- The request body cap is 8 KiB (`MAX_BODY_BYTES`), which bounds a commit to a
-  roster of roughly 50 members.
+- The request body cap is 8 KiB (`MAX_BODY_BYTES`).
 
 Tests: `test/draw.live.test.tsx` runs the real route handlers and `DrawService`
-(in-memory repositories) behind a fake `fetch`, so the browser verifies what a
-real server would publish.
+(in-memory repository that mirrors the SQL rules) behind a fake `fetch`, as the
+treasurer and as members on separate "devices", so the browser verifies what a
+real server would publish. `test/draw.sessions.test.ts` covers the lifecycle rules
+at the service level.
 
 ## 15. Deferred
 
-- **Cycle creation.** `draw_cycles` still has no creating RPC or API. The
-  treasurer types an existing cycle id; an unknown one is refused as not found.
-  There is also no endpoint listing a group's cycles or draws, so draw ids are
-  shared by hand and the live board remembers only the draw this device opened.
-- **A member-seal endpoint** (so sealing and openings need not be copy-pasted)
-  and a UI to show who has sealed.
-- **Contribution amounts and pot** are typed by the treasurer; nothing reads
-  them from the ledger yet, so the reserve uses the typed figures.
+- ~~Cycle creation / listing~~ — done (§16, M4.4).
+- ~~A member-seal endpoint and a UI to show who has sealed~~ — done (§16, M4.4).
+- ~~Contribution amounts and pot typed by the treasurer~~ — the cycle defines
+  them; the commit takes them from the cycle (§16.2).
+- **Per-member payment status.** Ledger entries carry no member id (their actor is
+  whoever recorded them) and no cycle or round id, so who paid what for which
+  round cannot be derived. The screen shows the contributions recorded since the
+  cycle started (count and total, read the way the home screen reads the ledger)
+  and each member at the configured amount, and says it cannot show who paid. A
+  real answer needs a member (and cycle) reference on contribution postings.
+- **Closing a cycle.** `draw_cycles.closed_at` exists but the table is append-only
+  and there is no closing RPC; a cycle is complete when every round is drawn.
+- **Draws committed before M4.4** have no stored nonces. They can be read and
+  verified, but cannot be revealed through the API (`reveal_draw_v1` still accepts
+  them with caller-supplied nonces, for a database owner). Open a new draw instead.
+- **Live updates.** Progress refreshes after your own actions and with the Refresh
+  button; there is no polling or push, so a treasurer waiting on members presses
+  Refresh.
+- **A lost nonce** cannot be recovered after the commit (the screen never shows
+  it). While sealing, the member re-seals; after the commit the draw cannot be
+  completed, and the treasurer opens a new draw, which leaves the
+  abandoned-commitment trace (§5.5).
 - ~~Observation: the winner depended on the member digest, not the nonces, so a
   treasurer could grind seeds before committing~~ — fixed in protocol v3 (§5);
   the residual properties that remain are listed in §5.5.
-- `VerifyPanel` and `RiskPanel` still carry Amharic-only text.
+- ~~`VerifyPanel` and `RiskPanel` carry Amharic-only text~~ — localised (§10).
 - **Supabase round-trip tests** — the repository is written and the SQL is
   verified against real Postgres, but the suite has no live-Supabase test. The
-  existing lanes use the same mocked-`rpc` approach.
+  existing lanes use the same mocked-`rpc` approach. The RPC contract test
+  (`test/draw.rpc-contract.test.ts`) pins parameter names, grants and the
+  secrecy-relevant structure of the migration to the repository.
 - ~~Wiring the ceremony UI to the API~~ — done for signed-in users (§14).
 - ~~Rate-limit buckets~~ — done (R-1).
+
+## 16. Cycles, server-created draws, and member seals and nonces (M4.4)
+
+`supabase/migrations/20261005100000_draw_cycles_and_member_seals.sql`.
+
+### 16.1 The state machine
+
+A draw's state is derived from which rows exist (`sened_draw_state`), never stored:
+
+```
+(none) --open_draw_v1--> SEALING --commit_draw_from_seals_v1--> COMMITTED
+        COMMITTED --open_draw_reveal_v1 + reveal_draw_v1--> REVEALED --record_draw_payout_v1--> PAID
+```
+
+| State | Rows | What is allowed | Refused (SQL message, HTTP) |
+|---|---|---|---|
+| sealing | `draw_sessions` | members seal or replace their own seal; owner/treasurer commits | nonce (`draw_nonce_too_early`, 409) |
+| committed | + `draw_commitments` | members release their own nonce, once; owner/treasurer requests the reveal | seal (`draw_already_committed`, 409) |
+| committed, reveal requested | + `draw_reveal_openings` | owner/treasurer completes the reveal | nonce (`draw_already_revealed`, 409) |
+| revealed | + `draw_reveals` | payout | everything earlier |
+| paid | + `draw_payouts` | nothing | everything earlier |
+
+Also enforced: rounds open and reveal in order (`draw_round_out_of_order`); a cycle
+with every round drawn opens nothing (`draw_cycle_complete`); opening a draw while
+one is still sealing for the round continues that one; opening a new draw for a
+round whose previous draw was committed and abandoned is allowed and marks the
+old one `superseded` in the listing (the abandoned commitment is counted, §5.5).
+
+### 16.2 Cycles
+
+`create_draw_cycle_v1(group, name, contribution, total_rounds, reserve_bps,
+started_at, idempotency_key)`: owner/treasurer of the group. `draw_cycles` gains
+`contribution_amount`, `created_by` and `idempotency_key` (existing rows keep a null
+contribution; their `pot_amount` stays authoritative). **The pot is
+`contribution × active members at creation`, computed in SQL.** Rounds may not
+exceed the members (each member is drawn once), and the same key replays while the
+same key with different terms is `draw_idempotency_conflict`. Cycles are
+append-only, so the terms are fixed for the cycle.
+
+The commit then takes everything from the cycle and the group, not from the
+caller: `commit_draw_from_seals_v1` has no pot, rounds, reserve, group, cycle or
+round argument. It verifies the roster against the group (the participants must be
+exactly the active members who have not won this cycle, each at the cycle's
+contribution, each ticket re-derived), and the sealed set against the stored seals.
+`commit_draw_v1`, which took the sealed set and the roster from the caller, is
+revoked from `authenticated`.
+
+### 16.3 Who can call what
+
+| RPC | Caller | Identity |
+|---|---|---|
+| `create_draw_cycle_v1`, `open_draw_v1`, `commit_draw_from_seals_v1`, `open_draw_reveal_v1`, `reveal_draw_v1` | owner or treasurer of the group | `auth.uid()` via `sened_ledger_can_manage_group` |
+| `submit_draw_seal_v1` | an active member who is on this round's eligible roster | `auth.uid()`; the function has no member argument |
+| `submit_draw_nonce_v1` | an active member whose seal is in the committed set | `auth.uid()`; no member argument; only the caller's own seal is consulted |
+| `list_draw_cycles_v1`, `get_draw_cycle_v1`, `get_draw_session_v1` | any active member | `sened_ledger_can_access_group` |
+
+A caller who cannot manage (or, for reads, access) the group gets `draw_forbidden`
+(42501), and for a group or cycle id the answer is the same whether it exists or
+not; an unknown draw id is `draw_not_found` (draw ids are server-generated UUIDs). Tables follow the existing pattern:
+RLS on, every privilege revoked from `anon` and `authenticated`, select granted
+back with a group-access policy. The exception is `draw_nonces` (§16.4).
+
+### 16.4 How nonce secrecy before the reveal is enforced
+
+1. `draw_nonces` has RLS enabled, **no policy** and no grant to any client role: it
+   cannot be selected through PostgREST by anyone, treasurer included. The
+   harness and the contract test assert it (no policy, no privilege).
+2. `get_draw_session_v1` / the listing report, per sealed member, only a boolean
+   `released`; the application projection copies named fields so even a service
+   that carried a nonce could not publish one. Seals are hashes.
+3. The only function that returns a nonce is `open_draw_reveal_v1`. It requires the
+   owner/treasurer, a committed v3 draw, every sealed member's nonce stored, and
+   **a seed that reproduces the published commitment** (checked in SQL, so a junk
+   seed cannot be used to read the nonces and walk away). It then writes the seed
+   and the nonces to `draw_reveal_openings`, which every group member can read, in
+   the same statement that returns them: the treasurer learns the nonces only by
+   making them public. A retry with the same seed replays; a different seed never
+   replaces it.
+4. `reveal_draw_v1` on a server-created draw can only carry the published seed and
+   exactly the published nonces; anything else is refused.
+5. The caller supplies the seed and nothing else in `POST /api/draw/reveals`
+   (`memberNonces` is a 400).
+
+### 16.5 Ledger figures
+
+`LiveDraw` reads the ledger the way the home screen does (`loadHomeLedger`) and
+shows the contribution entries recorded since the cycle started (count and
+total, `cycleLedgerFigures`). Ledger entries have no member id and no cycle or
+round id, so **who paid, and for which round, is not derivable and is not shown**:
+each member is listed at the cycle's configured amount and the screen says so. If
+the ledger is longer than one read returns, no total is shown rather than a guess.
+
+### 16.6 Database-side hashes and their parity
+
+To check a nonce against its seal and a seed against the commitment, four plain
+length-prefixed hashes are reimplemented in plpgsql: `sened_draw_member_seal_hash`
+(`sened-draw-member-v1`), `sened_draw_member_set_digest` (`-member-set-v1`),
+`sened_draw_commit_hash_v3` and `sened_draw_ticket`. They are pinned to the
+TypeScript engine by golden vectors asserted by `test/draw.sql-parity.test.ts`
+(against the real engine) and by `scripts/verify-migrations.sql` (against the SQL
+functions), using the same literals. Note: Postgres rejects a regex repetition
+bound above 255 (`{16,256}` fails at run time); `test/migrations.postgres-pitfalls.test.ts`
+guards that.
+
+### 16.7 Deploy order
+
+Apply the migration together with the application release. The previous
+application called `commit_draw_v1`, which is no longer callable by clients.
+

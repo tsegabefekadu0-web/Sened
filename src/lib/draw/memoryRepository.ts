@@ -1,0 +1,749 @@
+import { computeCommitment, computeMemberCommitment, computeMemberDigest, deriveTicket, webDrawHasher } from "./canonical";
+import { DrawError } from "./errors";
+import type { DrawActorContext, DrawRepository } from "./repository";
+import {
+  DRAW_CURRENT_PROTOCOL_VERSION,
+  type DrawCommitment,
+  type DrawCycleRecord,
+  type DrawHasher,
+  type DrawLifecycleState,
+  type DrawListEntry,
+  type DrawMemberNonce,
+  type DrawPayout,
+  type DrawReveal,
+  type DrawRound,
+  type DrawSessionSeal,
+  type DrawSessionView
+} from "./types";
+import { formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
+
+/**
+ * An in-memory stand-in for the draw tables and RPCs, for tests.
+ *
+ * It mirrors the rules `20261005100000_draw_cycles_and_member_seals.sql`
+ * enforces in SQL (who may seal, that a nonce is refused before the commit, that
+ * the commit uses the stored seals, that the reveal uses the stored nonces), so
+ * the service and the screen can be tested end to end. It is a double, not the
+ * authority: the SQL harness (`scripts/verify-migrations.sql`) is what proves the
+ * database enforces them, and `test/draw.rpc-contract.test.ts` pins the two
+ * together.
+ */
+
+export interface InMemoryGroup {
+  readonly groupId: string;
+  readonly members: readonly {
+    readonly userId: string;
+    readonly role: "owner" | "treasurer" | "member";
+    readonly active?: boolean;
+  }[];
+}
+
+export interface InMemoryDrawRepositoryOptions {
+  readonly clock?: () => Date;
+  /** Who is in which group, and in what role. Needed by the cycle and member methods. */
+  readonly groups?: readonly InMemoryGroup[];
+  /** Used to verify seals, commitments and tickets. Defaults to WebCrypto. */
+  readonly hasher?: DrawHasher;
+  /**
+   * Accept a commitment for a draw that has no server-created session, with the
+   * sealed set supplied by the caller. This is the pre-session behaviour, which
+   * production no longer offers (`commit_draw_v1` is revoked from clients); it
+   * exists only so older engine-level tests keep running. Default false.
+   */
+  readonly allowSessionlessCommit?: boolean;
+  readonly idFactory?: () => string;
+}
+
+interface CycleRow {
+  readonly cycleId: string;
+  readonly groupId: string;
+  readonly name: string;
+  readonly contributionAmount: string;
+  readonly potAmount: string;
+  readonly totalRounds: number;
+  readonly reserveRatioBps: number;
+  readonly startedAt: string;
+  readonly createdAt: string;
+  readonly idempotencyKey: string;
+}
+
+interface SessionRow {
+  readonly drawId: string;
+  readonly groupId: string;
+  readonly cycleId: string;
+  readonly round: number;
+  readonly openedBy: string;
+  readonly openedAt: string;
+  readonly idempotencyKey: string;
+  /** Opening order. The clock can repeat in tests; this cannot. */
+  readonly order: number;
+}
+
+function requireUuid(value: string, label: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new DrawError("INVALID_REQUEST", `${label} must be a UUID`);
+  }
+  return value.toLowerCase();
+}
+
+const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function sortById<T extends { readonly memberId: string }>(items: readonly T[]): T[] {
+  return [...items].sort((left, right) => (left.memberId < right.memberId ? -1 : left.memberId > right.memberId ? 1 : 0));
+}
+
+export class InMemoryDrawRepository implements DrawRepository {
+  private readonly commitments = new Map<string, DrawCommitment>();
+  private readonly commitmentKeys = new Map<string, string>();
+  private readonly commitmentsPerRound = new Map<string, number>();
+  private readonly reveals = new Map<string, DrawReveal>();
+  private readonly payouts = new Map<string, DrawPayout>();
+  private readonly cycles = new Map<string, CycleRow>();
+  private readonly cycleKeys = new Map<string, string>();
+  private readonly sessions = new Map<string, SessionRow>();
+  private readonly sessionKeys = new Map<string, string>();
+  private sessionCounter = 0;
+  private readonly seals = new Map<string, Map<string, DrawSessionSeal>>();
+  /** Never exposed by any method except `requestReveal`. */
+  private readonly nonces = new Map<string, Map<string, string>>();
+  private readonly openings = new Map<string, { readonly seed: string; readonly memberNonces: readonly DrawMemberNonce[] }>();
+  private readonly groups: Map<string, InMemoryGroup["members"]>;
+  private readonly clock: () => Date;
+  private readonly hasher: DrawHasher;
+  private readonly allowSessionlessCommit: boolean;
+  private readonly idFactory: () => string;
+
+  constructor(options: InMemoryDrawRepositoryOptions = {}) {
+    this.clock = options.clock ?? (() => new Date());
+    this.hasher = options.hasher ?? webDrawHasher;
+    this.allowSessionlessCommit = options.allowSessionlessCommit ?? false;
+    this.idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
+    this.groups = new Map((options.groups ?? []).map((group) => [group.groupId, group.members]));
+  }
+
+  /** Add or replace a group's membership (tests that join a member mid-cycle). */
+  setGroup(group: InMemoryGroup): void {
+    this.groups.set(group.groupId, group.members);
+  }
+
+  // -- membership -------------------------------------------------------------------
+
+  private activeMembers(groupId: string): string[] {
+    return (this.groups.get(groupId) ?? []).filter((member) => member.active !== false).map((member) => member.userId);
+  }
+
+  private isMember(groupId: string, userId: string): boolean {
+    return this.activeMembers(groupId).includes(userId);
+  }
+
+  private isManager(groupId: string, userId: string): boolean {
+    return (this.groups.get(groupId) ?? []).some(
+      (member) => member.userId === userId && member.active !== false && (member.role === "owner" || member.role === "treasurer")
+    );
+  }
+
+  private forbid(): never {
+    throw new DrawError("FORBIDDEN", "draw_forbidden");
+  }
+
+  // -- derived state ----------------------------------------------------------------
+
+  private project(commitment: DrawCommitment): DrawRound {
+    const reveal = this.reveals.get(commitment.drawId) ?? null;
+    const payout = this.payouts.get(commitment.drawId) ?? null;
+    return {
+      ...commitment,
+      state: payout !== null ? "paid" : reveal !== null ? "revealed" : "committed",
+      reveal,
+      payout
+    };
+  }
+
+  private lifecycle(drawId: string): DrawLifecycleState {
+    if (this.payouts.has(drawId)) return "paid";
+    if (this.reveals.has(drawId)) return "revealed";
+    if (this.commitments.has(drawId)) return "committed";
+    return "sealing";
+  }
+
+  private revealedRounds(cycleId: string): number {
+    let highest = 0;
+    for (const commitment of this.commitments.values()) {
+      if (commitment.cycleId === cycleId && this.reveals.has(commitment.drawId)) {
+        highest = Math.max(highest, commitment.round);
+      }
+    }
+    return highest;
+  }
+
+  private cycleRecord(row: CycleRow): DrawCycleRecord {
+    const revealed = new Set<number>();
+    const paid = new Set<number>();
+    for (const commitment of this.commitments.values()) {
+      if (commitment.cycleId !== row.cycleId) continue;
+      if (this.reveals.has(commitment.drawId)) revealed.add(commitment.round);
+      if (this.payouts.has(commitment.drawId)) paid.add(commitment.round);
+    }
+    return {
+      cycleId: row.cycleId,
+      groupId: row.groupId,
+      name: row.name,
+      contributionAmount: row.contributionAmount,
+      potAmount: row.potAmount,
+      totalRounds: row.totalRounds,
+      reserveRatioBps: row.reserveRatioBps,
+      startedAt: row.startedAt,
+      closedAt: null,
+      createdAt: row.createdAt,
+      roundsRevealed: revealed.size,
+      roundsPaid: paid.size,
+      nextRound: revealed.size < row.totalRounds ? revealed.size + 1 : null
+    };
+  }
+
+  /** Active members who have not already won this cycle: who may seal, and the exact roster. */
+  private eligible(groupId: string, cycleId: string, round: number): string[] {
+    const winners = new Set<string>();
+    for (const commitment of this.commitments.values()) {
+      const reveal = this.reveals.get(commitment.drawId);
+      if (commitment.cycleId === cycleId && commitment.round < round && reveal !== undefined) {
+        winners.add(reveal.winnerMemberId);
+      }
+    }
+    return this.activeMembers(groupId).filter((userId) => !winners.has(userId));
+  }
+
+  private requireSession(drawId: string): SessionRow {
+    const session = this.sessions.get(drawId.toLowerCase());
+    if (session === undefined) throw new DrawError("NOT_FOUND", "draw_not_found");
+    return session;
+  }
+
+  // -- cycles -----------------------------------------------------------------------
+
+  async createCycle(
+    input: {
+      readonly groupId: string;
+      readonly name: string;
+      readonly contributionAmount: string;
+      readonly totalRounds: number;
+      readonly reserveRatioBps: number;
+      readonly startedAt?: string;
+      readonly idempotencyKey: string;
+    },
+    context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
+    if (!this.isManager(input.groupId, context.userId)) this.forbid();
+    const name = input.name.trim();
+    let contributionMinor: bigint;
+    try {
+      contributionMinor = toEtbMinorUnits(input.contributionAmount, true);
+    } catch {
+      throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+    }
+    if (
+      name.length < 1 ||
+      name.length > 120 ||
+      !Number.isInteger(input.totalRounds) ||
+      input.totalRounds < 1 ||
+      input.totalRounds > 1000 ||
+      !Number.isInteger(input.reserveRatioBps) ||
+      input.reserveRatioBps < 0 ||
+      input.reserveRatioBps > 3333 ||
+      !KEY_PATTERN.test(input.idempotencyKey)
+    ) {
+      throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+    }
+    const members = this.activeMembers(input.groupId).length;
+    if (input.totalRounds > members) {
+      throw new DrawError("INVALID_REQUEST", "draw_cycle_rounds_exceed_members");
+    }
+
+    const keyed = `${input.groupId}:${input.idempotencyKey}`;
+    const existingId = this.cycleKeys.get(keyed);
+    if (existingId !== undefined) {
+      const existing = this.cycles.get(existingId) as CycleRow;
+      if (
+        existing.name !== name ||
+        existing.contributionAmount !== formatEtbMinorUnits(contributionMinor) ||
+        existing.totalRounds !== input.totalRounds ||
+        existing.reserveRatioBps !== input.reserveRatioBps
+      ) {
+        throw new DrawError("IDEMPOTENCY_CONFLICT", "draw_idempotency_conflict");
+      }
+      return { cycle: this.cycleRecord(existing), replayed: true };
+    }
+
+    const now = this.clock().toISOString();
+    const row: CycleRow = {
+      cycleId: this.idFactory(),
+      groupId: input.groupId,
+      name,
+      contributionAmount: formatEtbMinorUnits(contributionMinor),
+      potAmount: formatEtbMinorUnits(contributionMinor * BigInt(members)),
+      totalRounds: input.totalRounds,
+      reserveRatioBps: input.reserveRatioBps,
+      startedAt: input.startedAt ?? now,
+      createdAt: now,
+      idempotencyKey: input.idempotencyKey
+    };
+    this.cycles.set(row.cycleId, row);
+    this.cycleKeys.set(keyed, row.cycleId);
+    return { cycle: this.cycleRecord(row), replayed: false };
+  }
+
+  async listCycles(groupId: string, context: DrawActorContext): Promise<readonly DrawCycleRecord[]> {
+    if (!this.isMember(groupId, context.userId)) this.forbid();
+    return Array.from(this.cycles.values())
+      .filter((row) => row.groupId === groupId)
+      .sort((left, right) => (left.startedAt < right.startedAt ? 1 : left.startedAt > right.startedAt ? -1 : 0))
+      .map((row) => this.cycleRecord(row));
+  }
+
+  async getCycleDetail(
+    cycleId: string,
+    context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly draws: readonly DrawListEntry[] }> {
+    const row = this.cycles.get(cycleId.toLowerCase());
+    if (row === undefined || !this.isMember(row.groupId, context.userId)) this.forbid();
+    const cycle = row as CycleRow;
+    const draws: DrawListEntry[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.cycleId !== cycle.cycleId) continue;
+      const commitment = this.commitments.get(session.drawId);
+      const reveal = this.reveals.get(session.drawId);
+      const later = Array.from(this.sessions.values()).some(
+        (other) => other.cycleId === session.cycleId && other.round === session.round && other.order > session.order
+      );
+      draws.push({
+        drawId: session.drawId,
+        round: session.round,
+        state: this.lifecycle(session.drawId),
+        openedAt: session.openedAt,
+        committedAt: commitment?.committedAt ?? null,
+        revealedAt: reveal?.revealedAt ?? null,
+        winnerMemberId: reveal?.winnerMemberId ?? null,
+        sealCount: commitment ? commitment.memberCommitments.length : (this.seals.get(session.drawId)?.size ?? 0),
+        nonceCount: this.nonces.get(session.drawId)?.size ?? 0,
+        revealRequested: this.openings.has(session.drawId),
+        superseded: later,
+        legacy: false
+      });
+    }
+    for (const commitment of this.commitments.values()) {
+      if (commitment.cycleId !== cycle.cycleId || this.sessions.has(commitment.drawId)) continue;
+      const reveal = this.reveals.get(commitment.drawId);
+      draws.push({
+        drawId: commitment.drawId,
+        round: commitment.round,
+        state: this.lifecycle(commitment.drawId),
+        openedAt: commitment.committedAt,
+        committedAt: commitment.committedAt,
+        revealedAt: reveal?.revealedAt ?? null,
+        winnerMemberId: reveal?.winnerMemberId ?? null,
+        sealCount: commitment.memberCommitments.length,
+        nonceCount: 0,
+        revealRequested: false,
+        superseded: false,
+        legacy: true
+      });
+    }
+    const orderOf = (drawId: string): number => this.sessions.get(drawId)?.order ?? 0;
+    draws.sort((left, right) => left.round - right.round || orderOf(left.drawId) - orderOf(right.drawId));
+    return { cycle: this.cycleRecord(cycle), draws };
+  }
+
+  // -- sessions ---------------------------------------------------------------------
+
+  private view(session: SessionRow): DrawSessionView {
+    const cycle = this.cycles.get(session.cycleId) as CycleRow;
+    const commitment = this.commitments.get(session.drawId);
+    const stored = this.seals.get(session.drawId);
+    return {
+      drawId: session.drawId,
+      groupId: session.groupId,
+      cycleId: session.cycleId,
+      round: session.round,
+      state: this.lifecycle(session.drawId),
+      openedBy: session.openedBy,
+      openedAt: session.openedAt,
+      committedAt: commitment?.committedAt ?? null,
+      cycle: this.cycleRecord(cycle),
+      eligible: commitment
+        ? commitment.participants.map((participant) => participant.memberId).sort()
+        : this.eligible(session.groupId, session.cycleId, session.round).sort(),
+      seals: commitment
+        ? commitment.memberCommitments.map((seal) => ({ memberId: seal.memberId, sealed: seal.sealed }))
+        : sortById(Array.from(stored?.values() ?? [])),
+      nonces: commitment
+        ? sortById(
+            commitment.memberCommitments.map((seal) => ({
+              memberId: seal.memberId,
+              released: this.nonces.get(session.drawId)?.has(seal.memberId) ?? false
+            }))
+          )
+        : [],
+      revealRequested: this.openings.has(session.drawId)
+    };
+  }
+
+  async openDraw(
+    input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
+    context: DrawActorContext
+  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean }> {
+    const cycle = this.cycles.get(input.cycleId.toLowerCase());
+    if (cycle === undefined || !this.isManager(cycle.groupId, context.userId)) this.forbid();
+    const row = cycle as CycleRow;
+    if (!KEY_PATTERN.test(input.idempotencyKey)) throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+
+    const keyed = `${row.groupId}:${input.idempotencyKey}`;
+    const existingId = this.sessionKeys.get(keyed);
+    if (existingId !== undefined) {
+      const existing = this.sessions.get(existingId) as SessionRow;
+      if (existing.cycleId !== row.cycleId || (input.round !== undefined && existing.round !== input.round)) {
+        throw new DrawError("IDEMPOTENCY_CONFLICT", "draw_idempotency_conflict");
+      }
+      return { session: this.view(existing), replayed: true };
+    }
+
+    const revealed = this.revealedRounds(row.cycleId);
+    const next = revealed + 1;
+    if (next > row.totalRounds) throw new DrawError("CYCLE_COMPLETE", "draw_cycle_complete");
+    if (input.round !== undefined && input.round !== next) {
+      if (input.round >= 1 && input.round <= revealed) throw new DrawError("ALREADY_REVEALED", "draw_already_revealed");
+      throw new DrawError("ROUND_OUT_OF_ORDER", "draw_round_out_of_order");
+    }
+
+    const live = Array.from(this.sessions.values())
+      .filter((session) => session.cycleId === row.cycleId && session.round === next && !this.commitments.has(session.drawId))
+      .sort((left, right) => right.order - left.order)[0];
+    if (live !== undefined) return { session: this.view(live), replayed: true };
+
+    const session: SessionRow = {
+      drawId: this.idFactory(),
+      groupId: row.groupId,
+      cycleId: row.cycleId,
+      round: next,
+      openedBy: context.userId,
+      openedAt: this.clock().toISOString(),
+      idempotencyKey: input.idempotencyKey,
+      order: (this.sessionCounter += 1)
+    };
+    this.sessions.set(session.drawId, session);
+    this.sessionKeys.set(keyed, session.drawId);
+    return { session: this.view(session), replayed: false };
+  }
+
+  async getSession(drawId: string, context: DrawActorContext): Promise<DrawSessionView> {
+    const session = this.requireSession(drawId);
+    if (!this.isMember(session.groupId, context.userId)) this.forbid();
+    return this.view(session);
+  }
+
+  async submitSeal(
+    input: { readonly drawId: string; readonly sealed: string },
+    context: DrawActorContext
+  ): Promise<{ readonly memberId: string; readonly sealed: string; readonly replaced: boolean }> {
+    const session = this.requireSession(input.drawId);
+    if (!this.isMember(session.groupId, context.userId)) this.forbid();
+    if (!/^[0-9a-f]{64}$/.test(input.sealed)) throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+    if (this.commitments.has(session.drawId)) throw new DrawError("ALREADY_COMMITTED", "draw_already_committed");
+    if (!this.eligible(session.groupId, session.cycleId, session.round).includes(context.userId)) {
+      throw new DrawError("NOT_ELIGIBLE", "draw_not_eligible");
+    }
+    const stored = this.seals.get(session.drawId) ?? new Map<string, DrawSessionSeal>();
+    const previous = stored.get(context.userId);
+    stored.set(context.userId, { memberId: context.userId, sealed: input.sealed, sealedAt: this.clock().toISOString() });
+    this.seals.set(session.drawId, stored);
+    return { memberId: context.userId, sealed: input.sealed, replaced: previous !== undefined && previous.sealed !== input.sealed };
+  }
+
+  async submitNonce(
+    input: { readonly drawId: string; readonly nonce: string },
+    context: DrawActorContext
+  ): Promise<{ readonly memberId: string; readonly replayed: boolean }> {
+    const session = this.requireSession(input.drawId);
+    if (!this.isMember(session.groupId, context.userId)) this.forbid();
+    const commitment = this.commitments.get(session.drawId);
+    if (commitment === undefined) throw new DrawError("NONCE_TOO_EARLY", "draw_nonce_too_early");
+    if (this.openings.has(session.drawId) || this.reveals.has(session.drawId)) {
+      throw new DrawError("ALREADY_REVEALED", "draw_already_revealed");
+    }
+    if (input.nonce.length < 16 || input.nonce.length > 256 || !/^[!-~]+$/.test(input.nonce)) {
+      throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+    }
+    // Only the caller's OWN committed seal is consulted; identity is never an input.
+    const mine = commitment.memberCommitments.find((seal) => seal.memberId === context.userId);
+    if (mine === undefined) throw new DrawError("MEMBER_COMMITMENT_MISSING", "draw_member_commitment_missing");
+    const hash = await computeMemberCommitment(
+      { drawId: session.drawId, memberId: context.userId, nonce: input.nonce },
+      this.hasher
+    );
+    if (hash !== mine.sealed) throw new DrawError("MEMBER_COMMITMENT_MISMATCH", "draw_member_commitment_mismatch");
+    const stored = this.nonces.get(session.drawId) ?? new Map<string, string>();
+    const replayed = stored.has(context.userId);
+    if (!replayed) stored.set(context.userId, input.nonce);
+    this.nonces.set(session.drawId, stored);
+    return { memberId: context.userId, replayed };
+  }
+
+  /**
+   * The ONLY method that returns stored nonces. Mirrors `open_draw_reveal_v1`:
+   * manager only, committed, a seed that reproduces the commitment, every sealed
+   * member's nonce present. Returns null for a draw with no session (the legacy
+   * double), whose nonces the caller supplies.
+   */
+  async requestReveal(
+    input: { readonly drawId: string; readonly seed: string },
+    context: DrawActorContext
+  ): Promise<{ readonly memberNonces: readonly DrawMemberNonce[]; readonly replayed: boolean } | null> {
+    const session = this.sessions.get(input.drawId.toLowerCase());
+    if (session === undefined) return null;
+    if (!this.isManager(session.groupId, context.userId)) this.forbid();
+    const commitment = this.commitments.get(session.drawId);
+    if (commitment === undefined) throw new DrawError("NOT_COMMITTED", "draw_not_committed");
+    if (this.reveals.has(session.drawId)) throw new DrawError("ALREADY_REVEALED", "draw_already_revealed");
+    if (input.seed.length < 16 || input.seed.length > 256 || !/^[!-~]+$/.test(input.seed)) {
+      throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+    }
+    const opening = this.openings.get(session.drawId);
+    if (opening !== undefined) {
+      if (opening.seed !== input.seed) throw new DrawError("IDEMPOTENCY_CONFLICT", "draw_idempotency_conflict");
+      return { memberNonces: opening.memberNonces, replayed: true };
+    }
+    const recomputed = await computeCommitment(
+      {
+        groupId: commitment.groupId,
+        cycleId: commitment.cycleId,
+        round: commitment.round,
+        drawId: commitment.drawId,
+        rosterDigest: commitment.rosterDigest,
+        commitmentNonce: commitment.commitmentNonce,
+        memberDigest: commitment.memberDigest,
+        seed: input.seed
+      },
+      commitment.protocolVersion,
+      this.hasher
+    );
+    if (recomputed !== commitment.commitment) throw new DrawError("COMMITMENT_MISMATCH", "draw_commitment_mismatch");
+    const stored = this.nonces.get(session.drawId) ?? new Map<string, string>();
+    const memberNonces = sortById(
+      commitment.memberCommitments.flatMap((seal) => {
+        const nonce = stored.get(seal.memberId);
+        return nonce === undefined ? [] : [{ memberId: seal.memberId, nonce }];
+      })
+    );
+    if (memberNonces.length !== commitment.memberCommitments.length) {
+      throw new DrawError("MEMBER_COMMITMENT_MISSING", "draw_member_commitment_missing");
+    }
+    this.openings.set(session.drawId, { seed: input.seed, memberNonces });
+    return { memberNonces, replayed: false };
+  }
+
+  // -- commit / reveal / payout -----------------------------------------------------
+
+  private async assertCommitFromSession(commitment: DrawCommitment, context: DrawActorContext): Promise<void> {
+    const session = this.requireSession(commitment.drawId);
+    if (!this.isManager(session.groupId, context.userId)) this.forbid();
+    const cycle = this.cycles.get(session.cycleId) as CycleRow;
+    if (
+      commitment.groupId !== session.groupId ||
+      commitment.cycleId !== session.cycleId ||
+      commitment.round !== session.round
+    ) {
+      throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
+    }
+    if (commitment.protocolVersion !== DRAW_CURRENT_PROTOCOL_VERSION) {
+      throw new DrawError("INVALID_REQUEST", "draw_protocol_version_unsupported");
+    }
+    if (this.revealedRounds(session.cycleId) < session.round - 1) {
+      throw new DrawError("ROUND_OUT_OF_ORDER", "draw_round_out_of_order");
+    }
+    // The terms are the cycle's, not the caller's.
+    if (
+      commitment.potAmount !== cycle.potAmount ||
+      commitment.totalRounds !== cycle.totalRounds ||
+      commitment.reserveRatioBps !== cycle.reserveRatioBps
+    ) {
+      throw new DrawError("INVALID_REQUEST", "draw_cycle_mismatch");
+    }
+
+    const eligible = this.eligible(session.groupId, session.cycleId, session.round);
+    if (eligible.length < 1) throw new DrawError("NO_ELIGIBLE_PARTICIPANTS", "draw_no_eligible_participants");
+    const listed = commitment.participants.map((participant) => participant.memberId);
+    if (listed.length !== eligible.length || new Set(listed).size !== eligible.length || listed.some((id) => !eligible.includes(id))) {
+      throw new DrawError("INVALID_REQUEST", "draw_roster_mismatch");
+    }
+    for (const participant of commitment.participants) {
+      const ticket = await deriveTicket(
+        { groupId: session.groupId, cycleId: session.cycleId, memberId: participant.memberId },
+        this.hasher
+      );
+      if (ticket !== participant.ticket || participant.contributionAmount !== cycle.contributionAmount) {
+        throw new DrawError("INVALID_REQUEST", "draw_roster_mismatch");
+      }
+    }
+
+    // The sealed set is whatever is stored, restricted to members still eligible.
+    const stored = sortById(
+      Array.from(this.seals.get(session.drawId)?.values() ?? []).filter((seal) => eligible.includes(seal.memberId))
+    ).map((seal) => ({ memberId: seal.memberId, sealed: seal.sealed }));
+    const others = stored.filter((seal) => seal.memberId !== context.userId).length;
+    if (stored.length < 1 || (eligible.length > 1 && others < 1)) {
+      throw new DrawError("MEMBER_COMMITMENT_MISSING", "draw_member_commitment_missing");
+    }
+    const digest = await computeMemberDigest({ drawId: session.drawId, contributions: stored }, this.hasher);
+    if (digest !== commitment.memberDigest) {
+      throw new DrawError("MEMBER_COMMITMENT_MISMATCH", "draw_member_commitment_mismatch");
+    }
+  }
+
+  async saveCommitment(
+    commitment: DrawCommitment,
+    context: DrawActorContext
+  ): Promise<{ readonly round: DrawRound; readonly replayed: boolean }> {
+    requireUuid(context.userId, "userId");
+    requireUuid(commitment.drawId, "drawId");
+    requireUuid(commitment.groupId, "groupId");
+    // Mirrors the database: a new commitment must be the current protocol. v2
+    // let the treasurer grind the winner, so it is readable but never writable.
+    if (commitment.protocolVersion !== DRAW_CURRENT_PROTOCOL_VERSION) {
+      throw new DrawError(
+        "INVALID_REQUEST",
+        `New draws must use protocol ${DRAW_CURRENT_PROTOCOL_VERSION}; ${commitment.protocolVersion} is read-only history.`
+      );
+    }
+
+    const key = `${commitment.groupId}:${commitment.idempotencyKey}`;
+    const existingDrawId = this.commitmentKeys.get(key);
+    if (existingDrawId !== undefined) {
+      const existing = this.commitments.get(existingDrawId);
+      if (existing !== undefined) {
+        if (existing.commitment !== commitment.commitment) {
+          throw new DrawError(
+            "IDEMPOTENCY_CONFLICT",
+            "This idempotency key was already used for a different commitment"
+          );
+        }
+        return { round: this.project(existing), replayed: true };
+      }
+    }
+
+    if (this.commitments.has(commitment.drawId)) {
+      const existing = this.commitments.get(commitment.drawId);
+      if (existing !== undefined && existing.commitment !== commitment.commitment) {
+        throw new DrawError(
+          "ALREADY_COMMITTED",
+          "This draw already has a different commitment recorded"
+        );
+      }
+    }
+
+    if (this.sessions.has(commitment.drawId)) {
+      await this.assertCommitFromSession(commitment, context);
+    } else if (!this.allowSessionlessCommit) {
+      throw new DrawError("NOT_FOUND", "draw_not_found");
+    }
+
+    this.commitments.set(commitment.drawId, commitment);
+    this.commitmentKeys.set(key, commitment.drawId);
+    const roundKey = `${commitment.cycleId}:${commitment.round}`;
+    this.commitmentsPerRound.set(roundKey, (this.commitmentsPerRound.get(roundKey) ?? 0) + 1);
+    void this.clock();
+    return { round: this.project(commitment), replayed: false };
+  }
+
+  async saveReveal(reveal: DrawReveal, context: DrawActorContext): Promise<DrawRound> {
+    requireUuid(context.userId, "userId");
+    const commitment = this.commitments.get(reveal.drawId);
+    if (commitment === undefined) {
+      throw new DrawError("NOT_COMMITTED", "There is no commitment to reveal for this draw");
+    }
+    if (reveal.commitment !== commitment.commitment) {
+      throw new DrawError(
+        "COMMITMENT_MISMATCH",
+        "The reveal does not carry the commitment that was recorded"
+      );
+    }
+    if (this.sessions.has(reveal.drawId)) {
+      // A session-backed reveal can be nothing but what was published when it was requested.
+      const opening = this.openings.get(reveal.drawId);
+      if (opening === undefined) {
+        throw new DrawError("MEMBER_COMMITMENT_MISSING", "draw_member_commitment_missing");
+      }
+      if (opening.seed !== reveal.seed) throw new DrawError("COMMITMENT_MISMATCH", "draw_commitment_mismatch");
+      const same =
+        reveal.memberNonces.length === opening.memberNonces.length &&
+        reveal.memberNonces.every((entry) =>
+          opening.memberNonces.some((stored) => stored.memberId === entry.memberId && stored.nonce === entry.nonce)
+        );
+      if (!same) throw new DrawError("MEMBER_COMMITMENT_MISMATCH", "draw_member_commitment_mismatch");
+    }
+    const existing = this.reveals.get(reveal.drawId);
+    if (existing !== undefined && existing.transcriptDigest !== reveal.transcriptDigest) {
+      throw new DrawError(
+        "ALREADY_REVEALED",
+        "This draw has already been revealed with a different transcript"
+      );
+    }
+    this.reveals.set(reveal.drawId, reveal);
+    return this.project(commitment);
+  }
+
+  async savePayout(payout: DrawPayout, context: DrawActorContext): Promise<DrawRound> {
+    requireUuid(context.userId, "userId");
+    const commitment = this.commitments.get(payout.drawId);
+    if (commitment === undefined) {
+      throw new DrawError("NOT_COMMITTED", "There is no commitment for this draw");
+    }
+    if (!this.reveals.has(payout.drawId)) {
+      throw new DrawError(
+        "NOT_COMMITTED",
+        "A draw must be revealed before a payout can be posted"
+      );
+    }
+    this.payouts.set(payout.drawId, payout);
+    return this.project(commitment);
+  }
+
+  async getRound(drawId: string, context: DrawActorContext): Promise<DrawRound | null> {
+    requireUuid(context.userId, "userId");
+    const commitment = this.commitments.get(drawId.toLowerCase());
+    return commitment === undefined ? null : this.project(commitment);
+  }
+
+  async findByIdempotencyKey(
+    groupId: string,
+    idempotencyKey: string,
+    context: DrawActorContext
+  ): Promise<DrawRound | null> {
+    requireUuid(context.userId, "userId");
+    const drawId = this.commitmentKeys.get(`${groupId.toLowerCase()}:${idempotencyKey}`);
+    if (drawId === undefined) {
+      return null;
+    }
+    const commitment = this.commitments.get(drawId);
+    return commitment === undefined ? null : this.project(commitment);
+  }
+
+  async listCycle(cycleId: string, context: DrawActorContext): Promise<readonly DrawRound[]> {
+    requireUuid(context.userId, "userId");
+    return Array.from(this.commitments.values())
+      .filter((commitment) => commitment.cycleId === cycleId.toLowerCase())
+      .map((commitment) => this.project(commitment))
+      .sort((left, right) => left.round - right.round);
+  }
+
+  async countSupersededCommitments(
+    drawId: string,
+    context: DrawActorContext
+  ): Promise<number> {
+    requireUuid(context.userId, "userId");
+    const commitment = this.commitments.get(drawId.toLowerCase());
+    if (commitment === undefined) {
+      return 0;
+    }
+    const created = this.commitmentsPerRound.get(`${commitment.cycleId}:${commitment.round}`) ?? 0;
+    return Math.max(0, created - 1);
+  }
+}

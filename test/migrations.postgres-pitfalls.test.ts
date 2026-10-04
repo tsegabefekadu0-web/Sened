@@ -18,6 +18,21 @@ describe("migration SQL pitfalls", () => {
     }
   });
 
+  it("never uses a regex repetition bound above 255: Postgres refuses it at run time (2201B invalid repetition count)", () => {
+    // `'^[!-~]{16,256}$'` parses, passes review, and fails only when the function
+    // runs. Only a real Postgres notices, so guard the text.
+    for (const { name, sql } of migrations) {
+      const withoutComments = sql.replace(/--.*$/gm, "");
+      for (const match of withoutComments.matchAll(/\{(\d+)(?:,(\d*))?\}/g)) {
+        const bounds = [match[1], match[2]].filter((value) => value !== undefined && value !== "").map(Number);
+        for (const bound of bounds) {
+          // Only inside a quoted regular expression, not a format string like %L{...}.
+          expect(bound, `${name}: {${match[1]}${match[2] !== undefined ? "," + match[2] : ""}}`).toBeLessThanOrEqual(255);
+        }
+      }
+    }
+  });
+
   it("a plpgsql function that selects a row into a variable named like its table alias opts into #variable_conflict use_column", () => {
     const pattern = /select (\w+)\.\*\s+into \1\s+from [\w.]+ \1\b/gi;
     for (const { name, sql } of migrations) {

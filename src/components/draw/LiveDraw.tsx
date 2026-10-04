@@ -1,29 +1,30 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AuthedFetchDeps } from "@/lib/auth/authedFetch";
 import {
   canRunTreasurerSteps,
-  checkOpenings,
+  clearSeal,
   commitDraw,
-  commitmentPublishedFor,
+  createCycle,
   drawErrorKey,
   fetchVerification,
-  isUuid,
+  listCycles,
   normaliseAmount,
-  openingLine,
-  parseOpeningLines,
-  parseSealLines,
+  openDraw,
   postPayout,
-  potFromContribution,
   randomHex,
+  readCycle,
   readDraft,
   readDrawGroup,
   readSeal,
+  readSession,
   revealDraw,
   sealForDraw,
-  sealLine,
+  sealStanding,
+  submitNonce,
+  submitSeal,
   userIdFromAccessToken,
   verifyInBrowser,
   writeDraft,
@@ -37,8 +38,10 @@ import {
   type PayoutReceipt,
   type WireVerify
 } from "@/lib/draw/clientDraw";
+import { loadCycleLedgerFigures, type LedgerFiguresResult } from "@/lib/draw/ledgerFigures";
+import type { DrawCycleRecord, DrawListEntry, DrawSessionView } from "@/lib/draw/types";
 import type { MessageKey } from "@/lib/i18n";
-import { formatEtbDisplay } from "@/lib/ledger/money";
+import { formatEtbDisplay, formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
 
 import { usePrefersReducedMotion } from "./DrawBoard";
 import { MesobCeremony, type CeremonyPhase } from "./MesobCeremony";
@@ -66,6 +69,11 @@ interface Problem {
   readonly detail?: string | null;
 }
 
+interface CycleDetail {
+  readonly cycle: DrawCycleRecord;
+  readonly draws: readonly DrawListEntry[];
+}
+
 const CARD = "sened-draw-shell rounded-[22px] border border-[#DCCFC7] p-4 shadow-card";
 const HEADING = "font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]";
 const FIELD =
@@ -76,53 +84,52 @@ const BUTTON =
   "min-h-11 w-full rounded-2xl bg-[#C6532B] px-4 py-3 font-ethiopic text-[14px] font-bold tracking-wide text-[#FAF6F0] disabled:opacity-50";
 const SECONDARY =
   "min-h-9 rounded-xl border border-[#453630] px-3 font-sans text-[12px] font-semibold text-[#1C1410] disabled:opacity-50";
+const NOTICE =
+  "mt-2 rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2 text-[12px] font-semibold text-[#6B4E16]";
+const GOOD = "mt-2 text-[12px] font-semibold text-[#065F46]";
+const BAD = "mt-2 text-[12px] font-semibold text-[#863214]";
 
 function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
-function CopyField({ label, value, copyLabel }: { label: string; value: string; copyLabel: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="mt-2">
-      <span className={LABEL}>{label}</span>
-      <div className="mt-1 flex gap-2">
-        <input
-          readOnly
-          aria-label={label}
-          value={value}
-          onFocus={(event) => event.currentTarget.select()}
-          className="min-w-0 flex-1 rounded-xl border border-[#DCCFC7] bg-[#FAF7F2] px-3 py-2 font-mono text-[11px] text-[#1C1410]"
-        />
-        <button
-          type="button"
-          className={SECONDARY}
-          onClick={() => {
-            void Promise.resolve(globalThis.navigator?.clipboard?.writeText(value))
-              .then(() => setCopied(true))
-              .catch(() => setCopied(false));
-          }}
-        >
-          {copied ? "✓" : copyLabel}
-        </button>
-      </div>
-    </div>
-  );
+function newKey(prefix: string): string {
+  return `${prefix}.${globalThis.crypto.randomUUID()}`;
+}
+
+/** How many members the cycle's pot was sized for: the pot divided by the contribution. */
+function potMembers(cycle: DrawCycleRecord): number | null {
+  if (cycle.contributionAmount === null) return null;
+  try {
+    const each = toEtbMinorUnits(cycle.contributionAmount, true);
+    return Number(toEtbMinorUnits(cycle.potAmount, true) / each);
+  } catch {
+    return null;
+  }
+}
+
+/** The draw a screen should open on: the live one, else the latest. */
+function pickDraw(draws: readonly DrawListEntry[]): DrawListEntry | null {
+  const live = [...draws].reverse().find((entry) => !entry.superseded && !entry.legacy && entry.state !== "paid");
+  return live ?? draws[draws.length - 1] ?? null;
 }
 
 /**
  * The signed-in draw: the real flow, through `/api/draw/*`.
  *
- * Order the server enforces, and who may do each step:
+ *   cycle   owner/treasurer creates it (contribution, rounds, reserve); everyone lists it
+ *   open    owner/treasurer opens a draw; the server creates its id
+ *   SEAL    each member seals a nonce for themselves (`POST /api/draw/seals`)
+ *   commit  owner/treasurer commits over the roster and the seals the server holds
+ *   RELEASE each member releases their own nonce, only once the commit is published
+ *   reveal  owner/treasurer reveals with the seed; the server supplies the nonces
+ *   verify  any member; the browser recomputes the result
+ *   payout  owner/treasurer, after an explicit confirmation
  *
- *   0. members seal a nonce for a draw id        (any member, on their own device)
- *   1. `POST /api/draw/commits`   — owner/treasurer, with the sealed hashes
- *   2. `POST /api/draw/reveals`   — owner/treasurer, with the seed and the openings
- *   3. `POST /api/draw/verify`    — any member; the browser recomputes the result
- *   4. `POST /api/draw/payouts`   — owner/treasurer, after an explicit confirmation
- *
- * The server's verdict is never displayed as the answer. The draw is recomputed
- * here from the published values, and the two are compared.
+ * The nonce is generated on this device, kept here until the commitment is
+ * published, and never rendered. The server's verdict is never displayed as the
+ * answer: a revealed draw is recomputed here from the published values and the
+ * two are compared.
  */
 export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
   const t = useMemo(() => liveCopy(locale), [locale]);
@@ -131,28 +138,30 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
   const myUserId = useMemo(() => userIdFromAccessToken(accessToken), [accessToken]);
 
   const [load, setLoad] = useState<Load>({ kind: "loading" });
-  const [draft, setDraft] = useState<DrawDraft | null>(null);
+  const [cycles, setCycles] = useState<readonly DrawCycleRecord[] | null>(null);
+  const [cycleId, setCycleId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<CycleDetail | null>(null);
+  const [drawId, setDrawId] = useState<string | null>(null);
+  const [session, setSession] = useState<DrawSessionView | null>(null);
   const [wire, setWire] = useState<WireVerify | null>(null);
   const [check, setCheck] = useState<BrowserCheck | null>(null);
+  const [mySeal, setMySeal] = useState<MySeal | null>(null);
+  const [draft, setDraft] = useState<DrawDraft | null>(null);
+  const [ledger, setLedger] = useState<LedgerFiguresResult | "loading" | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
 
-  const [sealDrawId, setSealDrawId] = useState("");
-  const [mySeal, setMySeal] = useState<MySeal | null>(null);
-  const [verifyDrawId, setVerifyDrawId] = useState("");
-  /** Set when a "has the treasurer committed?" check found nothing yet. */
-  const [noCommitmentYet, setNoCommitmentYet] = useState(false);
-
-  const [cycleId, setCycleId] = useState("");
-  const [round, setRound] = useState("1");
-  const [totalRounds, setTotalRounds] = useState("");
+  const [cycleName, setCycleName] = useState("");
   const [contribution, setContribution] = useState("");
+  const [totalRounds, setTotalRounds] = useState("");
   const [reservePercent, setReservePercent] = useState("10");
-  const [sealsText, setSealsText] = useState("");
-  const [openingsText, setOpeningsText] = useState("");
+  const cycleKey = useRef(newKey("cycle-create"));
 
   const [confirmPayout, setConfirmPayout] = useState(false);
   const [receipt, setReceipt] = useState<PayoutReceipt | null>(null);
+
+  /** Guards against an older response overwriting a newer selection. */
+  const sequence = useRef(0);
 
   const group = load.kind === "ready" ? load.group : null;
   const isTreasurer = group !== null && canRunTreasurerSteps(group.role);
@@ -169,28 +178,116 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
     setProblem({ key: drawErrorKey(failure), detail: failure.message });
   }, []);
 
-  /** Fetch the published draw and recompute it on this device. */
-  const refresh = useCallback(
-    async (drawId: string): Promise<BrowserCheck | null> => {
-      const result = await fetchVerification(drawId, deps);
+  const run = useCallback(async (name: string, action: () => Promise<void>) => {
+    setBusy(name);
+    setProblem(null);
+    try {
+      await action();
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  // -- loading -------------------------------------------------------------------
+
+  /** Fetch the published, revealed draw and recompute it on this device. */
+  const verifyDraw = useCallback(
+    async (id: string, ticket: number): Promise<void> => {
+      const result = await fetchVerification(id, deps);
+      if (ticket !== sequence.current) return;
       if (!result.ok) {
         setWire(null);
         setCheck(null);
         fail(result);
-        return null;
+        return;
       }
       const checked = await verifyInBrowser(result.data);
+      if (ticket !== sequence.current) return;
       setWire(result.data);
       setCheck(checked);
-      return checked;
     },
     [deps, fail]
   );
 
-  // Resolve the group once, then restore any ceremony this device had open.
+  /** Select a draw: its session, this device's seal and seed, and (once revealed) its verification. */
+  const selectDraw = useCallback(
+    async (entry: DrawListEntry | null): Promise<void> => {
+      const ticket = ++sequence.current;
+      setWire(null);
+      setCheck(null);
+      setReceipt(null);
+      setConfirmPayout(false);
+      if (entry === null) {
+        setDrawId(null);
+        setSession(null);
+        setMySeal(null);
+        setDraft(null);
+        return;
+      }
+      setDrawId(entry.drawId);
+      setMySeal(readSeal(entry.drawId));
+      setDraft(readDraft(entry.drawId));
+      if (entry.legacy) {
+        setSession(null);
+      } else {
+        const result = await readSession(entry.drawId, deps);
+        if (ticket !== sequence.current) return;
+        if (!result.ok) {
+          setSession(null);
+          fail(result);
+          return;
+        }
+        setSession(result.data);
+      }
+      if (entry.state === "revealed" || entry.state === "paid") {
+        await verifyDraw(entry.drawId, ticket);
+      }
+    },
+    [deps, fail, verifyDraw]
+  );
+
+  /** Load one cycle and its draws, and open on the right draw. */
+  const loadCycle = useCallback(
+    async (id: string, keepDraw?: string | null): Promise<void> => {
+      const result = await readCycle(id, deps);
+      if (!result.ok) {
+        setDetail(null);
+        fail(result);
+        return;
+      }
+      setCycleId(id);
+      setDetail(result.data);
+      const kept = keepDraw ? result.data.draws.find((entry) => entry.drawId === keepDraw) : undefined;
+      await selectDraw(kept ?? pickDraw(result.data.draws));
+    },
+    [deps, fail, selectDraw]
+  );
+
+  const loadCycles = useCallback(
+    async (groupId: string, prefer?: string | null): Promise<void> => {
+      const result = await listCycles(groupId, deps);
+      if (!result.ok) {
+        setCycles([]);
+        fail(result);
+        return;
+      }
+      setCycles(result.data);
+      const chosen = result.data.find((cycle) => cycle.cycleId === prefer) ?? result.data[0] ?? null;
+      if (chosen === null) {
+        setCycleId(null);
+        setDetail(null);
+        await selectDraw(null);
+        return;
+      }
+      await loadCycle(chosen.cycleId);
+    },
+    [deps, fail, loadCycle, selectDraw]
+  );
+
+  // Resolve the group once, then load its cycles.
   useEffect(() => {
     let active = true;
-    void readDrawGroup(deps).then((read) => {
+    void readDrawGroup(deps).then(async (read) => {
       if (!active) return;
       if (read.status !== "ok") {
         return setLoad({
@@ -206,187 +303,184 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
         });
       }
       setLoad({ kind: "ready", group: read.group });
-      const saved = readDraft(read.group.groupId);
-      if (saved !== null) {
-        setDraft(saved);
-        setSealDrawId(saved.drawId);
-        setVerifyDrawId(saved.drawId);
-        if (saved.committed) void refresh(saved.drawId);
-      }
+      await loadCycles(read.group.groupId);
     });
     return () => {
       active = false;
     };
-    // `refresh` is stable for a given `deps`; the group is resolved once per mount.
+    // The group is resolved once per mount; the loaders are stable for a given `deps`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The ledger's contribution figures for the selected cycle.
+  const selectedCycle = detail?.cycle ?? null;
+  const cycleStart = selectedCycle?.startedAt ?? null;
   useEffect(() => {
-    setMySeal(isUuid(sealDrawId) ? readSeal(sealDrawId.trim().toLowerCase()) : null);
-    setNoCommitmentYet(false);
-  }, [sealDrawId]);
-
-  const run = useCallback(async (name: string, action: () => Promise<void>) => {
-    setBusy(name);
-    setProblem(null);
-    try {
-      await action();
-    } finally {
-      setBusy(null);
+    if (cycleStart === null) {
+      setLedger(null);
+      return;
     }
-  }, []);
-
-  // -- step 0: a member seals ---------------------------------------------------
-
-  const seal = () =>
-    run("seal", async () => {
-      const drawId = sealDrawId.trim().toLowerCase();
-      if (!isUuid(drawId)) return setProblem({ key: "drawLive.sealNeedDrawId" });
-      if (myUserId === null || group === null || !group.members.some((member) => member.userId === myUserId)) {
-        return setProblem({ key: "drawLive.sealNotMember" });
-      }
-      const made = await sealForDraw(drawId, myUserId);
-      writeSeal(made);
-      setMySeal(made);
+    let active = true;
+    setLedger("loading");
+    void loadCycleLedgerFigures(cycleStart, deps).then((result) => {
+      if (active) setLedger(result);
     });
-
-  /**
-   * "Has the treasurer committed, with my seal in it?" — asked by a member before
-   * their opening is shown. A missing round is an expected answer here (the
-   * treasurer simply has not committed yet), not an error to alarm anyone with.
-   */
-  const checkCommitment = () =>
-    run("check", async () => {
-      if (mySeal === null) return;
-      setNoCommitmentYet(false);
-      const result = await fetchVerification(mySeal.drawId, deps);
-      if (!result.ok) {
-        if (result.code === "not_found" || result.code === "not_committed") return setNoCommitmentYet(true);
-        return fail(result);
-      }
-      setWire(result.data);
-      setCheck(await verifyInBrowser(result.data));
-      setVerifyDrawId(mySeal.drawId);
-    });
-
-  // -- step 1: open + commit -----------------------------------------------------
-
-  const openDraw = () => {
-    if (group === null) return;
-    const drawId = globalThis.crypto.randomUUID();
-    const next: DrawDraft = {
-      drawId,
-      seed: randomHex(),
-      commitmentNonce: randomHex(),
-      commitKey: `draw-commit.${drawId}`,
-      revealKey: `draw-reveal.${drawId}`,
-      committed: false
+    return () => {
+      active = false;
     };
-    writeDraft(group.groupId, next);
-    setDraft(next);
-    setSealDrawId(drawId);
-    setVerifyDrawId(drawId);
-    setWire(null);
-    setCheck(null);
-    setReceipt(null);
-    setConfirmPayout(false);
-    setProblem(null);
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cycleStart]);
 
-  const commit = () =>
-    run("commit", async () => {
-      if (group === null || draft === null) return;
-      const roundNumber = Number(round);
-      const total = Number(totalRounds);
+  const refresh = () =>
+    run("refresh", async () => {
+      if (group === null) return;
+      if (cycleId === null) return loadCycles(group.groupId);
+      await loadCycle(cycleId, drawId);
+    });
+
+  // -- cycles --------------------------------------------------------------------
+
+  const createCycleAction = () =>
+    run("cycle", async () => {
+      if (group === null) return;
       const each = normaliseAmount(contribution);
+      const rounds = Number(totalRounds);
       const bps = Math.round(Number(reservePercent) * 100);
-      const pot = each === null ? null : potFromContribution(each, group.members.length);
       if (
-        !isUuid(cycleId) ||
-        !Number.isInteger(roundNumber) ||
-        !Number.isInteger(total) ||
-        roundNumber < 1 ||
-        total < roundNumber ||
+        cycleName.trim() === "" ||
         each === null ||
-        pot === null ||
+        !Number.isInteger(rounds) ||
+        rounds < 1 ||
+        rounds > group.members.length ||
         !Number.isFinite(bps) ||
         bps < 0 ||
         bps > 3333
       ) {
-        return setProblem({ key: "drawLive.commitInvalidFields" });
+        return setProblem({ key: "drawLive.cycleInvalid", vars: { members: group.members.length } });
       }
-      const parsed = parseSealLines(sealsText);
-      if (!parsed.ok) return setProblem({ key: "drawLive.badLine", vars: { line: parsed.line } });
-      if (!parsed.entries.some((entry) => entry.memberId !== myUserId)) {
-        return setProblem({ key: "drawLive.needOtherSeal" });
-      }
-      const result = await commitDraw(
+      const result = await createCycle(
         {
           groupId: group.groupId,
-          cycleId: cycleId.trim().toLowerCase(),
-          round: roundNumber,
-          totalRounds: total,
-          drawId: draft.drawId,
-          commitmentNonce: draft.commitmentNonce,
-          seed: draft.seed,
-          memberCommitments: parsed.entries,
-          potAmount: pot,
+          name: cycleName.trim(),
+          contributionAmount: each,
+          totalRounds: rounds,
           reserveRatioBps: bps,
-          members: group.members.map((member) => ({
-            memberId: member.userId,
-            displayName: member.email ?? `Member ${shortId(member.userId)}`,
-            contributionAmount: each
-          })),
-          idempotencyKey: draft.commitKey
+          idempotencyKey: cycleKey.current
         },
         deps
       );
       if (!result.ok) return fail(result);
-      const committed = { ...draft, committed: true };
-      writeDraft(group.groupId, committed);
-      setDraft(committed);
-      await refresh(draft.drawId);
+      cycleKey.current = newKey("cycle-create");
+      setCycleName("");
+      setContribution("");
+      setTotalRounds("");
+      await loadCycles(group.groupId, result.data.cycle.cycleId);
     });
 
-  // -- step 2: reveal ------------------------------------------------------------
+  const touchCycleForm = () => {
+    // A changed field is a different request, so it must not reuse the old key.
+    cycleKey.current = newKey("cycle-create");
+  };
 
-  const reveal = () =>
-    run("reveal", async () => {
-      if (group === null || draft === null || wire === null) return;
-      if (draft.seed === "") return setProblem({ key: "drawLive.revealNoSeed" });
-      const parsed = parseOpeningLines(openingsText);
-      if (!parsed.ok) return setProblem({ key: "drawLive.badLine", vars: { line: parsed.line } });
-      // Cheap to catch here, and names the member, which the server's error does not.
-      const bad = await checkOpenings(draft.drawId, wire.transcript.memberCommitments, parsed.entries);
-      if (bad.length > 0) {
-        return setProblem({ key: "drawLive.openingMismatch", vars: { members: bad.map(labelFor).join(", ") } });
+  const openDrawAction = () =>
+    run("open", async () => {
+      if (selectedCycle === null) return;
+      // A new key each time: an abandoned draw must be replaceable by a fresh one.
+      const result = await openDraw(
+        { cycleId: selectedCycle.cycleId, idempotencyKey: newKey("draw-open") },
+        deps
+      );
+      if (!result.ok) return fail(result);
+      await loadCycle(selectedCycle.cycleId, result.data.session.drawId);
+    });
+
+  // -- the member's side: seal, then release -------------------------------------
+
+  const reloadSelected = useCallback(async () => {
+    if (cycleId !== null) await loadCycle(cycleId, drawId);
+  }, [cycleId, drawId, loadCycle]);
+
+  const sealAction = () =>
+    run("seal", async () => {
+      if (session === null || myUserId === null) return;
+      const made = await sealForDraw(session.drawId, myUserId);
+      // Persist the nonce BEFORE sending the seal: a seal the server holds and a
+      // device that lost its nonce is a draw nobody can complete.
+      const previous = mySeal;
+      writeSeal(made);
+      setMySeal(made);
+      const result = await submitSeal({ drawId: session.drawId, sealed: made.sealed }, deps);
+      if (!result.ok) {
+        if (previous === null) clearSeal(session.drawId);
+        else writeSeal(previous);
+        setMySeal(previous);
+        return fail(result);
       }
+      await reloadSelected();
+    });
+
+  const releaseAction = () =>
+    run("release", async () => {
+      if (session === null || mySeal === null) return;
+      const result = await submitNonce({ drawId: session.drawId, nonce: mySeal.nonce }, deps);
+      if (!result.ok) return fail(result);
+      await reloadSelected();
+    });
+
+  // -- the treasurer's side: commit, reveal --------------------------------------
+
+  const commitAction = () =>
+    run("commit", async () => {
+      if (session === null) return;
+      let current = draft ?? readDraft(session.drawId);
+      if (current === null) {
+        current = {
+          drawId: session.drawId,
+          seed: randomHex(),
+          commitmentNonce: randomHex(),
+          commitKey: `draw-commit.${session.drawId}`,
+          revealKey: `draw-reveal.${session.drawId}`,
+          committed: false
+        };
+        // Persisted before the request, so a retry commits to the same seed.
+        writeDraft(session.drawId, current);
+        setDraft(current);
+      }
+      const result = await commitDraw(
+        {
+          drawId: session.drawId,
+          commitmentNonce: current.commitmentNonce,
+          seed: current.seed,
+          idempotencyKey: current.commitKey
+        },
+        deps
+      );
+      if (!result.ok) return fail(result);
+      const committed = { ...current, committed: true };
+      writeDraft(session.drawId, committed);
+      setDraft(committed);
+      await reloadSelected();
+    });
+
+  const revealAction = () =>
+    run("reveal", async () => {
+      if (session === null) return;
+      if (draft === null || draft.seed === "") return setProblem({ key: "drawLive.revealNoSeed" });
       const result = await revealDraw(
-        { drawId: draft.drawId, seed: draft.seed, memberNonces: parsed.entries, idempotencyKey: draft.revealKey },
+        { drawId: session.drawId, seed: draft.seed, idempotencyKey: draft.revealKey },
         deps
       );
       if (!result.ok) return fail(result);
       // The seed is public now; there is nothing left to protect on this device.
       const done = { ...draft, seed: "", revealed: true };
-      writeDraft(group.groupId, done);
+      writeDraft(session.drawId, done);
       setDraft(done);
-      await refresh(draft.drawId);
+      await reloadSelected();
     });
 
-  // -- step 3: verify (anyone) ---------------------------------------------------
+  // -- payout --------------------------------------------------------------------
 
-  const verify = () =>
-    run("verify", async () => {
-      const drawId = verifyDrawId.trim().toLowerCase();
-      if (!isUuid(drawId)) return setProblem({ key: "drawLive.verifyNeedDrawId" });
-      setReceipt(null);
-      setConfirmPayout(false);
-      await refresh(drawId);
-    });
-
-  // -- step 4: payout ------------------------------------------------------------
-
-  const payout = () =>
+  const payoutAction = () =>
     run("payout", async () => {
       if (group === null || wire === null || check === null || !check.trusted || !confirmPayout) return;
       if (group.potCashAccountId === null || group.payoutExpenseAccountId === null) {
@@ -401,19 +495,13 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
         deps
       );
       if (!result.ok) return fail(result);
-      setReceipt(result.data);
       setConfirmPayout(false);
-      await refresh(wire.round.drawId);
+      await reloadSelected();
+      // Reloading clears the receipt with the rest of the selection; keep this one on screen.
+      setReceipt(result.data);
     });
 
   // -- render --------------------------------------------------------------------
-
-  const winnerId = check?.trusted ? check.local.winnerMemberId : null;
-  const phase: CeremonyPhase =
-    wire === null ? "idle" : check?.trusted ? "revealed" : "sealed";
-  const roundLabel = wire
-    ? copy.roundLabel(wire.round.round, wire.round.totalRounds)
-    : copy.roundLabel(Number(round) || 1, Number(totalRounds) || Number(round) || 1);
 
   if (load.kind === "loading") {
     return (
@@ -433,10 +521,22 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
   }
 
   const readyGroup = load.group;
-  const eachNormalised = normaliseAmount(contribution);
-  const potPreview = eachNormalised === null ? null : potFromContribution(eachNormalised, readyGroup.members.length);
+  const cycle = selectedCycle;
   const round1 = wire?.round ?? null;
+  const winnerId = check?.trusted ? check.local.winnerMemberId : null;
+  const phase: CeremonyPhase = winnerId !== null ? "revealed" : session === null ? "idle" : "sealed";
+  const roundLabel = session
+    ? copy.roundLabel(session.round, session.cycle.totalRounds)
+    : cycle
+      ? copy.roundLabel(cycle.nextRound ?? cycle.totalRounds, cycle.totalRounds)
+      : copy.roundLabel(1, 1);
   const canPay = isTreasurer && round1 !== null && round1.state === "revealed" && check !== null && check.trusted;
+  const stateLabel = (state: DrawListEntry["state"]) => t(`drawLive.lifecycle.${state}`);
+  const liveSealingForNext =
+    detail !== null &&
+    cycle !== null &&
+    cycle.nextRound !== null &&
+    detail.draws.some((entry) => entry.round === cycle.nextRound && entry.state === "sealing" && !entry.superseded);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden no-scrollbar" data-testid="draw-live">
@@ -464,9 +564,7 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
 
         <section className={CARD} aria-label={t("drawLive.rosterTitle")} data-draw-panel="roster">
           <h3 className={HEADING}>{t("drawLive.rosterTitle")}</h3>
-          <p className={HINT}>
-            {isTreasurer ? t("drawLive.roleTreasurerNote") : t("drawLive.roleMemberNote")}
-          </p>
+          <p className={HINT}>{isTreasurer ? t("drawLive.roleTreasurerNote") : t("drawLive.roleMemberNote")}</p>
           <ul className="mt-2 space-y-1">
             {readyGroup.members.map((member) => (
               <li
@@ -477,198 +575,266 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
                   {member.email ?? t("drawLive.memberAnonymous", { id: shortId(member.userId) })}
                   {member.userId === myUserId ? ` ${t("drawLive.you")}` : ""}
                 </span>
-                <span className="shrink-0 text-[11px] text-[#6F625D]">{t(`drawLive.role.${member.role}`)}</span>
+                <span className="shrink-0 text-right text-[11px] text-[#6F625D]">
+                  {cycle?.contributionAmount
+                    ? `${t("drawLive.expectedEach", { each: formatEtbDisplay(cycle.contributionAmount) })} · `
+                    : ""}
+                  {t(`drawLive.role.${member.role}`)}
+                </span>
               </li>
             ))}
           </ul>
         </section>
 
-        <section className={CARD} aria-label={t("drawLive.sealTitle")} data-draw-panel="seal">
-          <h3 className={HEADING}>{t("drawLive.sealTitle")}</h3>
-          <p className={HINT}>{t("drawLive.sealDetail")}</p>
-          <label className="mt-2 block">
-            <span className={LABEL}>{t("drawLive.drawIdLabel")}</span>
-            <input
-              aria-label={t("drawLive.sealDrawIdLabel")}
-              className={FIELD}
-              value={sealDrawId}
-              onChange={(event) => setSealDrawId(event.target.value)}
-              spellCheck={false}
-              autoComplete="off"
-            />
-          </label>
-          {mySeal === null ? (
-            <button type="button" className={`${BUTTON} mt-3`} disabled={busy !== null} onClick={() => void seal()}>
-              {busy === "seal" ? t("drawLive.working") : t("drawLive.sealAction")}
-            </button>
+        <section className={CARD} aria-label={t("drawLive.cycleTitle")} data-draw-panel="cycle" data-testid="cycle-card">
+          <h3 className={HEADING}>{t("drawLive.cycleTitle")}</h3>
+          {cycles === null || cycles.length === 0 ? (
+            <p data-testid="cycle-none" className={HINT}>
+              {isTreasurer ? t("drawLive.cycleNoneTreasurer") : t("drawLive.cycleNoneMember")}
+            </p>
           ) : (
-            <div data-testid="my-seal">
-              <p className="mt-2 text-[12px] font-semibold text-[#065F46]">{t("drawLive.sealDone")}</p>
-              <CopyField label={t("drawLive.sealLineLabel")} value={sealLine(mySeal)} copyLabel={t("drawLive.copy")} />
-              {commitmentPublishedFor(wire, mySeal) ? (
-                <div data-testid="opening-released">
-                  <p className="mt-2 text-[12px] font-semibold text-[#065F46]">{t("drawLive.openingReady")}</p>
-                  <CopyField label={t("drawLive.openingLineLabel")} value={openingLine(mySeal)} copyLabel={t("drawLive.copy")} />
-                  <p className={HINT}>{t("drawLive.sealKeepSecret")}</p>
-                </div>
-              ) : (
-                // The opening is the one input the treasurer cannot grind over, so
-                // it is not even rendered until the commitment that fixes
-                // everything else is public and contains this member's seal.
-                <div data-testid="opening-locked">
-                  <p role="status" className="mt-2 rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2 text-[12px] font-semibold text-[#6B4E16]">
-                    {t("drawLive.openingLocked")}
-                  </p>
-                  {wire !== null && wire.round.drawId === mySeal.drawId ? (
-                    <p role="alert" className="mt-2 text-[12px] font-semibold text-[#863214]">
-                      {t("drawLive.openingMissing")}
+            <>
+              <label className="mt-2 block">
+                <span className={LABEL}>{t("drawLive.cyclePick")}</span>
+                <select
+                  data-testid="cycle-select"
+                  className={FIELD}
+                  value={cycleId ?? ""}
+                  disabled={busy !== null}
+                  onChange={(event) => void run("pick", () => loadCycle(event.target.value))}
+                >
+                  {cycles.map((entry) => (
+                    <option key={entry.cycleId} value={entry.cycleId}>
+                      {entry.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {cycle !== null ? (
+                <>
+                  <dl data-testid="cycle-terms" className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-[12px]">
+                    <dt className="text-[#6F625D]">{t("drawLive.cycleEach")}</dt>
+                    <dd data-testid="cycle-each" className="font-semibold">
+                      {cycle.contributionAmount === null
+                        ? t("drawLive.cycleEachUnknown")
+                        : `${formatEtbDisplay(cycle.contributionAmount)} ${copy.currency}`}
+                    </dd>
+                    <dt className="text-[#6F625D]">{t("drawLive.cyclePot")}</dt>
+                    <dd data-testid="cycle-pot" className="font-semibold">
+                      {formatEtbDisplay(cycle.potAmount)} {copy.currency}
+                      {potMembers(cycle) !== null ? ` (${t("drawLive.cyclePotMembers", { count: potMembers(cycle) ?? 0 })})` : ""}
+                    </dd>
+                    <dt className="text-[#6F625D]">{t("drawLive.cycleRounds")}</dt>
+                    <dd>{t("drawLive.cycleProgress", { done: cycle.roundsRevealed, total: cycle.totalRounds, paid: cycle.roundsPaid })}</dd>
+                    <dt className="text-[#6F625D]">{t("drawLive.cycleReserve")}</dt>
+                    <dd>{(cycle.reserveRatioBps / 100).toFixed(2)} %</dd>
+                    <dt className="text-[#6F625D]">{t("drawLive.cycleStarted")}</dt>
+                    <dd>{cycle.startedAt.slice(0, 10)}</dd>
+                  </dl>
+                  {potMembers(cycle) !== null && potMembers(cycle) !== readyGroup.members.length ? (
+                    <p data-testid="cycle-roster-drift" role="status" className={NOTICE}>
+                      {t("drawLive.cycleRosterDrift", { was: potMembers(cycle) ?? 0, now: readyGroup.members.length })}
                     </p>
-                  ) : noCommitmentYet ? (
-                    <p className="mt-2 text-[12px] text-[#6F625D]">{t("drawLive.openingNone")}</p>
                   ) : null}
-                  <button type="button" className={`${SECONDARY} mt-2`} disabled={busy !== null} onClick={() => void checkCommitment()}>
-                    {busy === "check" ? t("drawLive.working") : t("drawLive.openingCheck")}
-                  </button>
-                </div>
-              )}
-            </div>
+                </>
+              ) : null}
+            </>
           )}
+
+          {isTreasurer ? (
+            <details className="mt-3 rounded-xl border border-[#DCCFC7] bg-[#FAF7F2] px-3 py-2" open={cycles !== null && cycles.length === 0}>
+              <summary className="cursor-pointer text-[12px] font-semibold text-[#1C1410]">{t("drawLive.cycleCreateTitle")}</summary>
+              <div className="mt-2 space-y-2" data-testid="cycle-create-form">
+                <label className="block">
+                  <span className={LABEL}>{t("drawLive.cycleName")}</span>
+                  <input
+                    className={FIELD}
+                    value={cycleName}
+                    maxLength={120}
+                    onChange={(event) => {
+                      touchCycleForm();
+                      setCycleName(event.target.value);
+                    }}
+                  />
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="block">
+                    <span className={LABEL}>{t("drawLive.contributionLabel")}</span>
+                    <input
+                      className={FIELD}
+                      inputMode="decimal"
+                      value={contribution}
+                      onChange={(event) => {
+                        touchCycleForm();
+                        setContribution(event.target.value);
+                      }}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className={LABEL}>{t("drawLive.totalRoundsLabel")}</span>
+                    <input
+                      className={FIELD}
+                      inputMode="numeric"
+                      value={totalRounds}
+                      onChange={(event) => {
+                        touchCycleForm();
+                        setTotalRounds(event.target.value);
+                      }}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className={LABEL}>{t("drawLive.reserveLabel")}</span>
+                    <input
+                      className={FIELD}
+                      inputMode="decimal"
+                      value={reservePercent}
+                      onChange={(event) => {
+                        touchCycleForm();
+                        setReservePercent(event.target.value);
+                      }}
+                    />
+                  </label>
+                </div>
+                {normaliseAmount(contribution) !== null ? (
+                  <p data-testid="cycle-pot-preview" className="text-[12px] font-semibold text-[#1C1410]">
+                    {t("drawLive.cyclePotPreview", {
+                      pot: formatEtbDisplay(
+                        formatEtbMinorUnits(
+                          toEtbMinorUnits(normaliseAmount(contribution) as string, true) * BigInt(readyGroup.members.length)
+                        )
+                      ),
+                      count: readyGroup.members.length,
+                      each: formatEtbDisplay(normaliseAmount(contribution) as string)
+                    })}
+                  </p>
+                ) : null}
+                <p className={HINT}>{t("drawLive.cycleCreateHint")}</p>
+                <button type="button" className={BUTTON} disabled={busy !== null} onClick={() => void createCycleAction()}>
+                  {busy === "cycle" ? t("drawLive.working") : t("drawLive.cycleCreateAction")}
+                </button>
+              </div>
+            </details>
+          ) : null}
         </section>
 
-        {isTreasurer ? (
-          <section className={CARD} aria-label={t("drawLive.ceremonyTitle")} data-draw-panel="treasurer">
-            <h3 className={HEADING}>{t("drawLive.ceremonyTitle")}</h3>
-
-            {draft === null || draft.revealed ? (
-              <>
-                <p className={HINT}>{t("drawLive.openDetail")}</p>
-                <button type="button" className={`${BUTTON} mt-3`} onClick={openDraw}>
-                  {t("drawLive.openAction")}
-                </button>
-              </>
+        {cycle !== null ? (
+          <section className={CARD} aria-label={t("drawLive.ledgerTitle")} data-draw-panel="ledger" data-testid="ledger-figures">
+            <h3 className={HEADING}>{t("drawLive.ledgerTitle")}</h3>
+            {ledger === "loading" || ledger === null ? (
+              <p className={HINT}>{t("drawLive.ledgerLoading")}</p>
+            ) : ledger.status === "ready" ? (
+              <p data-testid="ledger-recorded" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
+                {t("drawLive.ledgerRecorded", {
+                  total: formatEtbDisplay(ledger.figures.total),
+                  currency: copy.currency,
+                  count: ledger.figures.count,
+                  date: cycle.startedAt.slice(0, 10)
+                })}
+              </p>
+            ) : ledger.status === "empty" ? (
+              <p data-testid="ledger-recorded" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
+                {t("drawLive.ledgerEmpty")}
+              </p>
+            ) : ledger.status === "incomplete" ? (
+              <p data-testid="ledger-recorded" className={NOTICE}>
+                {t("drawLive.ledgerIncomplete")}
+              </p>
             ) : (
-              <>
-                <CopyField label={t("drawLive.drawIdLabel")} value={draft.drawId} copyLabel={t("drawLive.copy")} />
-                <p className={HINT}>{t("drawLive.openShare")}</p>
-
-                {!draft.committed ? (
-                  <div className="mt-3 space-y-2" data-testid="commit-form">
-                    <div>
-                      <label className="block">
-                        <span className={LABEL}>{t("drawLive.cycleIdLabel")}</span>
-                        <input className={FIELD} value={cycleId} onChange={(e) => setCycleId(e.target.value)} spellCheck={false} />
-                      </label>
-                      <p className={HINT}>{t("drawLive.cycleIdHint")}</p>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <label className="block">
-                        <span className={LABEL}>{t("drawLive.roundLabel")}</span>
-                        <input className={FIELD} inputMode="numeric" value={round} onChange={(e) => setRound(e.target.value)} />
-                      </label>
-                      <label className="block">
-                        <span className={LABEL}>{t("drawLive.totalRoundsLabel")}</span>
-                        <input className={FIELD} inputMode="numeric" value={totalRounds} onChange={(e) => setTotalRounds(e.target.value)} />
-                      </label>
-                      <label className="block">
-                        <span className={LABEL}>{t("drawLive.contributionLabel")}</span>
-                        <input className={FIELD} inputMode="decimal" value={contribution} onChange={(e) => setContribution(e.target.value)} />
-                      </label>
-                      <label className="block">
-                        <span className={LABEL}>{t("drawLive.reserveLabel")}</span>
-                        <input className={FIELD} inputMode="decimal" value={reservePercent} onChange={(e) => setReservePercent(e.target.value)} />
-                      </label>
-                    </div>
-                    {potPreview !== null && eachNormalised !== null ? (
-                      <p data-testid="pot-preview" className="text-[12px] font-semibold text-[#1C1410]">
-                        {t("drawLive.potLine", {
-                          pot: formatEtbDisplay(potPreview),
-                          count: readyGroup.members.length,
-                          each: formatEtbDisplay(eachNormalised)
-                        })}
-                      </p>
-                    ) : null}
-                    <label className="block">
-                      <span className={LABEL}>{t("drawLive.sealsLabel")}</span>
-                      <textarea
-                        className={`${FIELD} min-h-24 font-mono text-[11px]`}
-                        value={sealsText}
-                        onChange={(e) => setSealsText(e.target.value)}
-                        spellCheck={false}
-                      />
-                    </label>
-                    {mySeal !== null && mySeal.drawId === draft.drawId ? (
-                      <button
-                        type="button"
-                        className={SECONDARY}
-                        onClick={() => setSealsText((text) => `${text.trim()}${text.trim() ? "\n" : ""}${sealLine(mySeal)}`)}
-                      >
-                        {t("drawLive.addMine")}
-                      </button>
-                    ) : null}
-                    <p className={HINT}>{t("drawLive.seedNote")}</p>
-                    <button type="button" className={BUTTON} disabled={busy !== null} onClick={() => void commit()}>
-                      {busy === "commit" ? t("drawLive.working") : t("drawLive.commitAction")}
-                    </button>
-                  </div>
-                ) : wire !== null && wire.round.state === "committed" ? (
-                  <div className="mt-3 space-y-2" data-testid="reveal-form">
-                    <p className="text-[12px] font-semibold text-[#065F46]">{t("drawLive.commitDone")}</p>
-                    <label className="block">
-                      <span className={LABEL}>{t("drawLive.openingsLabel")}</span>
-                      <textarea
-                        className={`${FIELD} min-h-24 font-mono text-[11px]`}
-                        value={openingsText}
-                        onChange={(e) => setOpeningsText(e.target.value)}
-                        spellCheck={false}
-                      />
-                    </label>
-                    {mySeal !== null && mySeal.drawId === draft.drawId ? (
-                      <button
-                        type="button"
-                        className={SECONDARY}
-                        onClick={() => setOpeningsText((text) => `${text.trim()}${text.trim() ? "\n" : ""}${openingLine(mySeal)}`)}
-                      >
-                        {t("drawLive.addMine")}
-                      </button>
-                    ) : null}
-                    <button type="button" className={BUTTON} disabled={busy !== null} onClick={() => void reveal()}>
-                      {busy === "reveal" ? t("drawLive.working") : t("drawLive.revealAction")}
-                    </button>
-                  </div>
-                ) : (
-                  <p className={HINT}>{t("drawLive.commitDone")}</p>
-                )}
-              </>
+              <p data-testid="ledger-recorded" className={NOTICE}>
+                {t("drawLive.ledgerUnavailable")}
+              </p>
             )}
+            <p data-testid="ledger-unattributed" className={HINT}>
+              {t("drawLive.ledgerNoMember")}
+            </p>
           </section>
         ) : null}
 
-        <section className={CARD} aria-label={t("drawLive.verifyTitle")} data-draw-panel="verify-live">
-          <h3 className={HEADING}>{t("drawLive.verifyTitle")}</h3>
-          <p className={HINT}>{t("drawLive.verifyDetail")}</p>
-          <label className="mt-2 block">
-            <span className={LABEL}>{t("drawLive.drawIdLabel")}</span>
-            <input
-              aria-label={t("drawLive.verifyDrawIdLabel")}
-              className={FIELD}
-              value={verifyDrawId}
-              onChange={(event) => setVerifyDrawId(event.target.value)}
-              spellCheck={false}
-            />
-          </label>
-          <button type="button" className={`${BUTTON} mt-3`} disabled={busy !== null} onClick={() => void verify()}>
-            {busy === "verify" ? t("drawLive.working") : t("drawLive.verifyAction")}
-          </button>
-        </section>
+        {cycle !== null && detail !== null ? (
+          <section className={CARD} aria-label={t("drawLive.drawsTitle")} data-draw-panel="draws" data-testid="draw-list">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className={HEADING}>{t("drawLive.drawsTitle")}</h3>
+              <button type="button" className={SECONDARY} disabled={busy !== null} onClick={() => void refresh()}>
+                {busy === "refresh" ? t("drawLive.working") : t("drawLive.refresh")}
+              </button>
+            </div>
+            {detail.draws.length === 0 ? (
+              <p className={HINT}>{t("drawLive.drawsNone")}</p>
+            ) : (
+              <ul className="mt-2 space-y-1">
+                {detail.draws.map((entry) => (
+                  <li key={entry.drawId}>
+                    <button
+                      type="button"
+                      data-testid={`draw-row-${entry.drawId}`}
+                      aria-pressed={entry.drawId === drawId}
+                      disabled={busy !== null}
+                      onClick={() => void run("pick", () => selectDraw(entry))}
+                      className={[
+                        "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px]",
+                        entry.drawId === drawId ? "bg-[#ECFDF5] ring-1 ring-[#A7F3D0]" : "bg-[#F5EFEB]"
+                      ].join(" ")}
+                    >
+                      <span className="font-semibold">
+                        {t("drawLive.drawRow", { round: entry.round })} · {stateLabel(entry.state)}
+                        {entry.superseded ? ` · ${t("drawLive.drawSuperseded")}` : ""}
+                        {entry.legacy ? ` · ${t("drawLive.drawLegacy")}` : ""}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-[#6F625D]">
+                        {entry.state === "sealing"
+                          ? t("drawLive.drawSealCount", { count: entry.sealCount })
+                          : entry.state === "committed"
+                            ? t("drawLive.drawReleaseCount", { count: entry.nonceCount, total: entry.sealCount })
+                            : entry.winnerMemberId !== null
+                              ? labelFor(entry.winnerMemberId)
+                              : ""}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {isTreasurer && cycle.nextRound !== null && !liveSealingForNext ? (
+              <>
+                <p className={HINT}>{t("drawLive.openDetail")}</p>
+                <button type="button" data-testid="open-draw" className={`${BUTTON} mt-2`} disabled={busy !== null} onClick={() => void openDrawAction()}>
+                  {busy === "open" ? t("drawLive.working") : t("drawLive.openAction", { round: cycle.nextRound })}
+                </button>
+              </>
+            ) : null}
+            {cycle.nextRound === null ? <p className={HINT}>{t("drawLive.cycleComplete")}</p> : null}
+          </section>
+        ) : null}
+
+        {session !== null ? (
+          <DrawPanel
+            t={t}
+            session={session}
+            myUserId={myUserId}
+            mySeal={mySeal}
+            draft={draft}
+            isTreasurer={isTreasurer}
+            busy={busy}
+            labelFor={labelFor}
+            onSeal={() => void sealAction()}
+            onRelease={() => void releaseAction()}
+            onCommit={() => void commitAction()}
+            onReveal={() => void revealAction()}
+          />
+        ) : drawId !== null && detail?.draws.find((entry) => entry.drawId === drawId)?.legacy ? (
+          <section className={CARD} data-draw-panel="legacy">
+            <p className={HINT}>{t("drawLive.legacyNote")}</p>
+          </section>
+        ) : null}
 
         {wire !== null && check !== null ? (
           <>
             <ComparePanel t={t} wire={wire} check={check} labelFor={labelFor} />
             {check.revealed ? (
-              <VerifyPanel transcript={wire.transcript} verification={check.local} isRunning={false} error={null} />
+              <VerifyPanel locale={locale} transcript={wire.transcript} verification={check.local} isRunning={false} error={null} />
             ) : null}
             {check.risk !== null && check.trusted ? (
-              <RiskPanel risk={check.risk} currencyLabel={copy.currency} />
+              <RiskPanel locale={locale} risk={check.risk} currencyLabel={copy.currency} />
             ) : null}
           </>
         ) : null}
@@ -727,7 +893,7 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
                   type="button"
                   className={`${BUTTON} mt-3`}
                   disabled={!confirmPayout || busy !== null}
-                  onClick={() => void payout()}
+                  onClick={() => void payoutAction()}
                 >
                   {busy === "payout" ? t("drawLive.working") : t("drawLive.payoutAction")}
                 </button>
@@ -744,13 +910,203 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
   );
 }
 
+type Translate = (key: DrawLiveKey, variables?: Record<string, string | number>) => string;
+
+/**
+ * One draw in progress: who has sealed, who has released, and what THIS member
+ * and the treasurer can do at this point. Every button is offered only in the
+ * state in which the server will accept it, and the server refuses it otherwise.
+ */
+function DrawPanel({
+  t,
+  session,
+  myUserId,
+  mySeal,
+  draft,
+  isTreasurer,
+  busy,
+  labelFor,
+  onSeal,
+  onRelease,
+  onCommit,
+  onReveal
+}: {
+  readonly t: Translate;
+  readonly session: DrawSessionView;
+  readonly myUserId: string | null;
+  readonly mySeal: MySeal | null;
+  readonly draft: DrawDraft | null;
+  readonly isTreasurer: boolean;
+  readonly busy: string | null;
+  readonly labelFor: (memberId: string) => string;
+  readonly onSeal: () => void;
+  readonly onRelease: () => void;
+  readonly onCommit: () => void;
+  readonly onReveal: () => void;
+}) {
+  const eligible = session.eligible;
+  const sealedIds = new Set(session.seals.map((seal) => seal.memberId));
+  const releasedIds = new Set(session.nonces.filter((entry) => entry.released).map((entry) => entry.memberId));
+  const sealedCount = eligible.filter((id) => sealedIds.has(id)).length;
+  const sealedMembers = session.seals.map((seal) => seal.memberId);
+  const releasedCount = sealedMembers.filter((id) => releasedIds.has(id)).length;
+  const sealing = session.state === "sealing";
+  const committed = session.state === "committed";
+
+  const iAmEligible = myUserId !== null && eligible.includes(myUserId);
+  const standing = sealStanding(session, mySeal, myUserId);
+  const iReleased = myUserId !== null && releasedIds.has(myUserId);
+  const othersSealed = eligible.filter((id) => id !== myUserId && sealedIds.has(id)).length;
+  // With nobody else to seal there is nothing to choose, so a lone committer may proceed.
+  const needsOther = eligible.length > 1 && othersSealed < 1;
+  const pending = sealedMembers.length - releasedCount;
+
+  return (
+    <section className={CARD} aria-label={t("drawLive.mineTitle")} data-draw-panel="draw" data-testid="draw-panel">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className={HEADING}>
+          {t("drawLive.drawRow", { round: session.round })} · {t(`drawLive.lifecycle.${session.state}`)}
+        </h3>
+        <span className="text-[11px] text-[#6F625D]">{shortId(session.drawId)}</span>
+      </div>
+
+      {sealing ? (
+        <p data-testid="seal-progress" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
+          {t("drawLive.sealProgress", { sealed: sealedCount, total: eligible.length })}
+        </p>
+      ) : (
+        <p data-testid="nonce-progress" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
+          {t("drawLive.nonceProgress", { released: releasedCount, total: sealedMembers.length })}
+        </p>
+      )}
+      <ul className="mt-2 space-y-1">
+        {eligible.map((id) => (
+          <li key={id} className="flex items-center justify-between gap-2 rounded-lg bg-[#F5EFEB] px-2.5 py-1.5 text-[12px]">
+            <span className="min-w-0 truncate">{labelFor(id)}</span>
+            <span className="shrink-0 text-[11px] text-[#6F625D]">
+              {sealedIds.has(id) ? t("drawLive.badge.sealed") : t("drawLive.badge.notSealed")}
+              {!sealing && sealedIds.has(id)
+                ? ` · ${releasedIds.has(id) ? t("drawLive.badge.released") : t("drawLive.badge.notReleased")}`
+                : ""}
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      {/* This member's part. The nonce itself is never rendered. */}
+      <div data-testid="my-part" className="mt-3 border-t border-dashed border-[#E4D9CE] pt-3">
+        <h4 className="text-[12px] font-bold text-[#1C1410]">{t("drawLive.mineTitle")}</h4>
+        <p className={HINT}>{t("drawLive.mineDetail")}</p>
+
+        {myUserId === null || !iAmEligible ? (
+          sealing || committed ? (
+            <p data-testid="not-eligible" className={NOTICE}>
+              {t("drawLive.sealNotEligible")}
+            </p>
+          ) : null
+        ) : sealing ? (
+          standing === "none" ? (
+            <button type="button" data-testid="seal-button" className={`${BUTTON} mt-2`} disabled={busy !== null} onClick={onSeal}>
+              {busy === "seal" ? t("drawLive.working") : t("drawLive.sealAction")}
+            </button>
+          ) : standing === "mine" ? (
+            <div data-testid="my-seal">
+              <p className={GOOD}>{t("drawLive.sealDone")}</p>
+              <p data-testid="release-locked" className={NOTICE}>
+                {t("drawLive.releaseWait")}
+              </p>
+              <p className={HINT}>{t("drawLive.keepSecret")}</p>
+            </div>
+          ) : (
+            <div data-testid="seal-mismatch">
+              <p role="alert" className={BAD}>
+                {mySeal === null ? t("drawLive.releaseNoLocal") : t("drawLive.sealMismatch")}
+              </p>
+              <button type="button" data-testid="seal-replace-button" className={`${SECONDARY} mt-2`} disabled={busy !== null} onClick={onSeal}>
+                {busy === "seal" ? t("drawLive.working") : t("drawLive.sealReplaceAction")}
+              </button>
+            </div>
+          )
+        ) : committed ? (
+          standing === "none" ? (
+            <p data-testid="seal-closed" className={NOTICE}>
+              {mySeal === null ? t("drawLive.sealClosed") : t("drawLive.releaseMissingSeal")}
+            </p>
+          ) : standing === "other" ? (
+            <p role="alert" data-testid="release-blocked" className={BAD}>
+              {mySeal === null ? t("drawLive.releaseNoLocal") : t("drawLive.releaseMismatch")}
+            </p>
+          ) : iReleased ? (
+            <p data-testid="release-done" className={GOOD}>
+              {t("drawLive.releaseDone")}
+            </p>
+          ) : session.revealRequested ? (
+            <p className={NOTICE}>{t("drawLive.releaseClosed")}</p>
+          ) : (
+            <div data-testid="release-ready">
+              <p className={GOOD}>{t("drawLive.releaseReady")}</p>
+              <button type="button" data-testid="release-button" className={`${BUTTON} mt-2`} disabled={busy !== null} onClick={onRelease}>
+                {busy === "release" ? t("drawLive.working") : t("drawLive.releaseAction")}
+              </button>
+              <p className={HINT}>{t("drawLive.keepSecret")}</p>
+            </div>
+          )
+        ) : null}
+      </div>
+
+      {isTreasurer && sealing ? (
+        <div data-testid="commit-form" className="mt-3 space-y-2 border-t border-dashed border-[#E4D9CE] pt-3">
+          <h4 className="text-[12px] font-bold text-[#1C1410]">{t("drawLive.ceremonyTitle")}</h4>
+          <p className={HINT}>{t("drawLive.commitDetail")}</p>
+          {needsOther ? (
+            <p data-testid="commit-needs-other" role="status" className={NOTICE}>
+              {t("drawLive.commitNeedOther")}
+            </p>
+          ) : null}
+          <p className={HINT}>{t("drawLive.seedNote")}</p>
+          <button type="button" data-testid="commit-button" className={BUTTON} disabled={busy !== null || needsOther} onClick={onCommit}>
+            {busy === "commit" ? t("drawLive.working") : t("drawLive.commitAction")}
+          </button>
+        </div>
+      ) : null}
+
+      {isTreasurer && committed ? (
+        <div data-testid="reveal-form" className="mt-3 space-y-2 border-t border-dashed border-[#E4D9CE] pt-3">
+          <h4 className="text-[12px] font-bold text-[#1C1410]">{t("drawLive.ceremonyTitle")}</h4>
+          <p className={GOOD}>{t("drawLive.commitDone")}</p>
+          <p className={HINT}>{t("drawLive.revealDetail")}</p>
+          {pending > 0 ? (
+            <p data-testid="reveal-waiting" role="status" className={NOTICE}>
+              {t("drawLive.revealWaiting", { pending })}
+            </p>
+          ) : null}
+          {draft === null || draft.seed === "" ? (
+            <p role="alert" className={BAD}>
+              {t("drawLive.revealNoSeed")}
+            </p>
+          ) : null}
+          <button
+            type="button"
+            data-testid="reveal-button"
+            className={BUTTON}
+            disabled={busy !== null || pending > 0 || draft === null || draft.seed === ""}
+            onClick={onReveal}
+          >
+            {busy === "reveal" ? t("drawLive.working") : t("drawLive.revealAction")}
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function ComparePanel({
   t,
   wire,
   check,
   labelFor
 }: {
-  readonly t: (key: DrawLiveKey, variables?: Record<string, string | number>) => string;
+  readonly t: Translate;
   readonly wire: WireVerify;
   readonly check: BrowserCheck;
   readonly labelFor: (memberId: string) => string;

@@ -327,10 +327,11 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
             </div>
           </div>
 
-          {risk !== null ? <RiskPanel risk={risk} currencyLabel={copy.currency} /> : null}
+          {risk !== null ? <RiskPanel locale={locale} risk={risk} currencyLabel={copy.currency} /> : null}
 
           {transcript !== null ? (
             <VerifyPanel
+              locale={locale}
               transcript={transcript}
               verification={verification}
               isRunning={isVerifying}

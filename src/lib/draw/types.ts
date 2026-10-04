@@ -51,6 +51,12 @@ export const DRAW_ERROR_CODES = [
   "ALREADY_COMMITTED",
   "ALREADY_REVEALED",
   "NOT_COMMITTED",
+  /** A member tried to seal while not on this round's eligible roster (for example, they already won). */
+  "NOT_ELIGIBLE",
+  /** A nonce was submitted before the commitment that fixes everything else was published. */
+  "NONCE_TOO_EARLY",
+  /** Every round of the cycle has been drawn, or the cycle is closed. */
+  "CYCLE_COMPLETE",
   "IDEMPOTENCY_CONFLICT",
   "UNIFORMITY_EXHAUSTED",
   "UNAVAILABLE",
@@ -213,6 +219,12 @@ export interface DrawVerificationError {
   readonly detail: string;
 }
 
+/** A non-fatal governance concern, as data (see {@link DrawVerificationResult.warningItems}). */
+export type DrawVerificationWarning =
+  | { readonly code: "abandoned_commitments"; readonly count: number }
+  | { readonly code: "recorded_winner_mismatch" }
+  | { readonly code: "recorded_digest_mismatch" };
+
 export interface DrawVerificationResult {
   /**
    * `true` only when every independent cryptographic check passed. A member may
@@ -227,6 +239,8 @@ export interface DrawVerificationResult {
    * decision the service applies policy to.
    */
   readonly warnings: readonly string[];
+  /** The same concerns as `warnings`, structured so the screen can localise them. */
+  readonly warningItems?: readonly DrawVerificationWarning[];
   readonly winnerMemberId: string | null;
   readonly winningTicket: string | null;
   readonly selectedIndex: number | null;
@@ -239,6 +253,19 @@ export interface DrawVerificationResult {
   readonly recomputedCommitment: string | null;
   readonly errors: readonly DrawVerificationError[];
 }
+
+/**
+ * One line of reasoning behind the reserve, as data, so the screen can say it in
+ * the member's language. The English `notes` strings are kept alongside for
+ * logs and for callers that predate this field.
+ */
+export type DrawRiskNote =
+  | { readonly code: "base_reserve"; readonly amount: string; readonly bps: number }
+  | { readonly code: "member_exposure"; readonly amount: string }
+  | { readonly code: "final_round" }
+  | { readonly code: "capped"; readonly needed: string; readonly ceilingBps: number }
+  | { readonly code: "coverage"; readonly percent: string; readonly owed: string }
+  | { readonly code: "cannot_absorb" };
 
 export interface DrawRiskAssessment {
   readonly drawId: string;
@@ -261,6 +288,8 @@ export interface DrawRiskAssessment {
   readonly reserveCoversDefaults: number;
   readonly reserveAdequate: boolean;
   readonly notes: readonly string[];
+  /** The same reasoning as `notes`, structured for localisation. */
+  readonly noteItems?: readonly DrawRiskNote[];
 }
 
 export function isDrawRoundState(value: string | null | undefined): value is DrawRoundState {
@@ -271,4 +300,86 @@ export function isDrawVerificationCode(
   value: string | null | undefined
 ): value is DrawVerificationCode {
   return typeof value === "string" && (DRAW_VERIFICATION_CODES as readonly string[]).includes(value);
+}
+
+// -- cycles, draws and the sealing lifecycle ---------------------------------------
+
+/**
+ * Where a draw is. Derived in the database from which rows exist, never stored:
+ * `sealing` (opened, members sealing) -> `committed` (sealed set frozen, nonces
+ * may be released) -> `revealed` -> `paid`.
+ */
+export const DRAW_LIFECYCLE_STATES = ["sealing", "committed", "revealed", "paid"] as const;
+export type DrawLifecycleState = (typeof DRAW_LIFECYCLE_STATES)[number];
+
+export function isDrawLifecycleState(value: unknown): value is DrawLifecycleState {
+  return typeof value === "string" && (DRAW_LIFECYCLE_STATES as readonly string[]).includes(value);
+}
+
+/** A draw cycle as the database defines it. Amounts are ETB strings with two decimals. */
+export interface DrawCycleRecord {
+  readonly cycleId: string;
+  readonly groupId: string;
+  readonly name: string;
+  /** Per-member contribution per round. Null only for a cycle that predates the column. */
+  readonly contributionAmount: string | null;
+  /** Contribution times the active members when the cycle was created. */
+  readonly potAmount: string;
+  readonly totalRounds: number;
+  readonly reserveRatioBps: number;
+  readonly startedAt: string;
+  readonly closedAt: string | null;
+  readonly createdAt: string;
+  readonly roundsRevealed: number;
+  readonly roundsPaid: number;
+  /** The round the next draw would be, or null when every round has been drawn. */
+  readonly nextRound: number | null;
+}
+
+/** One draw in a cycle's listing. */
+export interface DrawListEntry {
+  readonly drawId: string;
+  readonly round: number;
+  readonly state: DrawLifecycleState;
+  readonly openedAt: string;
+  readonly committedAt: string | null;
+  readonly revealedAt: string | null;
+  readonly winnerMemberId: string | null;
+  readonly sealCount: number;
+  /** How many members have released a nonce. A count only; never a value. */
+  readonly nonceCount: number;
+  readonly revealRequested: boolean;
+  /** A later draw was opened for the same round, so this one was abandoned. */
+  readonly superseded: boolean;
+  /** Committed before server-created draws existed. Readable, but not completable here. */
+  readonly legacy: boolean;
+}
+
+/** A member's seal: the hash only. */
+export interface DrawSessionSeal {
+  readonly memberId: string;
+  readonly sealed: string;
+  readonly sealedAt?: string;
+}
+
+/**
+ * Everything members may see of a draw in progress: the seal hashes, and for each
+ * sealed member only whether they have released a nonce.
+ */
+export interface DrawSessionView {
+  readonly drawId: string;
+  readonly groupId: string;
+  readonly cycleId: string;
+  readonly round: number;
+  readonly state: DrawLifecycleState;
+  readonly openedBy: string;
+  readonly openedAt: string;
+  readonly committedAt: string | null;
+  readonly cycle: DrawCycleRecord;
+  /** Members who may seal this round (active, not yet drawn this cycle). */
+  readonly eligible: readonly string[];
+  readonly seals: readonly DrawSessionSeal[];
+  readonly nonces: readonly { readonly memberId: string; readonly released: boolean }[];
+  /** The reveal was requested: the seed and nonces are public to the group. */
+  readonly revealRequested: boolean;
 }

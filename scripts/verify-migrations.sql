@@ -719,12 +719,16 @@ begin
     raise exception 'RPC 6 FAILED: an old commit_draw_v1 arity still exists';
   end if;
 
-  if not has_function_privilege(
+  -- 20261005100000_draw_cycles_and_member_seals.sql takes commit_draw_v1 away
+  -- from clients: it accepted a sealed set from the caller, which is exactly what
+  -- the stored seals replace. It stays callable by the database owner (this
+  -- harness) so the pre-session checks above still run.
+  if has_function_privilege(
     'authenticated',
     'public.commit_draw_v1(uuid, uuid, integer, uuid, text, text, text, text, jsonb, jsonb, numeric, integer, integer, text, timestamptz, text)',
     'EXECUTE'
   ) then
-    raise exception 'RPC 7 FAILED: authenticated cannot execute the new commit_draw_v1';
+    raise exception 'RPC 7 FAILED: authenticated can still execute the client-seals commit_draw_v1';
   end if;
 
   if has_function_privilege(
@@ -2360,3 +2364,817 @@ end $$;
 reset role;
 rollback;
 select 'ALL RECONCILIATION REAPER CHECKS PASSED' as result;
+
+-- ===========================================================================
+-- Draw cycles, server-created draws, and member seal / nonce submission
+-- (20261005100000_draw_cycles_and_member_seals.sql)
+--
+-- Every call below runs as `authenticated` with a JWT whose `sub` is the caller,
+-- as PostgREST does; the fixtures that need superuser (memberships, hashes the
+-- clients are not allowed to compute) are built outside that role. Cast:
+--
+--   own  a1..01  owner of group A (provisions it)
+--   tre  a1..02  treasurer of group A
+--   mb1  a1..03  plain member, seals and releases a nonce
+--   mb2  a1..04  plain member, seals and releases a nonce
+--   out  a1..05  owner of a DIFFERENT group B; no part in group A
+--
+-- Failure raises, so any ERROR in the output is a real failure. Success prints:
+-- ALL DRAW CYCLE AND SEAL CHECKS PASSED
+-- ===========================================================================
+insert into auth.users (id, email) values
+  ('a1a1a1a1-0000-4000-8000-000000000001', 'cyc-owner@example.test'),
+  ('a1a1a1a1-0000-4000-8000-000000000002', 'cyc-treasurer@example.test'),
+  ('a1a1a1a1-0000-4000-8000-000000000003', 'cyc-member1@example.test'),
+  ('a1a1a1a1-0000-4000-8000-000000000004', 'cyc-member2@example.test'),
+  ('a1a1a1a1-0000-4000-8000-000000000005', 'cyc-outsider@example.test')
+on conflict (id) do nothing;
+
+-- Run one statement as a user under a role and report what happened: the result
+-- text, or 'ERR:' || the error message (plus SQLSTATE). Role switching lives in
+-- one place so a check cannot forget to reset it.
+create or replace function pg_temp.call_as(p_uid uuid, p_role text, p_stmt text)
+returns text
+language plpgsql
+as $$
+declare
+  res text;
+begin
+  perform set_config('request.jwt.claim.role', p_role, false);
+  perform set_config('request.jwt.claim.sub', coalesce(p_uid::text, ''), false);
+  perform set_config('request.jwt.claims',
+    case when p_uid is null then '{}' else '{"sub":"' || p_uid::text || '"}' end, false);
+  execute format('set local role %I', p_role);
+  begin
+    execute p_stmt into res;
+  exception when others then
+    res := 'ERR:' || sqlerrm || ' [' || sqlstate || ']';
+  end;
+  reset role;
+  return coalesce(res, 'NULL');
+end;
+$$;
+
+create or replace function pg_temp.expect_err(p_result text, p_needle text, p_label text)
+returns void
+language plpgsql
+as $$
+begin
+  if p_result not like 'ERR:%' then
+    raise exception '% FAILED: expected a refusal containing "%" but the call SUCCEEDED: %',
+      p_label, p_needle, left(p_result, 200);
+  end if;
+  if p_result not like '%' || p_needle || '%' then
+    raise exception '% FAILED: refused for the wrong reason (wanted "%"): %', p_label, p_needle, p_result;
+  end if;
+end;
+$$;
+
+create or replace function pg_temp.expect_ok(p_result text, p_label text)
+returns jsonb
+language plpgsql
+as $$
+begin
+  if p_result like 'ERR:%' then
+    raise exception '% FAILED: the call was refused: %', p_label, p_result;
+  end if;
+  return p_result::jsonb;
+end;
+$$;
+
+do $cycles$
+declare
+  own constant uuid := 'a1a1a1a1-0000-4000-8000-000000000001';
+  tre constant uuid := 'a1a1a1a1-0000-4000-8000-000000000002';
+  mb1 constant uuid := 'a1a1a1a1-0000-4000-8000-000000000003';
+  mb2 constant uuid := 'a1a1a1a1-0000-4000-8000-000000000004';
+  out constant uuid := 'a1a1a1a1-0000-4000-8000-000000000005';
+  group_a uuid;
+  group_b uuid;
+  cycle_id uuid;
+  r text;
+  j jsonb;
+begin
+  -- Fixtures. Owner provisions group A; the others are added as members. The
+  -- outsider provisions their own group B.
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
+  perform set_config('request.jwt.claim.sub', own::text, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own::text || '"}', false);
+  set local role authenticated;
+  group_a := (public.sened_ledger_provision_group_v1('Cycle test equb A') ->> 'groupId')::uuid;
+  reset role;
+  perform set_config('request.jwt.claim.sub', out::text, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || out::text || '"}', false);
+  set local role authenticated;
+  group_b := (public.sened_ledger_provision_group_v1('Cycle test equb B') ->> 'groupId')::uuid;
+  reset role;
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status) values
+    (group_a, own, tre, 'treasurer', 'active'),
+    (group_a, own, mb1, 'member', 'active'),
+    (group_a, own, mb2, 'member', 'active');
+
+  -- CYCLE 1. The owner creates a cycle. The pot is the contribution times the
+  -- active members, computed in the database, not typed.
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 4, 1000, null, %L)::text',
+    group_a, 'Meskerem equb', '1000.00', 'cyc-create-1')), 'CYCLE 1');
+  cycle_id := (j -> 'cycle' ->> 'cycleId')::uuid;
+  if j ->> 'replayed' <> 'false'
+     or j -> 'cycle' ->> 'potAmount' <> '4000.00'
+     or j -> 'cycle' ->> 'contributionAmount' <> '1000.00'
+     or (j -> 'cycle' ->> 'totalRounds')::int <> 4
+     or (j -> 'cycle' ->> 'nextRound')::int <> 1
+     or (j -> 'cycle' ->> 'reserveRatioBps')::int <> 1000 then
+    raise exception 'CYCLE 1 FAILED: unexpected cycle %', j;
+  end if;
+
+  -- CYCLE 2. Idempotent: the same key replays; the same key with different
+  -- terms is a conflict, never a silent second cycle.
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 4, 1000, null, %L)::text',
+    group_a, 'Meskerem equb', '1000.00', 'cyc-create-1')), 'CYCLE 2');
+  if j ->> 'replayed' <> 'true' or (j -> 'cycle' ->> 'cycleId')::uuid <> cycle_id then
+    raise exception 'CYCLE 2 FAILED: the retry did not replay: %', j;
+  end if;
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 4, 1000, null, %L)::text',
+    group_a, 'Meskerem equb', '2000.00', 'cyc-create-1')), 'draw_idempotency_conflict', 'CYCLE 2b');
+  if (select count(*) from public.draw_cycles where group_id = group_a and idempotency_key = 'cyc-create-1') <> 1 then
+    raise exception 'CYCLE 2 FAILED: a second cycle was created';
+  end if;
+
+  -- CYCLE 3. Role refusal: a plain member, an outsider (owner of another group),
+  -- and anon cannot create a cycle in group A. A treasurer can.
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 2, 1000, null, %L)::text',
+    group_a, 'x', '10.00', 'cyc-mb')), 'draw_forbidden', 'CYCLE 3 member');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 1, 1000, null, %L)::text',
+    group_a, 'x', '10.00', 'cyc-out')), 'draw_forbidden', 'CYCLE 3 outsider');
+  perform pg_temp.expect_err(pg_temp.call_as(null, 'anon', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 1, 1000, null, %L)::text',
+    group_a, 'x', '10.00', 'cyc-anon')), 'permission denied', 'CYCLE 3 anon');
+  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 2, 500, null, %L)::text',
+    group_a, 'Tikimt equb', '250.50', 'cyc-tre')), 'CYCLE 3 treasurer');
+  if exists (select 1 from public.draw_cycles where group_id = group_a and idempotency_key in ('cyc-mb', 'cyc-out', 'cyc-anon')) then
+    raise exception 'CYCLE 3 FAILED: a refused call still created a cycle';
+  end if;
+
+  -- CYCLE 4. Bad terms are refused: more rounds than members, a non-positive or
+  -- sub-cent contribution, a blank name, an out-of-range reserve.
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 5, 1000, null, %L)::text',
+    group_a, 'too long', '100.00', 'cyc-bad-1')), 'draw_cycle_rounds_exceed_members', 'CYCLE 4 rounds');
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 2, 1000, null, %L)::text',
+    group_a, 'zero', '0', 'cyc-bad-2')), 'draw_invalid_request', 'CYCLE 4 zero');
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 2, 1000, null, %L)::text',
+    group_a, 'sub-cent', '10.001', 'cyc-bad-3')), 'draw_invalid_request', 'CYCLE 4 sub-cent');
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 2, 1000, null, %L)::text',
+    group_a, '   ', '10.00', 'cyc-bad-4')), 'draw_invalid_request', 'CYCLE 4 blank');
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 2, 3334, null, %L)::text',
+    group_a, 'reserve', '10.00', 'cyc-bad-5')), 'draw_invalid_request', 'CYCLE 4 reserve');
+
+  -- CYCLE 5. Reading. Any member lists cycles and reads one; an outsider is
+  -- refused on both (cross-group isolation), and cannot tell a real cycle from
+  -- an invented one.
+  j := pg_temp.expect_ok(pg_temp.call_as(mb2, 'authenticated', format(
+    'select public.list_draw_cycles_v1(%L)::text', group_a)), 'CYCLE 5 list');
+  if jsonb_array_length(j) <> 2 then
+    raise exception 'CYCLE 5 FAILED: a member should see both cycles, saw %', jsonb_array_length(j);
+  end if;
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.list_draw_cycles_v1(%L)::text', group_a)), 'draw_forbidden', 'CYCLE 5 outsider list');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.get_draw_cycle_v1(%L)::text', cycle_id)), 'draw_forbidden', 'CYCLE 5 outsider get');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.get_draw_cycle_v1(%L)::text', 'a1a1a1a1-0000-4000-8000-0000000000ff')), 'draw_forbidden', 'CYCLE 5 unknown');
+  j := pg_temp.expect_ok(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.get_draw_cycle_v1(%L)::text', cycle_id)), 'CYCLE 5 get');
+  if jsonb_array_length(j -> 'draws') <> 0 or j -> 'cycle' ->> 'name' <> 'Meskerem equb' then
+    raise exception 'CYCLE 5 FAILED: unexpected cycle read %', j;
+  end if;
+  -- The group B owner sees group B's (empty) list, and none of A's.
+  j := pg_temp.expect_ok(pg_temp.call_as(out, 'authenticated', format(
+    'select public.list_draw_cycles_v1(%L)::text', group_b)), 'CYCLE 5 own group');
+  if jsonb_array_length(j) <> 0 then
+    raise exception 'CYCLE 5 FAILED: group B listed cycles it does not own';
+  end if;
+
+  perform set_config('sened.test.group_a', group_a::text, false);
+  perform set_config('sened.test.group_b', group_b::text, false);
+  perform set_config('sened.test.cycle', cycle_id::text, false);
+end;
+$cycles$;
+
+do $lifecycle$
+declare
+  own constant uuid := 'a1a1a1a1-0000-4000-8000-000000000001';
+  tre constant uuid := 'a1a1a1a1-0000-4000-8000-000000000002';
+  mb1 constant uuid := 'a1a1a1a1-0000-4000-8000-000000000003';
+  mb2 constant uuid := 'a1a1a1a1-0000-4000-8000-000000000004';
+  out constant uuid := 'a1a1a1a1-0000-4000-8000-000000000005';
+  group_a constant uuid := current_setting('sened.test.group_a')::uuid;
+  group_b constant uuid := current_setting('sened.test.group_b')::uuid;
+  cycle_id constant uuid := current_setting('sened.test.cycle')::uuid;
+  nonce1 constant text := 'mb1-secret-nonce-0123456789-AAAA';
+  nonce2 constant text := 'mb2-secret-nonce-0123456789-BBBB';
+  commit_seed constant text := 'treasurer-seed-0123456789-ZZZZ';
+  commit_nonce constant text := 'treasurer-commit-nonce-0123456789';
+  draw uuid;
+  seal1 text;
+  seal2 text;
+  other_seal text;
+  participants jsonb;
+  member_digest text;
+  commitment text;
+  roster_digest constant text := repeat('9', 64);
+  winner jsonb;
+  j jsonb;
+  r text;
+  stmt text;
+  opened jsonb;
+begin
+  -- STATE 1. Opening a draw: a plain member and an outsider cannot; the owner
+  -- can. The draw id is created by the server and starts in SEALING.
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cycle_id, 'open-mb')), 'draw_forbidden', 'STATE 1 member');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cycle_id, 'open-out')), 'draw_forbidden', 'STATE 1 outsider');
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cycle_id, 'open-r1')), 'STATE 1 owner');
+  draw := (j -> 'session' ->> 'drawId')::uuid;
+  if j ->> 'replayed' <> 'false'
+     or j -> 'session' ->> 'state' <> 'sealing'
+     or (j -> 'session' ->> 'round')::int <> 1
+     or jsonb_array_length(j -> 'session' -> 'eligible') <> 4
+     or jsonb_array_length(j -> 'session' -> 'seals') <> 0 then
+    raise exception 'STATE 1 FAILED: unexpected new draw %', j;
+  end if;
+
+  -- STATE 2. Opening again continues the same draw (same key or a new key), and
+  -- a round out of order is refused.
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cycle_id, 'open-r1')), 'STATE 2 replay');
+  if (j -> 'session' ->> 'drawId')::uuid <> draw or j ->> 'replayed' <> 'true' then
+    raise exception 'STATE 2 FAILED: the same key did not replay %', j;
+  end if;
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cycle_id, 'open-r1-again')), 'STATE 2 new key');
+  if (j -> 'session' ->> 'drawId')::uuid <> draw then
+    raise exception 'STATE 2 FAILED: a second sealing draw was created for the same round';
+  end if;
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.open_draw_v1(%L, 2, %L)::text', cycle_id, 'open-r2-early')), 'draw_round_out_of_order', 'STATE 2 order');
+
+  -- NONCE 1. A nonce is refused before the commitment exists, whatever it is.
+  seal1 := public.sened_draw_member_seal_hash(draw, mb1, nonce1);
+  seal2 := public.sened_draw_member_seal_hash(draw, mb2, nonce2);
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce1)), 'draw_nonce_too_early', 'NONCE 1');
+  if exists (select 1 from public.draw_nonces where draw_id = draw) then
+    raise exception 'NONCE 1 FAILED: a nonce was stored before the commit';
+  end if;
+
+  -- SEAL 1. A commit with no seal at all is refused.
+  participants := (
+    select jsonb_agg(jsonb_build_object(
+      'memberId', e.member_id, 'displayName', 'Member ' || left(e.member_id::text, 8),
+      'contributionAmount', '1000.00',
+      'ticket', public.sened_draw_ticket(group_a, cycle_id, e.member_id)) order by e.member_id::text)
+    from public.sened_draw_eligible_members(group_a, cycle_id, 1) as e(member_id));
+  member_digest := public.sened_draw_member_set_digest(draw, jsonb_build_array(
+    jsonb_build_object('memberId', mb1, 'sealed', seal1),
+    jsonb_build_object('memberId', mb2, 'sealed', seal2)));
+  commitment := public.sened_draw_commit_hash_v3(
+    group_a, cycle_id, 1, draw, roster_digest, commit_nonce, member_digest, commit_seed);
+  stmt := format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    draw, commitment, commit_nonce, roster_digest, member_digest, participants, 'commit-r1', 'v3');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', stmt), 'draw_member_commitment_missing', 'SEAL 1');
+
+  -- SEAL 2. Members seal for THEMSELVES: the function has no member argument, and
+  -- the row is stored under the caller's own uid.
+  if exists (
+    select 1 from pg_proc where proname = 'submit_draw_seal_v1' and proargnames::text like '%member%'
+  ) or exists (
+    select 1 from pg_proc where proname = 'submit_draw_nonce_v1' and proargnames::text like '%member%'
+  ) then
+    raise exception 'SEAL 2 FAILED: a seal or nonce function takes a member id from the caller';
+  end if;
+  j := pg_temp.expect_ok(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, seal1)), 'SEAL 2 mb1');
+  if (j ->> 'memberId')::uuid <> mb1 or j ->> 'replaced' <> 'false' then
+    raise exception 'SEAL 2 FAILED: unexpected seal result %', j;
+  end if;
+  perform pg_temp.expect_ok(pg_temp.call_as(mb2, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, seal2)), 'SEAL 2 mb2');
+  if (select count(*) from public.draw_seals where draw_id = draw and member_id = mb1 and sealed = seal1) <> 1
+     or (select count(*) from public.draw_seals where draw_id = draw and member_id = mb2 and sealed = seal2) <> 1
+     or (select count(*) from public.draw_seals where draw_id = draw) <> 2 then
+    raise exception 'SEAL 2 FAILED: seals were not stored under the callers';
+  end if;
+
+  -- SEAL 3. An outsider, a malformed seal, and anon are refused; nothing stored.
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, repeat('a', 64))), 'draw_forbidden', 'SEAL 3 outsider');
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, 'not-a-hash')), 'draw_invalid_request', 'SEAL 3 malformed');
+  perform pg_temp.expect_err(pg_temp.call_as(null, 'anon', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, repeat('a', 64))), 'permission denied', 'SEAL 3 anon');
+  if (select count(*) from public.draw_seals where draw_id = draw) <> 2 then
+    raise exception 'SEAL 3 FAILED: a refused seal was stored';
+  end if;
+
+  -- SEAL 4. While sealing, a member may replace their own seal (lost device);
+  -- an identical seal is a no-op. Nobody can write to the seal table directly.
+  other_seal := public.sened_draw_member_seal_hash(draw, mb1, 'mb1-replacement-nonce-0123456789');
+  j := pg_temp.expect_ok(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, other_seal)), 'SEAL 4 replace');
+  if j ->> 'replaced' <> 'true' then raise exception 'SEAL 4 FAILED: replace not reported %', j; end if;
+  j := pg_temp.expect_ok(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, seal1)), 'SEAL 4 restore');
+  if (select sealed from public.draw_seals where draw_id = draw and member_id = mb1) <> seal1 then
+    raise exception 'SEAL 4 FAILED: the original seal was not restored';
+  end if;
+  perform pg_temp.expect_err(pg_temp.call_as(mb2, 'authenticated', format(
+    'insert into public.draw_seals (draw_id, member_id, sealed) values (%L, %L, %L)', draw, mb1, repeat('b', 64))),
+    'permission denied', 'SEAL 4 direct insert');
+
+  -- SEAL 5. Seals are visible to the group as hashes, and to nobody outside it.
+  r := pg_temp.call_as(mb2, 'authenticated', format(
+    'select count(*)::text from public.draw_seals where draw_id = %L', draw));
+  if r <> '2' then raise exception 'SEAL 5 FAILED: a member should see 2 seal hashes, saw %', r; end if;
+  r := pg_temp.call_as(out, 'authenticated', format(
+    'select count(*)::text from public.draw_seals where draw_id = %L', draw));
+  if r <> '0' then raise exception 'SEAL 5 FAILED: an outsider saw % seal rows', r; end if;
+  j := pg_temp.expect_ok(pg_temp.call_as(mb2, 'authenticated', format(
+    'select public.get_draw_session_v1(%L)::text', draw)), 'SEAL 5 session');
+  if jsonb_array_length(j -> 'seals') <> 2 or j ->> 'state' <> 'sealing' then
+    raise exception 'SEAL 5 FAILED: unexpected session view %', j;
+  end if;
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.get_draw_session_v1(%L)::text', draw)), 'draw_forbidden', 'SEAL 5 outsider session');
+
+  -- COMMIT 1. Only an owner/treasurer commits; the roster is not typed.
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', stmt), 'draw_forbidden', 'COMMIT 1 member');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', stmt), 'draw_forbidden', 'COMMIT 1 outsider');
+  perform pg_temp.expect_err(pg_temp.call_as(null, 'anon', stmt), 'permission denied', 'COMMIT 1 anon');
+  -- The client-seals commit is not callable by clients any more.
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_v1(%L, %L, 1, %L, %L, %L, %L, %L, %L::jsonb, %L::jsonb, 4000.00, 4, 1000, %L, now(), %L)::text',
+    group_a, cycle_id, draw, commitment, commit_nonce, roster_digest, member_digest,
+    jsonb_build_array(jsonb_build_object('memberId', mb1, 'sealed', seal1)), participants, 'legacy-key', 'v3')),
+    'permission denied', 'COMMIT 1 legacy commit_draw_v1');
+
+  -- COMMIT 2. A roster the caller typed is refused: a member missing, a ticket
+  -- swapped, a different contribution. Nothing is written.
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    draw, commitment, commit_nonce, roster_digest, member_digest, participants - 0, 'commit-bad-1', 'v3')),
+    'draw_roster_mismatch', 'COMMIT 2 missing member');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    draw, commitment, commit_nonce, roster_digest, member_digest,
+    jsonb_set(participants, '{0,ticket}', to_jsonb(repeat('0', 64))), 'commit-bad-2', 'v3')),
+    'draw_roster_mismatch', 'COMMIT 2 swapped ticket');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    draw, commitment, commit_nonce, roster_digest, member_digest,
+    jsonb_set(participants, '{1,contributionAmount}', to_jsonb('5000.00'::text)), 'commit-bad-3', 'v3')),
+    'draw_roster_mismatch', 'COMMIT 2 changed contribution');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    draw, commitment, commit_nonce, roster_digest, member_digest,
+    participants || jsonb_build_array(jsonb_build_object('memberId', out, 'displayName', 'x',
+      'contributionAmount', '1000.00', 'ticket', public.sened_draw_ticket(group_a, cycle_id, out))),
+    'commit-bad-4', 'v3')),
+    'draw_roster_mismatch', 'COMMIT 2 outsider added');
+
+  -- COMMIT 3. A digest over seals other than the stored ones is refused, and so
+  -- is a grindable v2 commitment. The caller cannot choose the sealed set.
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    draw, commitment, commit_nonce, roster_digest,
+    public.sened_draw_member_set_digest(draw, jsonb_build_array(
+      jsonb_build_object('memberId', mb1, 'sealed', seal1),
+      jsonb_build_object('memberId', tre, 'sealed', repeat('7', 64)))),
+    participants, 'commit-bad-5', 'v3')),
+    'draw_member_commitment_mismatch', 'COMMIT 3 forged sealed set');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    draw, commitment, commit_nonce, roster_digest, member_digest, participants, 'commit-bad-6', 'v2')),
+    'draw_protocol_version_unsupported', 'COMMIT 3 v2');
+  if exists (select 1 from public.draw_commitments where draw_id = draw) then
+    raise exception 'COMMIT 3 FAILED: a refused commit left a commitment behind';
+  end if;
+
+  -- COMMIT 4. The honest commit by the treasurer. The sealed set is the stored
+  -- seals and the terms are the cycle's, neither supplied by the caller. (A
+  -- committer holding the only seal is refused: see the SOLO check below.)
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', stmt), 'COMMIT 4');
+  if j ->> 'replayed' <> 'false'
+     or j -> 'round' ->> 'state' <> 'committed'
+     or j -> 'round' -> 'commitment' ->> 'potAmount' <> '4000.00'
+     or (j -> 'round' -> 'commitment' ->> 'totalRounds')::int <> 4
+     or (j -> 'round' -> 'commitment' ->> 'reserveRatioBps')::int <> 1000
+     or jsonb_array_length(j -> 'round' -> 'commitment' -> 'memberCommitments') <> 2
+     or j -> 'round' -> 'commitment' ->> 'protocolVersion' <> 'v3' then
+    raise exception 'COMMIT 4 FAILED: unexpected commit result %', j;
+  end if;
+  if (select member_commitments from public.draw_commitments where draw_id = draw)
+     <> jsonb_build_array(
+          jsonb_build_object('memberId', mb2, 'sealed', seal2),
+          jsonb_build_object('memberId', mb1, 'sealed', seal1))
+     and (select member_commitments from public.draw_commitments where draw_id = draw)
+     <> jsonb_build_array(
+          jsonb_build_object('memberId', mb1, 'sealed', seal1),
+          jsonb_build_object('memberId', mb2, 'sealed', seal2)) then
+    raise exception 'COMMIT 4 FAILED: the committed set is not the stored seals';
+  end if;
+
+  -- STATE 3. COMMITTED: seals are closed, a retry replays, a different commit
+  -- for the same draw is refused.
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, other_seal)), 'draw_already_committed', 'STATE 3 late seal');
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', stmt), 'STATE 3 replay');
+  if j ->> 'replayed' <> 'true' then raise exception 'STATE 3 FAILED: the commit retry did not replay'; end if;
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    draw, repeat('1', 64), commit_nonce, roster_digest, member_digest, participants, 'commit-other', 'v3')),
+    'draw_already_committed', 'STATE 3 second commit');
+  if (select state from (select public.sened_draw_state(draw) as state) s) <> 'committed' then
+    raise exception 'STATE 3 FAILED: the draw is not committed';
+  end if;
+
+  -- NONCE 2. Only the caller's own committed seal counts: a wrong nonce, another
+  -- member's nonce, a member who did not seal, an outsider and anon are refused.
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, 'mb1-WRONG-nonce-0123456789-AAAA')),
+    'draw_member_commitment_mismatch', 'NONCE 2 wrong nonce');
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce2)),
+    'draw_member_commitment_mismatch', 'NONCE 2 another member''s nonce');
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, 'owner-never-sealed-0123456789')),
+    'draw_member_commitment_missing', 'NONCE 2 never sealed');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce1)), 'draw_forbidden', 'NONCE 2 outsider');
+  perform pg_temp.expect_err(pg_temp.call_as(null, 'anon', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce1)), 'permission denied', 'NONCE 2 anon');
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, 'short')), 'draw_invalid_request', 'NONCE 2 malformed');
+  if exists (select 1 from public.draw_nonces where draw_id = draw) then
+    raise exception 'NONCE 2 FAILED: a refused nonce was stored';
+  end if;
+
+  -- NONCE 3. NO ONE CAN READ A STORED NONCE BEFORE THE REVEAL IS REQUESTED.
+  -- mb1 releases; then every role that could plausibly look - the member, a
+  -- fellow member, the treasurer, the owner, an outsider, anon - tries.
+  j := pg_temp.expect_ok(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce1)), 'NONCE 3 release');
+  if (j ->> 'memberId')::uuid <> mb1 or j ->> 'released' <> 'true' or j ->> 'replayed' <> 'false' then
+    raise exception 'NONCE 3 FAILED: unexpected release result %', j;
+  end if;
+  j := pg_temp.expect_ok(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce1)), 'NONCE 3 idempotent');
+  if j ->> 'replayed' <> 'true' then raise exception 'NONCE 3 FAILED: a repeat was not a replay'; end if;
+  if (select count(*) from public.draw_nonces where draw_id = draw) <> 1 then
+    raise exception 'NONCE 3 FAILED: a repeat stored a second row';
+  end if;
+  foreach r in array array[mb1::text, mb2::text, tre::text, own::text, out::text] loop
+    perform pg_temp.expect_err(pg_temp.call_as(r::uuid, 'authenticated',
+      'select count(*)::text from public.draw_nonces'), 'permission denied', 'NONCE 3 select as ' || left(r, 12));
+    perform pg_temp.expect_err(pg_temp.call_as(r::uuid, 'authenticated', format(
+      'select nonce from public.draw_nonces where draw_id = %L', draw)), 'permission denied', 'NONCE 3 column as ' || left(r, 12));
+  end loop;
+  perform pg_temp.expect_err(pg_temp.call_as(null, 'anon',
+    'select count(*)::text from public.draw_nonces'), 'permission denied', 'NONCE 3 anon');
+  -- Nothing the group can read contains a nonce text.
+  foreach r in array array[mb1::text, mb2::text, tre::text, own::text] loop
+    if pg_temp.call_as(r::uuid, 'authenticated', format('select public.get_draw_session_v1(%L)::text', draw)) like '%' || nonce1 || '%'
+       or pg_temp.call_as(r::uuid, 'authenticated', format('select public.get_draw_cycle_v1(%L)::text', cycle_id)) like '%' || nonce1 || '%'
+       or pg_temp.call_as(r::uuid, 'authenticated', format('select public.get_draw_v1(%L)::text', draw)) like '%' || nonce1 || '%'
+       or pg_temp.call_as(r::uuid, 'authenticated', format('select public.list_draw_cycle_v1(%L)::text', cycle_id)) like '%' || nonce1 || '%'
+       or pg_temp.call_as(r::uuid, 'authenticated', format('select count(*)::text from public.draw_reveal_openings where draw_id = %L', draw)) <> '0' then
+      raise exception 'NONCE 3 FAILED: a stored nonce is readable by % before the reveal', r;
+    end if;
+  end loop;
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.get_draw_session_v1(%L)::text', draw)), 'NONCE 3 session');
+  if not (j -> 'nonces') @> jsonb_build_array(jsonb_build_object('memberId', mb1, 'released', true))
+     or not (j -> 'nonces') @> jsonb_build_array(jsonb_build_object('memberId', mb2, 'released', false)) then
+    raise exception 'NONCE 3 FAILED: progress should show mb1 released and mb2 not: %', j -> 'nonces';
+  end if;
+
+  -- REVEAL 1. The treasurer asks for the reveal. Refused: a plain member; the
+  -- wrong seed (nothing leaks); a missing nonce (mb2 has not released yet).
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', draw, commit_seed)), 'draw_forbidden', 'REVEAL 1 member');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', draw, commit_seed)), 'draw_forbidden', 'REVEAL 1 outsider');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', draw, 'a-junk-seed-0123456789-qqqq')),
+    'draw_commitment_mismatch', 'REVEAL 1 junk seed');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', draw, commit_seed)),
+    'draw_member_commitment_missing', 'REVEAL 1 missing nonce');
+  if exists (select 1 from public.draw_reveal_openings where draw_id = draw) then
+    raise exception 'REVEAL 1 FAILED: a refused request published an opening';
+  end if;
+
+  -- REVEAL 2. reveal_draw_v1 on a session-backed draw needs the published
+  -- opening: without one it is refused, whatever nonces the caller supplies.
+  winner := public.sened_draw_ordered_participant(participants, 0);
+  stmt := format(
+    'select public.reveal_draw_v1(%L, %L, %L, %L, %L::jsonb, %L, %L, 0, %L, %L, 3600.00, 400.00, now())::text',
+    draw, commit_seed, commitment, member_digest,
+    jsonb_build_array(
+      jsonb_build_object('memberId', mb1, 'nonce', nonce1),
+      jsonb_build_object('memberId', mb2, 'nonce', nonce2)),
+    repeat('7', 64), repeat('8', 64), winner ->> 'memberId', winner ->> 'ticket');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', stmt),
+    'draw_member_commitment_missing', 'REVEAL 2 no opening');
+
+  -- REVEAL 3. mb2 releases. Now the request succeeds, returns exactly the stored
+  -- nonces, and PUBLISHES them to the group in the same step.
+  perform pg_temp.expect_ok(pg_temp.call_as(mb2, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce2)), 'REVEAL 3 mb2 release');
+  opened := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', draw, commit_seed)), 'REVEAL 3');
+  if opened ->> 'replayed' <> 'false' or opened ->> 'seed' <> commit_seed
+     or jsonb_array_length(opened -> 'memberNonces') <> 2
+     or not (opened -> 'memberNonces') @> jsonb_build_array(jsonb_build_object('memberId', mb1, 'nonce', nonce1))
+     or not (opened -> 'memberNonces') @> jsonb_build_array(jsonb_build_object('memberId', mb2, 'nonce', nonce2)) then
+    raise exception 'REVEAL 3 FAILED: unexpected opening %', opened;
+  end if;
+  r := pg_temp.call_as(mb2, 'authenticated', format(
+    'select count(*)::text from public.draw_reveal_openings where draw_id = %L', draw));
+  if r <> '1' then raise exception 'REVEAL 3 FAILED: members cannot read the published opening (%)', r; end if;
+  r := pg_temp.call_as(out, 'authenticated', format(
+    'select count(*)::text from public.draw_reveal_openings where draw_id = %L', draw));
+  if r <> '0' then raise exception 'REVEAL 3 FAILED: an outsider can read the opening'; end if;
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', draw, commit_seed)), 'REVEAL 3 replay');
+  if j ->> 'replayed' <> 'true' then raise exception 'REVEAL 3 FAILED: the same seed did not replay'; end if;
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', draw, 'another-seed-0123456789-xxxx')),
+    'draw_idempotency_conflict', 'REVEAL 3 different seed');
+  -- Too late for a nonce now.
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce1)), 'draw_already_revealed', 'REVEAL 3 late nonce');
+
+  -- REVEAL 4. The reveal can only be the published opening: a different seed or
+  -- a nonce set that differs in any entry is refused; the real one is accepted.
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', replace(stmt, commit_seed, 'swapped-seed-0123456789-xxxx')),
+    'draw_commitment_mismatch', 'REVEAL 4 swapped seed');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', replace(stmt, nonce2, 'forged-nonce-0123456789-QQQQQQ')),
+    'draw_member_commitment_mismatch', 'REVEAL 4 forged nonce');
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', stmt), 'draw_forbidden', 'REVEAL 4 member');
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', stmt), 'REVEAL 4');
+  if j ->> 'state' <> 'revealed' or j -> 'reveal' ->> 'winnerMemberId' <> winner ->> 'memberId' then
+    raise exception 'REVEAL 4 FAILED: unexpected reveal %', j;
+  end if;
+  if public.sened_draw_state(draw) <> 'revealed' then
+    raise exception 'REVEAL 4 FAILED: the draw is not revealed';
+  end if;
+
+  -- STATE 4. After the reveal nothing earlier can be redone.
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', stmt), 'draw_already_revealed', 'STATE 4 re-reveal');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', draw, commit_seed)), 'draw_already_revealed', 'STATE 4 reopen');
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, other_seal)), 'draw_already_committed', 'STATE 4 seal');
+
+  -- STATE 5. PAID: the payout goes through the ledger, then is linked.
+  declare
+    cash_id uuid;
+    expense_id uuid;
+    posted jsonb;
+    entry_id uuid;
+  begin
+    select id into cash_id from public.ledger_accounts where group_id = group_a and code = 'POT_CASH';
+    select id into expense_id from public.ledger_accounts where group_id = group_a and code = 'PAYOUT_EXPENSE';
+    perform set_config('request.jwt.claim.sub', own::text, false);
+    perform set_config('request.jwt.claims', '{"sub":"' || own::text || '"}', false);
+    set local role authenticated;
+    posted := public.post_ledger_entry_v1(group_a, 'cycle-payout-r1', now(), 'disbursement', null, null,
+      jsonb_build_array(
+        jsonb_build_object('accountId', expense_id, 'direction', 'debit', 'amount', '3600.00'),
+        jsonb_build_object('accountId', cash_id, 'direction', 'credit', 'amount', '3600.00')));
+    reset role;
+    entry_id := (posted -> 'entry' ->> 'id')::uuid;
+    j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+      'select public.record_draw_payout_v1(%L, %L, %L, 3600.00, 400.00, now())::text',
+      draw, entry_id, winner ->> 'memberId')), 'STATE 5 payout');
+    if j ->> 'state' <> 'paid' or public.sened_draw_state(draw) <> 'paid' then
+      raise exception 'STATE 5 FAILED: the draw is not paid %', j;
+    end if;
+  end;
+
+  -- ROTATION. Round 2 opens only now that round 1 is revealed, the winner is
+  -- not eligible and cannot seal, and the listing shows both draws and states.
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.open_draw_v1(%L, 2, %L)::text', cycle_id, 'open-r2')), 'ROTATION open');
+  if (j -> 'session' ->> 'round')::int <> 2
+     or jsonb_array_length(j -> 'session' -> 'eligible') <> 3
+     or (j -> 'session' -> 'eligible') @> to_jsonb((winner ->> 'memberId')::text) then
+    raise exception 'ROTATION FAILED: round 2 eligibility is wrong %', j -> 'session' -> 'eligible';
+  end if;
+  perform pg_temp.expect_err(pg_temp.call_as((winner ->> 'memberId')::uuid, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', (j -> 'session' ->> 'drawId')::uuid, repeat('c', 64))),
+    'draw_not_eligible', 'ROTATION winner cannot seal');
+  j := pg_temp.expect_ok(pg_temp.call_as(mb2, 'authenticated', format(
+    'select public.get_draw_cycle_v1(%L)::text', cycle_id)), 'ROTATION list');
+  if jsonb_array_length(j -> 'draws') <> 2
+     or (j -> 'cycle' ->> 'roundsRevealed')::int <> 1
+     or (j -> 'cycle' ->> 'roundsPaid')::int <> 1
+     or (j -> 'cycle' ->> 'nextRound')::int <> 2
+     or (j -> 'draws' -> 0 ->> 'state') <> 'paid'
+     or (j -> 'draws' -> 0 ->> 'winnerMemberId') <> winner ->> 'memberId'
+     or (j -> 'draws' -> 1 ->> 'state') <> 'sealing' then
+    raise exception 'ROTATION FAILED: unexpected listing %', j;
+  end if;
+
+  -- ISOLATION. A manager of another group (group B) can do nothing to group A's
+  -- cycle or draw: open, commit, request the reveal, seal, release, read.
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cycle_id, 'iso-open')), 'draw_forbidden', 'ISOLATION open');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', draw, commit_seed)), 'draw_forbidden', 'ISOLATION reveal request');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', (j -> 'draws' -> 1 ->> 'drawId')::uuid, repeat('d', 64))),
+    'draw_forbidden', 'ISOLATION seal');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    (j -> 'draws' -> 1 ->> 'drawId')::uuid, repeat('1', 64), commit_nonce, roster_digest, member_digest,
+    participants, 'iso-commit', 'v3')), 'draw_forbidden', 'ISOLATION commit');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 1, 0, null, %L)::text', group_a, 'iso', '10.00', 'iso-cycle')),
+    'draw_forbidden', 'ISOLATION create');
+  r := pg_temp.call_as(out, 'authenticated',
+    'select ((select count(*) from public.draw_sessions) + (select count(*) from public.draw_seals) + (select count(*) from public.draw_reveal_openings) + (select count(*) from public.draw_cycles where group_id <> ' || quote_literal(group_b) || '))::text');
+  if r <> '0' then raise exception 'ISOLATION FAILED: the outsider can read % rows of group A', r; end if;
+
+  -- IMMUTABLE. History cannot be rewritten even by a privileged update.
+  begin
+    update public.draw_seals set sealed = repeat('f', 64) where draw_id = draw;
+    raise exception 'IMMUTABLE FAILED: a seal changed after the commit';
+  exception when others then
+    if sqlerrm not like '%draw_history_immutable%' then raise; end if;
+  end;
+  begin
+    delete from public.draw_nonces where draw_id = draw;
+    raise exception 'IMMUTABLE FAILED: a nonce was deleted';
+  exception when others then
+    if sqlerrm not like '%draw_history_immutable%' then raise; end if;
+  end;
+  begin
+    update public.draw_reveal_openings set seed = 'x' where draw_id = draw;
+    raise exception 'IMMUTABLE FAILED: an opening changed';
+  exception when others then
+    if sqlerrm not like '%draw_history_immutable%' then raise; end if;
+  end;
+  begin
+    update public.draw_sessions set round = 3 where draw_id = draw;
+    raise exception 'IMMUTABLE FAILED: a session changed';
+  exception when others then
+    if sqlerrm not like '%draw_history_immutable%' then raise; end if;
+  end;
+
+  perform set_config('sened.test.group_a', group_a::text, false);
+end;
+$lifecycle$;
+
+-- A committer who holds the only seal is refused: with other members eligible, at
+-- least one seal must come from somebody else.
+do $solo$
+declare
+  own constant uuid := 'a1a1a1a1-0000-4000-8000-000000000001';
+  tre constant uuid := 'a1a1a1a1-0000-4000-8000-000000000002';
+  group_a constant uuid := current_setting('sened.test.group_a')::uuid;
+  cycle_id uuid;
+  draw uuid;
+  j jsonb;
+  seal text;
+  participants jsonb;
+  digest text;
+begin
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 2, 0, null, %L)::text',
+    group_a, 'Solo-seal cycle', '100.00', 'cyc-solo')), 'SOLO create');
+  cycle_id := (j -> 'cycle' ->> 'cycleId')::uuid;
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cycle_id, 'open-solo')), 'SOLO open');
+  draw := (j -> 'session' ->> 'drawId')::uuid;
+  seal := public.sened_draw_member_seal_hash(draw, tre, 'treasurer-own-nonce-0123456789');
+  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, seal)), 'SOLO seal');
+  participants := (
+    select jsonb_agg(jsonb_build_object(
+      'memberId', e.member_id, 'displayName', 'M', 'contributionAmount', '100.00',
+      'ticket', public.sened_draw_ticket(group_a, cycle_id, e.member_id)) order by e.member_id::text)
+    from public.sened_draw_eligible_members(group_a, cycle_id, 1) as e(member_id));
+  digest := public.sened_draw_member_set_digest(draw, jsonb_build_array(jsonb_build_object('memberId', tre, 'sealed', seal)));
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    draw, repeat('2', 64), 'solo-commit-nonce-0123456789', repeat('3', 64), digest, participants, 'commit-solo', 'v3')),
+    'draw_member_commitment_missing', 'SOLO committer holding the only seal');
+  if exists (select 1 from public.draw_commitments where draw_id = draw) then
+    raise exception 'SOLO FAILED: the commit was accepted';
+  end if;
+end;
+$solo$;
+
+-- Parity with the TypeScript engine. The same literals are asserted in
+-- test/draw.sql-parity.test.ts against the real engine, so a change to either
+-- side's canonical encoding fails one of the two.
+do $parity$
+begin
+  if public.sened_draw_member_seal_hash(
+       'dddddddd-0000-4000-8000-0000000000d1', '44444444-4444-4444-8444-444444444444',
+       'nonce-one-0123456789-abcdef'
+     ) <> '8cfcb97d951fb4cea06db44c7fe86b4f273689a95eaf65732d83aa5288a5b3cb' then
+    raise exception 'PARITY 1 FAILED: the member seal hash differs from the TypeScript engine';
+  end if;
+  if public.sened_draw_member_set_digest(
+       'dddddddd-0000-4000-8000-0000000000d1',
+       jsonb_build_array(
+         jsonb_build_object('memberId', '44444444-4444-4444-8444-444444444444',
+           'sealed', '8cfcb97d951fb4cea06db44c7fe86b4f273689a95eaf65732d83aa5288a5b3cb'),
+         jsonb_build_object('memberId', '22222222-2222-4222-8222-222222222222',
+           'sealed', 'c9e33496edfcb517ab3e593fcef93050c92adfb99a09650e1e5a4582dbd5e7af'))
+     ) <> '339c57dc558400ed5953ada9573a443af7a518f00bf770c49f4b8edc7091cf69' then
+    raise exception 'PARITY 2 FAILED: the member set digest differs from the TypeScript engine';
+  end if;
+  if public.sened_draw_commit_hash_v3(
+       'aaaaaaaa-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-0000000000c1', 2,
+       'dddddddd-0000-4000-8000-0000000000d1', repeat('ab', 32), 'commit-nonce-0123456789',
+       '339c57dc558400ed5953ada9573a443af7a518f00bf770c49f4b8edc7091cf69',
+       'seed-value-0123456789-xyz'
+     ) <> 'ce2934b0af978095526e317c3d13b37072517f55c1e827324ac4efb7c6a9f7bb' then
+    raise exception 'PARITY 3 FAILED: the commitment hash differs from the TypeScript engine';
+  end if;
+  if public.sened_draw_ticket(
+       'aaaaaaaa-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-0000000000c1',
+       '44444444-4444-4444-8444-444444444444'
+     ) <> 'acefb395ef8dcf1dee8a4830e74686ffd5318cddac32a121fca7e30ca837d518' then
+    raise exception 'PARITY 4 FAILED: the ticket differs from the TypeScript engine';
+  end if;
+end;
+$parity$;
+
+-- Arity and grants: the class of defect that made the bank migration unappliable.
+do $grants$
+declare
+  fn text;
+begin
+  foreach fn in array array[
+    'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text)',
+    'public.list_draw_cycles_v1(uuid)',
+    'public.get_draw_cycle_v1(uuid)',
+    'public.open_draw_v1(uuid, integer, text)',
+    'public.get_draw_session_v1(uuid)',
+    'public.submit_draw_seal_v1(uuid, text)',
+    'public.submit_draw_nonce_v1(uuid, text)',
+    'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text)',
+    'public.open_draw_reveal_v1(uuid, text)'
+  ] loop
+    if not has_function_privilege('authenticated', fn, 'EXECUTE') then
+      raise exception 'GRANTS FAILED: authenticated cannot execute %', fn;
+    end if;
+    if has_function_privilege('anon', fn, 'EXECUTE') then
+      raise exception 'GRANTS FAILED: anon can execute %', fn;
+    end if;
+  end loop;
+  foreach fn in array array[
+    'public.sened_draw_member_seal_hash(uuid, uuid, text)',
+    'public.sened_draw_member_set_digest(uuid, jsonb)',
+    'public.sened_draw_commit_hash_v3(uuid, uuid, integer, uuid, text, text, text, text)',
+    'public.sened_draw_ticket(uuid, uuid, uuid)',
+    'public.sened_draw_eligible_members(uuid, uuid, integer)',
+    'public.sened_draw_session_view(uuid)'
+  ] loop
+    if has_function_privilege('authenticated', fn, 'EXECUTE') or has_function_privilege('anon', fn, 'EXECUTE') then
+      raise exception 'GRANTS FAILED: the internal helper % is callable by a client role', fn;
+    end if;
+  end loop;
+  if has_table_privilege('authenticated', 'public.draw_nonces', 'SELECT')
+     or has_table_privilege('anon', 'public.draw_nonces', 'SELECT')
+     or has_table_privilege('authenticated', 'public.draw_nonces', 'INSERT') then
+    raise exception 'GRANTS FAILED: a client role has a privilege on draw_nonces';
+  end if;
+  if not (select relrowsecurity from pg_class where oid = 'public.draw_nonces'::regclass) then
+    raise exception 'GRANTS FAILED: draw_nonces has no row level security';
+  end if;
+  if exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'draw_nonces') then
+    raise exception 'GRANTS FAILED: draw_nonces has a policy, so some role could read it';
+  end if;
+end;
+$grants$;
+
+select 'ALL DRAW CYCLE AND SEAL CHECKS PASSED' as result;

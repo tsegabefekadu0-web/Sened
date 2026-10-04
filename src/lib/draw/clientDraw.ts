@@ -1,8 +1,8 @@
 /**
  * Browser side of the draw: the API client for `/api/draw/*`, the on-device
- * recomputation that makes a draw "verifiable", and the small amount of
- * out-of-band protocol (sealed contributions, openings) the server does not
- * carry.
+ * recomputation that makes a draw "verifiable", and the member's own secret (the
+ * nonce), which is generated here and stays on this device until the commitment
+ * is published.
  *
  * Browser-reachable on purpose: only `webDrawHasher` is used for hashing, and
  * nothing here imports the server service, repository or route handlers.
@@ -15,14 +15,17 @@ import { formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
 import type { MessageKey } from "@/lib/i18n";
 
 import { webDrawHasher, type DrawVerificationTranscript } from "./canonical";
-import { findBadOpenings, sealMemberContribution, verifyTranscript } from "./engine";
+import { sealMemberContribution, verifyTranscript } from "./engine";
 import { assessDrawRisk, planReserve } from "./risk";
 import {
+  isDrawLifecycleState,
   isDrawProtocolVersion,
-  type DrawMemberCommitment,
+  type DrawCycleRecord,
+  type DrawListEntry,
   type DrawMemberNonce,
   type DrawRiskAssessment,
   type DrawRoundState,
+  type DrawSessionView,
   type DrawVerificationResult
 } from "./types";
 
@@ -121,6 +124,9 @@ const ERROR_KEYS: Readonly<Record<string, MessageKey>> = {
   already_revealed: "drawLive.error.alreadyRevealed",
   idempotency_conflict: "drawLive.error.conflict",
   repeat_winner: "drawLive.error.repeatWinner",
+  not_eligible: "drawLive.error.notEligible",
+  nonce_too_early: "drawLive.error.nonceTooEarly",
+  cycle_complete: "drawLive.error.cycleComplete",
   round_out_of_order: "drawLive.error.roundOutOfOrder",
   no_eligible_participants: "drawLive.error.noEligible",
   commitment_mismatch: "drawLive.error.commitmentMismatch",
@@ -266,25 +272,17 @@ function badResponse(status: number): DrawFailure {
 // -- API calls ------------------------------------------------------------------
 
 export interface CommitInput {
-  readonly groupId: string;
-  readonly cycleId: string;
-  readonly round: number;
-  readonly totalRounds: number;
   readonly drawId: string;
   readonly commitmentNonce: string;
   readonly seed: string;
-  readonly memberCommitments: readonly DrawMemberCommitment[];
-  readonly potAmount: string;
-  readonly reserveRatioBps: number;
-  readonly members: readonly {
-    readonly memberId: string;
-    readonly displayName: string;
-    readonly contributionAmount: string;
-  }[];
   readonly idempotencyKey: string;
 }
 
-/** `POST /api/draw/commits` — owner or treasurer. */
+/**
+ * `POST /api/draw/commits` — owner or treasurer. The request names the draw and
+ * carries this device's own entropy and nothing else: the roster, the pot and the
+ * sealed set are read by the server from the cycle and from what members stored.
+ */
 export async function commitDraw(
   input: CommitInput,
   deps: AuthedFetchDeps = {}
@@ -295,12 +293,15 @@ export async function commitDraw(
   return { ok: true, status: result.status, data: { round: result.data.round, replayed: result.data.replayed === true } };
 }
 
-/** `POST /api/draw/reveals` — owner or treasurer. */
+/**
+ * `POST /api/draw/reveals` — owner or treasurer. Carries the seed only: the
+ * member nonces are the ones members released, held by the server, and revealed
+ * together with the seed.
+ */
 export async function revealDraw(
   input: {
     readonly drawId: string;
     readonly seed: string;
-    readonly memberNonces: readonly DrawMemberNonce[];
     readonly idempotencyKey: string;
   },
   deps: AuthedFetchDeps = {}
@@ -321,6 +322,141 @@ export async function revealDraw(
       risk: (result.data.risk ?? null) as DrawRiskAssessment | null
     }
   };
+}
+
+// -- cycles and draws ------------------------------------------------------------------
+
+function isCycle(value: unknown): value is DrawCycleRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    isString(row.cycleId) &&
+    isString(row.groupId) &&
+    isString(row.name) &&
+    (row.contributionAmount === null || isString(row.contributionAmount)) &&
+    isString(row.potAmount) &&
+    typeof row.totalRounds === "number" &&
+    typeof row.reserveRatioBps === "number" &&
+    isString(row.startedAt) &&
+    typeof row.roundsRevealed === "number" &&
+    typeof row.roundsPaid === "number" &&
+    (row.nextRound === null || typeof row.nextRound === "number")
+  );
+}
+
+function isListEntry(value: unknown): value is DrawListEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    isString(row.drawId) &&
+    typeof row.round === "number" &&
+    isDrawLifecycleState(row.state) &&
+    isString(row.openedAt) &&
+    typeof row.sealCount === "number" &&
+    typeof row.nonceCount === "number" &&
+    typeof row.revealRequested === "boolean" &&
+    typeof row.superseded === "boolean" &&
+    typeof row.legacy === "boolean"
+  );
+}
+
+function isSession(value: unknown): value is DrawSessionView {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    isString(row.drawId) &&
+    isString(row.groupId) &&
+    isString(row.cycleId) &&
+    typeof row.round === "number" &&
+    isDrawLifecycleState(row.state) &&
+    isCycle(row.cycle) &&
+    Array.isArray(row.eligible) &&
+    Array.isArray(row.seals) &&
+    Array.isArray(row.nonces) &&
+    typeof row.revealRequested === "boolean"
+  );
+}
+
+/** `GET /api/draw/cycles?groupId=` — any member. */
+export async function listCycles(groupId: string, deps: AuthedFetchDeps = {}): Promise<DrawResult<readonly DrawCycleRecord[]>> {
+  const result = await call(`/api/draw/cycles?groupId=${encodeURIComponent(groupId)}`, { method: "GET" }, deps);
+  if (!result.ok) return result;
+  const { cycles } = result.data;
+  if (!Array.isArray(cycles) || !cycles.every(isCycle)) return badResponse(result.status);
+  return { ok: true, status: result.status, data: cycles };
+}
+
+export interface CreateCycleInput {
+  readonly groupId: string;
+  readonly name: string;
+  readonly contributionAmount: string;
+  readonly totalRounds: number;
+  readonly reserveRatioBps: number;
+  readonly idempotencyKey: string;
+}
+
+/** `POST /api/draw/cycles` — owner or treasurer. The server computes the pot. */
+export async function createCycle(
+  input: CreateCycleInput,
+  deps: AuthedFetchDeps = {}
+): Promise<DrawResult<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }>> {
+  const result = await call("/api/draw/cycles", { method: "POST", body: JSON.stringify(input) }, deps);
+  if (!result.ok) return result;
+  if (!isCycle(result.data.cycle)) return badResponse(result.status);
+  return { ok: true, status: result.status, data: { cycle: result.data.cycle, replayed: result.data.replayed === true } };
+}
+
+/** `GET /api/draw/cycles/[cycleId]` — any member: the cycle and every draw in it. */
+export async function readCycle(
+  cycleId: string,
+  deps: AuthedFetchDeps = {}
+): Promise<DrawResult<{ readonly cycle: DrawCycleRecord; readonly draws: readonly DrawListEntry[] }>> {
+  const result = await call(`/api/draw/cycles/${encodeURIComponent(cycleId)}`, { method: "GET" }, deps);
+  if (!result.ok) return result;
+  const { cycle, draws } = result.data;
+  if (!isCycle(cycle) || !Array.isArray(draws) || !draws.every(isListEntry)) return badResponse(result.status);
+  return { ok: true, status: result.status, data: { cycle, draws } };
+}
+
+/** `POST /api/draw/draws` — owner or treasurer. The server creates the draw id. */
+export async function openDraw(
+  input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
+  deps: AuthedFetchDeps = {}
+): Promise<DrawResult<{ readonly session: DrawSessionView; readonly replayed: boolean }>> {
+  const result = await call("/api/draw/draws", { method: "POST", body: JSON.stringify(input) }, deps);
+  if (!result.ok) return result;
+  if (!isSession(result.data.session)) return badResponse(result.status);
+  return { ok: true, status: result.status, data: { session: result.data.session, replayed: result.data.replayed === true } };
+}
+
+/** `GET /api/draw/draws/[drawId]` — any member: seal hashes and who has released (never a nonce). */
+export async function readSession(drawId: string, deps: AuthedFetchDeps = {}): Promise<DrawResult<DrawSessionView>> {
+  const result = await call(`/api/draw/draws/${encodeURIComponent(drawId)}`, { method: "GET" }, deps);
+  if (!result.ok) return result;
+  if (!isSession(result.data.session)) return badResponse(result.status);
+  return { ok: true, status: result.status, data: result.data.session };
+}
+
+/** `POST /api/draw/seals` — the signed-in member seals for themselves. No member id is sent. */
+export async function submitSeal(
+  input: { readonly drawId: string; readonly sealed: string },
+  deps: AuthedFetchDeps = {}
+): Promise<DrawResult<{ readonly memberId: string; readonly replaced: boolean }>> {
+  const result = await call("/api/draw/seals", { method: "POST", body: JSON.stringify(input) }, deps);
+  if (!result.ok) return result;
+  if (!isString(result.data.memberId)) return badResponse(result.status);
+  return { ok: true, status: result.status, data: { memberId: result.data.memberId, replaced: result.data.replaced === true } };
+}
+
+/** `POST /api/draw/nonces` — the signed-in member releases their own nonce, after the commit. */
+export async function submitNonce(
+  input: { readonly drawId: string; readonly nonce: string },
+  deps: AuthedFetchDeps = {}
+): Promise<DrawResult<{ readonly memberId: string; readonly replayed: boolean }>> {
+  const result = await call("/api/draw/nonces", { method: "POST", body: JSON.stringify(input) }, deps);
+  if (!result.ok) return result;
+  if (!isString(result.data.memberId)) return badResponse(result.status);
+  return { ok: true, status: result.status, data: { memberId: result.data.memberId, replayed: result.data.replayed === true } };
 }
 
 /** `POST /api/draw/verify` — any member. Returns what the browser recomputes from. */
@@ -394,18 +530,6 @@ export interface BrowserCheck {
   readonly risk: DrawRiskAssessment | null;
   /** True only when this device verified, and the server agrees with it. */
   readonly trusted: boolean;
-}
-
-/**
- * Every sealed contribution must be opened by a nonce that hashes back to it.
- * Returns the members whose opening is missing or wrong.
- */
-export async function checkOpenings(
-  drawId: string,
-  sealed: readonly DrawMemberCommitment[],
-  nonces: readonly DrawMemberNonce[]
-): Promise<readonly string[]> {
-  return findBadOpenings(drawId, sealed, nonces, webDrawHasher);
 }
 
 /**
@@ -502,10 +626,9 @@ function recomputeRisk(round: WireRound, transcript: DrawVerificationTranscript)
   }
 }
 
-// -- sealed contributions (out-of-band protocol) -----------------------------------
+// -- this member's own seal and nonce (generated and held on this device) -------------
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const HEX_64 = /^[0-9a-f]{64}$/;
 
 export function randomHex(bytes = 24): string {
   const buffer = new Uint8Array(bytes);
@@ -520,82 +643,29 @@ export interface MySeal {
   readonly sealed: string;
 }
 
-/** Seal this member's contribution on this device. Only `sealed` is ever shared. */
+/** Seal this member's contribution on this device. Only `sealed` is ever sent before the commit. */
 export async function sealForDraw(drawId: string, memberId: string): Promise<MySeal> {
   const nonce = randomHex();
   const contribution = await sealMemberContribution({ drawId, memberId, nonce }, webDrawHasher);
   return { drawId, memberId, nonce, sealed: contribution.sealed };
 }
 
-/** `memberId:sealedHash` — what a member sends the treasurer before the commit. */
-export const sealLine = (seal: Pick<MySeal, "memberId" | "sealed">): string => `${seal.memberId}:${seal.sealed}`;
-/** `memberId:nonce` — what a member sends the treasurer for the reveal. */
-export const openingLine = (seal: Pick<MySeal, "memberId" | "nonce">): string => `${seal.memberId}:${seal.nonce}`;
+/** Whether the server holds no seal for this member, the seal this device holds, or a different one. */
+export type SealStanding = "none" | "mine" | "other";
 
 /**
- * Has the treasurer's commitment been published with THIS member's seal in it?
- *
- * A member's nonce decides the winner, and it is only unknown to the treasurer
- * for as long as the member keeps it. Releasing it before the commitment is
- * published hands the treasurer the one input they could not grind over, so the
- * UI offers the opening line only once this returns true: the published round is
- * this draw, and the sealed set it committed to contains the member's own hash.
+ * How the server's copy of this member's seal compares with what this device
+ * holds. A nonce can only be released if they agree.
  */
-export function commitmentPublishedFor(
-  wire: Pick<WireVerify, "round" | "transcript"> | null,
-  seal: Pick<MySeal, "drawId" | "memberId" | "sealed"> | null
-): boolean {
-  if (wire === null || seal === null) return false;
-  if (wire.round.drawId !== seal.drawId || wire.transcript.drawId !== seal.drawId) return false;
-  return wire.transcript.memberCommitments.some(
-    (entry) => entry.memberId === seal.memberId && entry.sealed === seal.sealed
-  );
-}
-
-export type LineParse<T> =
-  | { readonly ok: true; readonly entries: readonly T[] }
-  | { readonly ok: false; readonly line: number };
-
-function parseLines<T>(text: string, build: (memberId: string, value: string) => T | null): LineParse<T> {
-  const entries: T[] = [];
-  const seen = new Set<string>();
-  const lines = text.split(/\r?\n/);
-  for (const [index, raw] of lines.entries()) {
-    const line = raw.trim();
-    if (line === "") continue;
-    const split = line.indexOf(":");
-    const memberId = split === -1 ? "" : line.slice(0, split).trim().toLowerCase();
-    const value = split === -1 ? "" : line.slice(split + 1).trim();
-    const entry = UUID.test(memberId) && !seen.has(memberId) ? build(memberId, value) : null;
-    if (entry === null) return { ok: false, line: index + 1 };
-    seen.add(memberId);
-    entries.push(entry);
-  }
-  return { ok: true, entries };
-}
-
-export function parseSealLines(text: string): LineParse<DrawMemberCommitment> {
-  return parseLines(text, (memberId, value) =>
-    HEX_64.test(value.toLowerCase()) ? { memberId, sealed: value.toLowerCase() } : null
-  );
-}
-
-export function parseOpeningLines(text: string): LineParse<DrawMemberNonce> {
-  return parseLines(text, (memberId, value) =>
-    value.length >= 16 && value.length <= 256 && /^[!-~]+$/.test(value) ? { memberId, nonce: value } : null
-  );
-}
-
-// -- pot ---------------------------------------------------------------------------
-
-/** Pot = per-member contribution × roster size, in exact minor units. Null if the amount is invalid. */
-export function potFromContribution(contribution: string, memberCount: number): string | null {
-  try {
-    const minor = toEtbMinorUnits(contribution, true);
-    return formatEtbMinorUnits(minor * BigInt(memberCount));
-  } catch {
-    return null;
-  }
+export function sealStanding(
+  session: Pick<DrawSessionView, "seals">,
+  mine: Pick<MySeal, "memberId" | "sealed"> | null,
+  memberId: string | null
+): SealStanding {
+  if (memberId === null) return "none";
+  const stored = session.seals.find((seal) => seal.memberId === memberId);
+  if (stored === undefined) return "none";
+  return mine !== null && stored.sealed === mine.sealed ? "mine" : "other";
 }
 
 /** Normalise a typed amount (`5000`, `5000.5`) to the wire form with two decimals, or null. */
@@ -621,12 +691,12 @@ export interface DrawDraft {
   readonly revealed?: boolean;
 }
 
-const DRAFT_KEY = (groupId: string) => `sened.draw.draft.${groupId}`;
+const DRAFT_KEY = (drawId: string) => `sened.draw.draft.${drawId}`;
 const SEAL_KEY = (drawId: string) => `sened.draw.seal.${drawId}`;
 
-export function readDraft(groupId: string): DrawDraft | null {
+export function readDraft(drawId: string): DrawDraft | null {
   try {
-    const raw = globalThis.localStorage?.getItem(DRAFT_KEY(groupId));
+    const raw = globalThis.localStorage?.getItem(DRAFT_KEY(drawId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<DrawDraft>;
     return isString(parsed.drawId) &&
@@ -641,10 +711,10 @@ export function readDraft(groupId: string): DrawDraft | null {
   }
 }
 
-export function writeDraft(groupId: string, draft: DrawDraft | null): void {
+export function writeDraft(drawId: string, draft: DrawDraft | null): void {
   try {
-    if (draft === null) globalThis.localStorage?.removeItem(DRAFT_KEY(groupId));
-    else globalThis.localStorage?.setItem(DRAFT_KEY(groupId), JSON.stringify(draft));
+    if (draft === null) globalThis.localStorage?.removeItem(DRAFT_KEY(drawId));
+    else globalThis.localStorage?.setItem(DRAFT_KEY(drawId), JSON.stringify(draft));
   } catch {
     // Storage may be blocked. The ceremony still works for this session.
   }
@@ -668,6 +738,14 @@ export function writeSeal(seal: MySeal): void {
     globalThis.localStorage?.setItem(SEAL_KEY(seal.drawId), JSON.stringify(seal));
   } catch {
     // Not fatal: the nonce is also shown on screen to copy.
+  }
+}
+
+export function clearSeal(drawId: string): void {
+  try {
+    globalThis.localStorage?.removeItem(SEAL_KEY(drawId));
+  } catch {
+    // Nothing to clear if storage is blocked.
   }
 }
 

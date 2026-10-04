@@ -12,11 +12,14 @@ import {
 } from "./rotation";
 import { mapDrawError, type DrawActorContext, type DrawRepository } from "./repository";
 import type {
+  DrawCycleRecord,
   DrawHasher,
+  DrawListEntry,
   DrawMember,
   DrawMemberNonce,
   DrawRiskAssessment,
   DrawRound,
+  DrawSessionView,
   DrawVerificationResult
 } from "./types";
 
@@ -174,11 +177,24 @@ export class DrawService {
     }
   }
 
+  /**
+   * M4.1 step 2. The seed comes from the caller; the member nonces do NOT.
+   *
+   * `requestReveal` asks the database to check the seed against the published
+   * commitment and then publish the seed and the nonces members released, in one
+   * step. Those are what the winner is derived from, and what the database then
+   * insists the reveal row carries. A caller that holds the seed learns nothing
+   * about the nonces until they have been made public to the whole group.
+   *
+   * A draw committed before server-created draws existed has no stored nonces
+   * (`requestReveal` returns null); only then are caller-supplied `memberNonces`
+   * used, which the route never passes.
+   */
   async reveal(
     input: {
       readonly drawId: string;
       readonly seed: string;
-      readonly memberNonces: readonly DrawMemberNonce[];
+      readonly memberNonces?: readonly DrawMemberNonce[];
     },
     context: DrawActorContext
   ): Promise<DrawRevealResult> {
@@ -191,6 +207,18 @@ export class DrawService {
         throw new DrawError("ALREADY_REVEALED", "This draw has already been revealed");
       }
 
+      const opened = await this.repository.requestReveal(
+        { drawId: input.drawId, seed: input.seed },
+        context
+      );
+      const memberNonces = opened?.memberNonces ?? input.memberNonces;
+      if (memberNonces === undefined) {
+        throw new DrawError(
+          "MEMBER_COMMITMENT_MISSING",
+          "There are no member nonces to open this draw with"
+        );
+      }
+
       const cycle = await this.repository.listCycle(round.cycleId, context);
       const priorWinnerIds = cycle
         .filter((entry) => entry.round < round.round && entry.reveal !== null)
@@ -200,7 +228,7 @@ export class DrawService {
         round,
         {
           seed: input.seed,
-          memberNonces: input.memberNonces,
+          memberNonces,
           revealedBy: context.userId,
           revealedAt: this.clock().toISOString()
         },
@@ -335,6 +363,171 @@ export class DrawService {
           error
         );
       }
+      throw mapDrawError(error);
+    }
+  }
+
+  // -- cycles and draws ------------------------------------------------------------
+
+  /** Owner or treasurer (decided by the database). */
+  async createCycle(
+    input: {
+      readonly groupId: string;
+      readonly name: string;
+      readonly contributionAmount: string;
+      readonly totalRounds: number;
+      readonly reserveRatioBps: number;
+      readonly startedAt?: string;
+      readonly idempotencyKey: string;
+    },
+    context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
+    try {
+      return await this.repository.createCycle(input, context);
+    } catch (error) {
+      throw mapDrawError(error);
+    }
+  }
+
+  async listCycles(groupId: string, context: DrawActorContext): Promise<readonly DrawCycleRecord[]> {
+    try {
+      return await this.repository.listCycles(groupId, context);
+    } catch (error) {
+      throw mapDrawError(error);
+    }
+  }
+
+  async getCycleDetail(
+    cycleId: string,
+    context: DrawActorContext
+  ): Promise<{ readonly cycle: DrawCycleRecord; readonly draws: readonly DrawListEntry[] }> {
+    try {
+      return await this.repository.getCycleDetail(cycleId, context);
+    } catch (error) {
+      throw mapDrawError(error);
+    }
+  }
+
+  /** Owner or treasurer. The draw id is created by the server. */
+  async openDraw(
+    input: { readonly cycleId: string; readonly round?: number; readonly idempotencyKey: string },
+    context: DrawActorContext
+  ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean }> {
+    try {
+      return await this.repository.openDraw(input, context);
+    } catch (error) {
+      throw mapDrawError(error);
+    }
+  }
+
+  async getSession(drawId: string, context: DrawActorContext): Promise<DrawSessionView> {
+    try {
+      return await this.repository.getSession(drawId, context);
+    } catch (error) {
+      throw mapDrawError(error);
+    }
+  }
+
+  /** A member seals for themselves. The acting member is `context.userId`, never an argument. */
+  async submitSeal(
+    input: { readonly drawId: string; readonly sealed: string },
+    context: DrawActorContext
+  ): Promise<{ readonly memberId: string; readonly sealed: string; readonly replaced: boolean }> {
+    try {
+      return await this.repository.submitSeal(input, context);
+    } catch (error) {
+      throw mapDrawError(error);
+    }
+  }
+
+  /** A member releases their own nonce, after the commitment. The nonce is not echoed. */
+  async submitNonce(
+    input: { readonly drawId: string; readonly nonce: string },
+    context: DrawActorContext
+  ): Promise<{ readonly memberId: string; readonly replayed: boolean }> {
+    try {
+      return await this.repository.submitNonce(input, context);
+    } catch (error) {
+      throw mapDrawError(error);
+    }
+  }
+
+  /**
+   * M4.1 step 1, from a server-created draw.
+   *
+   * Nothing the engine commits to is typed by the caller. The roster is the draw's
+   * eligible members (active, not yet drawn this cycle) at the cycle's
+   * contribution; the pot, the reserve and the rounds are the cycle's; the sealed
+   * set is what the members stored. The caller supplies only the treasurer's own
+   * entropy (seed, commitment nonce) and an idempotency key. The database checks
+   * the result against the same sources again, so this is not the only line of
+   * defence.
+   */
+  async commitFromSession(
+    input: {
+      readonly drawId: string;
+      readonly seed?: string;
+      readonly commitmentNonce?: string;
+      readonly idempotencyKey: string;
+      readonly committedAt?: string;
+    },
+    context: DrawActorContext
+  ): Promise<DrawCommitResult> {
+    try {
+      const session = await this.repository.getSession(input.drawId, context);
+
+      // A plain retry (no entropy supplied) replays the original commitment
+      // instead of minting a second seed that could never match it.
+      if (input.seed === undefined && input.commitmentNonce === undefined) {
+        const existing = await this.repository.findByIdempotencyKey(
+          session.groupId,
+          input.idempotencyKey,
+          context
+        );
+        if (existing !== null && existing.drawId === session.drawId) {
+          return { round: existing, replayed: true };
+        }
+      }
+
+      const contribution = session.cycle.contributionAmount;
+      if (contribution === null) {
+        throw new DrawError(
+          "INVALID_REQUEST",
+          "This cycle has no per-member contribution on record, so a draw cannot be committed for it. Create a new cycle."
+        );
+      }
+      const eligible = new Set(session.eligible);
+      const members: DrawMember[] = session.eligible.map((memberId) => ({
+        memberId,
+        // Display names are presentation and are not part of the roster digest.
+        // An email is never published here: members have not agreed to show it.
+        displayName: `Member ${memberId.slice(0, 8)}`,
+        status: "active",
+        contributionAmount: contribution
+      }));
+
+      return await this.commit(
+        {
+          groupId: session.groupId,
+          cycleId: session.cycleId,
+          round: session.round,
+          totalRounds: session.cycle.totalRounds,
+          drawId: session.drawId,
+          seed: input.seed,
+          commitmentNonce: input.commitmentNonce,
+          memberCommitments: session.seals
+            .filter((seal) => eligible.has(seal.memberId))
+            .map((seal) => ({ memberId: seal.memberId, sealed: seal.sealed })),
+          potAmount: session.cycle.potAmount,
+          reserveRatioBps: session.cycle.reserveRatioBps,
+          members,
+          priorWinnerIds: [],
+          idempotencyKey: input.idempotencyKey,
+          committedAt: input.committedAt
+        },
+        context
+      );
+    } catch (error) {
       throw mapDrawError(error);
     }
   }

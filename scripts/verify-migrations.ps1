@@ -132,6 +132,10 @@ if ($check.Out -notmatch 'ALL DRAW BINDING CHECKS PASSED') {
     docker rm -f $container 2>&1 | Out-Null
     throw 'VERIFICATION DID NOT REACH THE SUCCESS MARKER'
 }
+if ($check.Out -notmatch 'ALL DRAW CYCLE AND SEAL CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE DRAW CYCLE AND SEAL SUCCESS MARKER'
+}
 
 docker rm -f $container 2>&1 | Out-Null
 Write-Host 'Migrations applied and verified.' -ForegroundColor Green

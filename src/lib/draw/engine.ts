@@ -27,7 +27,8 @@ import type {
   DrawRound,
   DrawVerificationCode,
   DrawVerificationError,
-  DrawVerificationResult
+  DrawVerificationResult,
+  DrawVerificationWarning
 } from "./types";
 
 /**
@@ -884,22 +885,26 @@ export async function verifyRound(
   );
 
   const warnings = [...result.warnings];
+  const warningItems: DrawVerificationWarning[] = [...(result.warningItems ?? [])];
   const codes = [...result.codes];
 
   if (round.reveal !== null && result.verified) {
     if (round.reveal.winnerMemberId !== result.winnerMemberId) {
       codes.push("selection_mismatch");
+      warningItems.push({ code: "recorded_winner_mismatch" });
       warnings.push(
         `The recorded winner ${round.reveal.winnerMemberId} does not match the winner the published values produce (${result.winnerMemberId}).`
       );
     } else if (round.reveal.transcriptDigest !== result.transcriptDigest) {
       codes.push("selection_mismatch");
+      warningItems.push({ code: "recorded_digest_mismatch" });
       warnings.push("The recorded transcript digest does not match the recomputed transcript.");
     }
   }
 
   if ((input.supersededCommitmentCount ?? 0) > 0) {
     codes.push("suspicious_commitment_history");
+    warningItems.push({ code: "abandoned_commitments", count: input.supersededCommitmentCount ?? 0 });
     warnings.push(
       `${input.supersededCommitmentCount ?? 0} commitment(s) for this round were created and then abandoned. Abandoned commitments are the signature of a treasurer searching seeds for a preferred winner, so this draw should be put to a member vote before the payout is treated as final.`
     );
@@ -915,5 +920,5 @@ export async function verifyRound(
     (code) => code === "ok" || code === "suspicious_commitment_history"
   );
 
-  return { ...result, verified: result.verified && arithmeticPassed, codes, warnings };
+  return { ...result, verified: result.verified && arithmeticPassed, codes, warnings, warningItems };
 }

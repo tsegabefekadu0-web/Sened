@@ -77,6 +77,7 @@ const verification: DrawVerificationResult = {
 function fakeService() {
   return {
     commit: vi.fn().mockResolvedValue({ round, replayed: false }),
+    commitFromSession: vi.fn().mockResolvedValue({ round, replayed: false }),
     reveal: vi.fn().mockResolvedValue({
       round,
       risk: {
@@ -116,23 +117,13 @@ function request(body: unknown, bearer = "token", contentType = "application/jso
   });
 }
 
+/**
+ * A commit names the draw and carries the treasurer's own entropy. Everything the
+ * commitment covers (roster, pot, reserve, rounds, the sealed set) is read from
+ * the database, so none of it is in the request.
+ */
 const commitBody = {
-  groupId,
-  cycleId,
-  round: 1,
-  totalRounds: 5,
-  potAmount: "25000.00",
-  reserveRatioBps: 1000,
-  members: [
-    { memberId: "00014444-4444-8444-8444-444444444444", displayName: "አባላት 1", contributionAmount: "5000.00" }
-  ],
-  // A round cannot commit without a sealed member contribution, so every commit
-  // request carries one. There is deliberately no server-side fallback: if the
-  // server could invent a contribution, the fairness property would be worth
-  // nothing.
-  memberCommitments: [
-    { memberId: "00014444-4444-8444-8444-444444444444", sealed: "e".repeat(64) }
-  ],
+  drawId,
   idempotencyKey: "draw-commit-1"
 };
 
@@ -156,7 +147,7 @@ describe("POST /api/draw/commits", () => {
 
     expect(response.status).toBe(401);
     expect(mocks.getUser).not.toHaveBeenCalled();
-    expect(service.commit).not.toHaveBeenCalled();
+    expect(service.commitFromSession).not.toHaveBeenCalled();
   });
 
   it("503s when Supabase is not configured", async () => {
@@ -182,14 +173,14 @@ describe("POST /api/draw/commits", () => {
     // Authorization is the caller's role in the group, enforced in SQL; the JWT
     // carries no role, so the route cannot and does not decide this itself.
     const service = fakeService();
-    (service.commit as unknown as { mockRejectedValue: (e: unknown) => void }).mockRejectedValue(
+    (service.commitFromSession as unknown as { mockRejectedValue: (e: unknown) => void }).mockRejectedValue(
       new DrawError("FORBIDDEN", "draw_forbidden")
     );
 
     const response = await createCommitHandler(() => service)(request(commitBody));
 
     expect(response.status).toBe(403);
-    expect(service.commit).toHaveBeenCalledTimes(1);
+    expect(service.commitFromSession).toHaveBeenCalledTimes(1);
   });
 
   it("REJECTS (400) a non-JSON content type before touching the service", async () => {
@@ -198,7 +189,7 @@ describe("POST /api/draw/commits", () => {
     const response = await createCommitHandler(() => service)(request(commitBody, "token", "text/plain"));
 
     expect(response.status).toBe(400);
-    expect(service.commit).not.toHaveBeenCalled();
+    expect(service.commitFromSession).not.toHaveBeenCalled();
   });
 
   it("REJECTS (400) a spoofed committedBy field", async () => {
@@ -209,18 +200,27 @@ describe("POST /api/draw/commits", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(service.commit).not.toHaveBeenCalled();
+    expect(service.commitFromSession).not.toHaveBeenCalled();
   });
 
-  it("REJECTS (400) numeric money instead of coercing it", async () => {
-    const service = fakeService();
+  it("REJECTS (400) every field the server reads from the database instead of the client", async () => {
+    // The roster, the pot (even as a number), the reserve, the rounds and above
+    // all the sealed set are the database's, so a body that carries one is a
+    // client believing it chose it.
+    for (const smuggled of [
+      { members: [{ memberId: actorId, displayName: "x", contributionAmount: "1.00" }] },
+      { memberCommitments: [{ memberId: actorId, sealed: "e".repeat(64) }] },
+      { potAmount: 25000 },
+      { potAmount: "25000.00" },
+      { reserveRatioBps: 1000 },
+      { groupId, cycleId, round: 1, totalRounds: 5 }
+    ]) {
+      const service = fakeService();
+      const response = await createCommitHandler(() => service)(request({ ...commitBody, ...smuggled }));
 
-    const response = await createCommitHandler(() => service)(
-      request({ ...commitBody, potAmount: 25000 })
-    );
-
-    expect(response.status).toBe(400);
-    expect(service.commit).not.toHaveBeenCalled();
+      expect(response.status).toBe(400);
+      expect(service.commitFromSession).not.toHaveBeenCalled();
+    }
   });
 
   it("REJECTS (400) a short seed rather than accepting weak entropy", async () => {
@@ -231,7 +231,7 @@ describe("POST /api/draw/commits", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(service.commit).not.toHaveBeenCalled();
+    expect(service.commitFromSession).not.toHaveBeenCalled();
   });
 
   it("REJECTS (400) a commitment nonce equal to the seed", async () => {
@@ -242,30 +242,7 @@ describe("POST /api/draw/commits", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(service.commit).not.toHaveBeenCalled();
-  });
-
-  it("REJECTS (400) a duplicate member in the roster", async () => {
-    const service = fakeService();
-    const member = commitBody.members[0];
-
-    const response = await createCommitHandler(() => service)(
-      request({ ...commitBody, members: [member, member] })
-    );
-
-    expect(response.status).toBe(400);
-    expect(service.commit).not.toHaveBeenCalled();
-  });
-
-  it("REJECTS (400) a round beyond the cycle's total rounds", async () => {
-    const service = fakeService();
-
-    const response = await createCommitHandler(() => service)(
-      request({ ...commitBody, round: 9, totalRounds: 5 })
-    );
-
-    expect(response.status).toBe(400);
-    expect(service.commit).not.toHaveBeenCalled();
+    expect(service.commitFromSession).not.toHaveBeenCalled();
   });
 
   it("creates a commitment and publishes the verification transcript", async () => {
@@ -287,7 +264,8 @@ describe("POST /api/draw/commits", () => {
 
     await createCommitHandler(() => service)(request(commitBody));
 
-    const call = (service.commit as unknown as { mock: { calls: unknown[][] } }).mock.calls[0];
+    const call = (service.commitFromSession as unknown as { mock: { calls: unknown[][] } }).mock.calls[0];
+    expect(call?.[0]).toMatchObject({ drawId, idempotencyKey: "draw-commit-1" });
     expect(call?.[1]).toEqual({ userId: actorId });
     expect((call?.[0] as Record<string, unknown>).committedBy).toBeUndefined();
     expect((call?.[0] as Record<string, unknown>).committedAt).toBeUndefined();
@@ -298,14 +276,33 @@ describe("POST /api/draw/reveals", () => {
   const revealBody = {
     drawId,
     seed: "reveal-seed-abcdefghij",
-    // The reveal carries every member nonce, because the winner depends on
-    // randomness the treasurer did not choose. A reveal without them is not a
-    // request to complete the ceremony.
-    memberNonces: [
-      { memberId: "00014444-4444-8444-8444-444444444444", nonce: "member-nonce-0123456789" }
-    ],
+    // No member nonces: the database holds the ones members released and hands
+    // them over only together with a seed that matches the commitment.
     idempotencyKey: "draw-reveal-1"
   };
+
+  it("REJECTS (400) memberNonces in the body: openings are the ones members released, never supplied", async () => {
+    const service = fakeService();
+
+    const response = await createRevealHandler(() => service)(
+      request({
+        ...revealBody,
+        memberNonces: [{ memberId: "00014444-4444-8444-8444-444444444444", nonce: "member-nonce-0123456789" }]
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(service.reveal).not.toHaveBeenCalled();
+  });
+
+  it("passes the seed and nothing else to the service", async () => {
+    const service = fakeService();
+
+    await createRevealHandler(() => service)(request(revealBody));
+
+    const call = (service.reveal as unknown as { mock: { calls: unknown[][] } }).mock.calls[0];
+    expect(call?.[0]).toEqual({ drawId, seed: "reveal-seed-abcdefghij" });
+  });
 
   it("403s when the database refuses the caller's role in the group", async () => {
     const service = fakeService();

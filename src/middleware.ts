@@ -31,6 +31,15 @@ export const RATE_LIMITED = new Set([
   "/api/draw/payouts",
   "/api/draw/verify",
   "/api/draw/rounds/[roundId]",
+  // Cycles, server-created draws, and the member seal / nonce submissions.
+  // `/api/draw/cycles` carries both the list (GET) and the create (POST), so the
+  // method picks the rule; the others are single-purpose.
+  "/api/draw/cycles",
+  "/api/draw/cycles/[cycleId]",
+  "/api/draw/draws",
+  "/api/draw/draws/[drawId]",
+  "/api/draw/seals",
+  "/api/draw/nonces",
   // A4: Wave 2's sync route. The branch in `resolveRateLimit` already existed
   // and was unreachable until this entry existed.
   "/api/sync",
@@ -53,6 +62,8 @@ const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 
 const BANK_VERIFICATION_ID_PATH = new RegExp(`^/api/bank-verifications/${UUID_SOURCE}$`, "i");
 const DRAW_ROUND_PATH = new RegExp(`^/api/draw/rounds/${UUID_SOURCE}$`, "i");
+const DRAW_CYCLE_PATH = new RegExp(`^/api/draw/cycles/${UUID_SOURCE}$`, "i");
+const DRAW_SESSION_PATH = new RegExp(`^/api/draw/draws/${UUID_SOURCE}$`, "i");
 
 function isBankVerificationReadPath(pathname: string): boolean {
   return pathname === "/api/bank-verifications/[verificationId]" || BANK_VERIFICATION_ID_PATH.test(pathname);
@@ -66,8 +77,22 @@ function isDrawRoundPath(pathname: string): boolean {
   return pathname === "/api/draw/rounds/[roundId]" || DRAW_ROUND_PATH.test(pathname);
 }
 
+function isDrawCyclePath(pathname: string): boolean {
+  return pathname === "/api/draw/cycles/[cycleId]" || DRAW_CYCLE_PATH.test(pathname);
+}
+
+function isDrawSessionPath(pathname: string): boolean {
+  return pathname === "/api/draw/draws/[drawId]" || DRAW_SESSION_PATH.test(pathname);
+}
+
 export function isRateLimitedPath(pathname: string): boolean {
-  return RATE_LIMITED.has(pathname) || isBankVerificationReadPath(pathname) || isDrawRoundPath(pathname);
+  return (
+    RATE_LIMITED.has(pathname) ||
+    isBankVerificationReadPath(pathname) ||
+    isDrawRoundPath(pathname) ||
+    isDrawCyclePath(pathname) ||
+    isDrawSessionPath(pathname)
+  );
 }
 
 export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRule {
@@ -101,6 +126,17 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
     return WRITE_RULE;
   }
   if (pathname === "/api/draw/verify" || isDrawRoundPath(pathname)) {
+    return READ_RULE;
+  }
+  // Creating a cycle, opening a draw and a member's seal or nonce each write
+  // state a ceremony depends on. Listing and reading them is read-sized.
+  if (pathname === "/api/draw/cycles") {
+    return method === "GET" ? READ_RULE : WRITE_RULE;
+  }
+  if (pathname === "/api/draw/draws" || pathname === "/api/draw/seals" || pathname === "/api/draw/nonces") {
+    return WRITE_RULE;
+  }
+  if (isDrawCyclePath(pathname) || isDrawSessionPath(pathname)) {
     return READ_RULE;
   }
   // A2: transcription and synthesis are billable third-party calls, so they

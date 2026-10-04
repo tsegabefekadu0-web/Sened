@@ -1,7 +1,7 @@
 import { formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
 
 import { DrawError } from "./errors";
-import type { DrawRiskAssessment } from "./types";
+import type { DrawRiskAssessment, DrawRiskNote } from "./types";
 
 /**
  * M4.2 — default risk and reserve retention.
@@ -51,6 +51,8 @@ export interface ReservePlan {
   readonly payoutMinor: bigint;
   readonly capped: boolean;
   readonly notes: readonly string[];
+  /** The same notes as data, so the screen can say them in the member's language. */
+  readonly noteItems: readonly DrawRiskNote[];
 }
 
 function requireMinorUnits(value: string, label: string): bigint {
@@ -123,20 +125,33 @@ export function planReserve(request: ReserveRequest): ReservePlan {
   const payoutMinor = potMinor - reserveMinor;
 
   const notes: string[] = [];
+  const noteItems: DrawRiskNote[] = [];
   notes.push(
     `Base reserve is ${formatEtbMinorUnits(baseReserveMinor)} ETB (${request.reserveRatioBps} bps of the pot).`
   );
+  noteItems.push({
+    code: "base_reserve",
+    amount: formatEtbMinorUnits(baseReserveMinor),
+    bps: request.reserveRatioBps
+  });
   if (singleMemberExposure > 0n) {
     notes.push(
       `A member drawn this round still owes ${formatEtbMinorUnits(singleMemberExposure)} ETB across the remaining rounds, so the reserve is raised to cover one member's default.`
     );
+    noteItems.push({ code: "member_exposure", amount: formatEtbMinorUnits(singleMemberExposure) });
   } else {
     notes.push("This is the final round, so no member retains contribution exposure.");
+    noteItems.push({ code: "final_round" });
   }
   if (desiredMinor > capMinor) {
     notes.push(
       `Full exposure coverage would need ${formatEtbMinorUnits(desiredMinor)} ETB, above the ${MAX_RESERVE_BPS} bps ceiling, so the reserve is capped. The cycle is under-funded and needs a member vote.`
     );
+    noteItems.push({
+      code: "capped",
+      needed: formatEtbMinorUnits(desiredMinor),
+      ceilingBps: Number(MAX_RESERVE_BPS)
+    });
   }
 
   if (payoutMinor <= 0n) {
@@ -153,7 +168,8 @@ export function planReserve(request: ReserveRequest): ReservePlan {
     reserveMinor,
     payoutMinor,
     capped: desiredMinor > capMinor,
-    notes
+    notes,
+    noteItems
   };
 }
 
@@ -180,13 +196,21 @@ export function assessDrawRisk(
   const winnerOutstanding = participantMinor - shareMinor;
 
   const notes = [...plan.notes];
+  const noteItems: DrawRiskNote[] = [...plan.noteItems];
+  const coveragePercent = cappedCoverageBps === BPS_SCALE ? "100" : String(cappedCoverageBps / 100n);
   notes.push(
-    `The reserve covers ${cappedCoverageBps === BPS_SCALE ? "100" : String(cappedCoverageBps / 100n)}% of the ${formatEtbMinorUnits(remainingObligation)} ETB still owed across the remaining rounds.`
+    `The reserve covers ${coveragePercent}% of the ${formatEtbMinorUnits(remainingObligation)} ETB still owed across the remaining rounds.`
   );
+  noteItems.push({
+    code: "coverage",
+    percent: coveragePercent,
+    owed: formatEtbMinorUnits(remainingObligation)
+  });
   if (covers <= 0) {
     notes.push(
       "The reserve cannot absorb even one member's default. Treat the remaining rounds as at risk."
     );
+    noteItems.push({ code: "cannot_absorb" });
   }
 
   return {
@@ -200,6 +224,7 @@ export function assessDrawRisk(
     winnerOutstandingMinor: formatEtbMinorUnits(winnerOutstanding),
     reserveCoversDefaults: covers,
     reserveAdequate: plan.capped === false && plan.reserveMinor >= singleDefault,
-    notes
+    notes,
+    noteItems
   };
 }

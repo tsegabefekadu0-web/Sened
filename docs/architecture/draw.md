@@ -737,9 +737,9 @@ back with a group-access policy. The exception is `draw_nonces` (§16.4).
 
 ### 16.5 Ledger figures and bank provenance
 
-`LiveDraw` reads the ledger the way the home screen does (`loadHomeLedger`) and
-shows the contribution entries recorded since the cycle started (`cycleLedgerFigures`):
-count and total, and who has paid.
+`LiveDraw` pages back through the group's entries with the `GET /api/ledger/entries`
+cursor (`loadCycleLedgerFigures`) and shows the contribution entries recorded since the
+cycle started (`cycleLedgerFigures`): count and total, and who has paid.
 
 **Where provenance comes from.** The link already existed:
 `bank_verification_intents.ledger_entry_id`, written by
@@ -769,8 +769,19 @@ and count; entries without provenance are counted and totalled as unattributed. 
 window is "since the cycle started": the cycle has no cadence and entries have no
 round id, so there is no per-round period, and a member who is not listed has no
 bank-verified entry in the window, which is not the same as unpaid. Member labels are
-the members API's own (email for the owner, "Member xxxxxxxx" otherwise). If the
-ledger is longer than one read returns, no total is shown rather than a guess.
+the members API's own (email for the owner, "Member xxxxxxxx" otherwise).
+
+**Large groups.** Entries are read newest first, 100 per page, following `nextCursor`
+(`beforeSequence`) until a page's oldest entry was *recorded* before the cycle began
+(sequence and recording time rise together on the append-only chain; `occurredAt`
+cannot decide this because an entry can be backdated), or the ledger runs out. A group
+of any size is therefore attributed. The read is bounded at 20 pages (2,000 entries,
+`FIGURES_MAX_PAGES`); only if that bound is hit before the cycle's start is reached
+does `/draw` say the ledger could not be fully read and show no total rather than a
+guess. The pot balance on the home screen does not depend on paging at all: it comes
+from `GET /api/ledger/balances` (`get_ledger_balances_v1`, migration
+`20261007100000_ledger_balances.sql`), a `sum()` over postings in one database
+snapshot.
 
 ### 16.6 Database-side hashes and their parity
 

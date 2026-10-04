@@ -44,7 +44,8 @@ function ready(
       potBalance,
       contributions: contributions.map((c) => ({ provenance: null, ...c, occurredAt: "2026-09-01T09:00:00.000Z" }))
     },
-    memberLabels
+    memberLabels,
+    feedTruncated: false
   };
 }
 
@@ -161,6 +162,15 @@ describe("home screen: signed in shows the group ledger", () => {
     expect(screen.queryByText(am("home.live.loading"))).not.toBeInTheDocument();
   });
 
+  it("shows the server balance for a long ledger with a status note that the list is only the recent contributions", async () => {
+    hoisted.load.mockResolvedValue({ ...ready("12345.67", [{ id: "c1", sequence: "250", amount: "10.00" }]), feedTruncated: true });
+    render(<SenedHome />);
+    expect(await screen.findByText("12,345.67")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(am("home.live.feedTruncated"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(am("home.live.error"))).not.toBeInTheDocument();
+  });
+
   it("shows a zero balance with an empty-ledger message when there are no entries", async () => {
     hoisted.load.mockResolvedValue({ status: "empty" });
     render(<SenedHome />);
@@ -173,8 +183,7 @@ describe("home screen: signed in shows the group ledger", () => {
     ["error", "home.live.error"],
     ["unauthorized", "home.live.unauthorized"],
     ["no-group", "home.live.noGroup"],
-    ["multiple-groups", "home.live.multipleGroups"],
-    ["incomplete", "home.live.incomplete"]
+    ["multiple-groups", "home.live.multipleGroups"]
   ] as const)("shows %s with no balance and no sample numbers", async (status, key) => {
     hoisted.load.mockResolvedValue({ status });
     render(<SenedHome />);

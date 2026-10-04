@@ -89,6 +89,42 @@ function netOnAccount(entry: SummaryEntry, accountId: string): bigint {
 }
 
 /**
+ * The pot contributions among `entries`, newest first, corrected ones left out.
+ *
+ * Needs no balance, so it works on a page of the ledger: a correction always has
+ * a higher sequence than the entry it reverses, so when the original is on the
+ * page its correction is too (pages are cut at a sequence, newest side first).
+ * The pot balance itself comes from the server (`GET /api/ledger/balances`) for
+ * the screens that cannot hold the whole list.
+ */
+export function summarizeContributions(entries: readonly SummaryEntry[], potAccountId: string): HomeContribution[] {
+  const corrected = new Set(entries.map((entry) => entry.correctsEntryId).filter((id) => id !== null));
+  const contributions: HomeContribution[] = [];
+  for (const entry of entries) {
+    if (entry.entryType !== "contribution" || corrected.has(entry.id)) {
+      continue;
+    }
+    const added = netOnAccount(entry, potAccountId);
+    // A contribution that did not add to the pot is not a pot contribution.
+    if (added > 0n) {
+      contributions.push({
+        id: entry.id,
+        sequence: entry.sequence,
+        occurredAt: entry.occurredAt,
+        amount: formatEtbMinorUnits(added),
+        provenance: entry.provenance ?? null
+      });
+    }
+  }
+  contributions.sort((left, right) => {
+    const difference = BigInt(right.sequence) - BigInt(left.sequence);
+    return difference < 0n ? -1 : difference > 0n ? 1 : 0;
+  });
+
+  return contributions;
+}
+
+/**
  * Derive the home summary from a group's complete entry list.
  *
  * "Complete" is the caller's job to establish: summing a truncated list yields
@@ -113,30 +149,7 @@ export function summarizeLedger(
     throw integrity("The ledger nets the pot below zero");
   }
 
-  const corrected = new Set(entries.map((entry) => entry.correctsEntryId).filter((id) => id !== null));
-  const contributions: HomeContribution[] = [];
-  for (const entry of entries) {
-    if (entry.entryType !== "contribution" || corrected.has(entry.id)) {
-      continue;
-    }
-    const added = netOnAccount(entry, pot.id);
-    // A contribution that did not add to the pot is not a pot contribution.
-    if (added > 0n) {
-      contributions.push({
-        id: entry.id,
-        sequence: entry.sequence,
-        occurredAt: entry.occurredAt,
-        amount: formatEtbMinorUnits(added),
-        provenance: entry.provenance ?? null
-      });
-    }
-  }
-  contributions.sort((left, right) => {
-    const difference = BigInt(right.sequence) - BigInt(left.sequence);
-    return difference < 0n ? -1 : difference > 0n ? 1 : 0;
-  });
-
-  return { potBalance: formatEtbMinorUnits(balance), contributions };
+  return { potBalance: formatEtbMinorUnits(balance), contributions: summarizeContributions(entries, pot.id) };
 }
 
 /**

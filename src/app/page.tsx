@@ -107,7 +107,6 @@ const LIVE_NOTICE_KEYS: Readonly<Record<Exclude<HomeLedgerResult["status"], "rea
   unauthorized: "home.live.unauthorized",
   "no-group": "home.live.noGroup",
   "multiple-groups": "home.live.multipleGroups",
-  incomplete: "home.live.incomplete",
   error: "home.live.error"
 };
 
@@ -177,7 +176,9 @@ export default function SenedHome() {
       : home.kind === "loading"
         ? t("home.live.loading")
         : home.result.status === "ready"
-          ? null
+          ? home.result.feedTruncated
+            ? t("home.live.feedTruncated")
+            : null
           : t(LIVE_NOTICE_KEYS[home.result.status]);
 
   /**
@@ -250,7 +251,7 @@ export default function SenedHome() {
             <div className="md:col-span-6 space-y-4">
               {notice !== null && (
                 <p
-                  role={home.kind === "live" && home.result.status !== "empty" ? "alert" : "status"}
+                  role={home.kind === "live" && home.result.status !== "empty" && home.result.status !== "ready" ? "alert" : "status"}
                   className="mx-4 md:mx-0 mt-4 rounded-xl border border-dashed border-[#C6532B]/50 bg-[#FBEFE6] px-3 py-2 text-xs font-semibold leading-5 text-[#8A4B2A]"
                 >
                   {notice}

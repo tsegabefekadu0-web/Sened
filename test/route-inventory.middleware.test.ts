@@ -149,6 +149,26 @@ describe("the reserved Wave 2 sync buckets are finally reachable", () => {
   });
 });
 
+describe("the ledger read routes are metered with the read rule", () => {
+  it("registers the entries and balances reads", () => {
+    for (const path of ["/api/ledger/entries", "/api/ledger/balances"]) {
+      expect(RATE_LIMITED.has(path)).toBe(true);
+      expect(isRateLimitedPath(path)).toBe(true);
+    }
+  });
+
+  it("charges the balances read READ_RULE for GET", () => {
+    expect(resolveRateLimit("/api/ledger/balances", "GET")).toEqual(READ_RULE);
+  });
+
+  it("answers with the read headers on /api/ledger/balances", () => {
+    const response = middleware(
+      new NextRequest("http://localhost/api/ledger/balances", { headers: { authorization: "Bearer reader" } })
+    );
+    expect(response.headers.get("X-RateLimit-Limit")).toBe(String(READ_RULE.limit));
+  });
+});
+
 describe("the limiter actually answers on these routes", () => {
   it("returns headers from the voice route instead of passing through", () => {
     const request = new NextRequest("http://localhost/api/voice/transcribe", {

@@ -3,7 +3,7 @@ import {
   LedgerService,
   SupabaseLedgerRepository,
   isLedgerError,
-  listGroupLedgerEntries,
+  readGroupLedgerPage,
   type LedgerEntry
 } from "@/lib/ledger";
 import { bearerToken, getUserScopedClient } from "@/lib/supabaseServer";
@@ -125,11 +125,16 @@ export async function POST(request: Request): Promise<Response> {
 }
 
 /**
- * `GET /api/ledger/entries?groupId=<uuid>[&limit=1..100]` — a group's entries,
- * newest first, each with its postings and a `provenance` field: `null`, or the
+ * `GET /api/ledger/entries?groupId=<uuid>[&limit=1..100][&beforeSequence=<n>]` —
+ * a group's entries, newest first, each with its postings and a `provenance` field: `null`, or the
  * verified bank receipt that posted the entry (`{ kind: "bank_verification",
  * provider, verifiedAt, verificationId, memberUserId }`, never a reference).
  * Read-only.
+ *
+ * Paging: the body is `{ entries, hasMore, nextCursor }`. `beforeSequence` is an
+ * exclusive upper bound on sequence; when `hasMore` is true, `nextCursor` is the
+ * value to send as `beforeSequence` for the next older page, and `null` marks the
+ * last page. Omitting it returns the newest page, as before.
  *
  * What the O-3 correction form needs in order to name the entry it corrects.
  * Authorization is the tables' own row-level security under the caller's JWT:
@@ -154,11 +159,17 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   try {
-    const entries = await listGroupLedgerEntries(auth.client, parsed.data.groupId, parsed.data.limit);
-    if (entries === null) {
+    const page = await readGroupLedgerPage(auth.client, parsed.data.groupId, {
+      limit: parsed.data.limit,
+      beforeSequence: parsed.data.beforeSequence
+    });
+    if (page === null) {
       return jsonError("not_found", 404);
     }
-    return Response.json({ entries }, { headers: { "Cache-Control": "private, no-store" } });
+    return Response.json(
+      { entries: page.entries, hasMore: page.hasMore, nextCursor: page.nextCursor },
+      { headers: { "Cache-Control": "private, no-store" } }
+    );
   } catch {
     return jsonError("storage_failure", 502);
   }

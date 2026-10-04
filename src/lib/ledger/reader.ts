@@ -4,8 +4,10 @@ import { LedgerError } from "./errors";
 import { formatEtbAmount } from "./money";
 import { isUuid } from "./rules";
 import {
+  LEDGER_ACCOUNT_TYPES,
   LEDGER_ENTRY_TYPES,
   LEDGER_POSTING_DIRECTIONS,
+  type LedgerAccountType,
   type LedgerEntryType,
   type LedgerPostingDirection
 } from "./types";
@@ -18,7 +20,9 @@ type BankProvider = "telebirr" | "cbe" | "awash";
  *
  * Runs under the caller's JWT against the tables' own `select` policies
  * (`sened_ledger_can_access_group`), so tenant isolation is Postgres's job and
- * not this file's. Nothing here widens that: no service role, no RPC.
+ * not this file's. Nothing here widens that: no service role, and the two RPCs
+ * (provenance, balances) are SECURITY DEFINER functions that re-check group
+ * membership themselves.
  *
  * A row that does not parse is an error, not a skipped row. The two client
  * reads before this one drop malformed rows because they list *options*; this
@@ -186,16 +190,34 @@ function storageFailure(cause: unknown): LedgerError {
   return new LedgerError("STORAGE_FAILURE", "Ledger read failed", cause);
 }
 
+/** One page of a group's entries, newest first, with the cursor for the next (older) page. */
+export interface PublicLedgerEntryPage {
+  readonly entries: readonly PublicLedgerEntry[];
+  /** True when entries older than this page's oldest exist. */
+  readonly hasMore: boolean;
+  /**
+   * The `beforeSequence` value that fetches the next page (this page's lowest
+   * sequence), or `null` on the last page.
+   */
+  readonly nextCursor: string | null;
+}
+
 /**
- * The newest `limit` entries of one group, or `null` when the caller cannot see
- * the group. Row-level security makes "not yours" and "does not exist" the same
- * answer, which is the point: neither is distinguishable from outside.
+ * One page of one group's entries, newest first, or `null` when the caller
+ * cannot see the group. Row-level security makes "not yours" and "does not
+ * exist" the same answer, which is the point: neither is distinguishable from
+ * outside.
+ *
+ * `beforeSequence` is an exclusive upper bound on sequence (a keyset cursor, not
+ * an offset): the chain is append-only and sequences only grow, so a cursor
+ * stays valid while other devices append, and no entry is skipped or repeated
+ * across pages. One extra row is read to know whether a further page exists.
  */
-export async function listGroupLedgerEntries(
+export async function readGroupLedgerPage(
   client: SupabaseClient,
   groupId: string,
-  limit: number
-): Promise<readonly PublicLedgerEntry[] | null> {
+  options: { readonly limit: number; readonly beforeSequence?: string | null }
+): Promise<PublicLedgerEntryPage | null> {
   const group = await client.from("ledger_groups").select("id").eq("id", groupId).maybeSingle();
   if (group.error) {
     throw storageFailure(group.error);
@@ -204,23 +226,112 @@ export async function listGroupLedgerEntries(
     return null;
   }
 
-  const entries = await client
-    .from("ledger_entries")
-    .select(ENTRY_COLUMNS)
-    .eq("group_id", groupId)
-    .order("sequence", { ascending: false })
-    .limit(limit);
+  let query = client.from("ledger_entries").select(ENTRY_COLUMNS).eq("group_id", groupId);
+  if (options.beforeSequence !== undefined && options.beforeSequence !== null) {
+    query = query.lt("sequence", options.beforeSequence);
+  }
+  const entries = await query.order("sequence", { ascending: false }).limit(options.limit + 1);
   if (entries.error) {
     throw storageFailure(entries.error);
   }
   if (!Array.isArray(entries.data)) {
     throw integrity("Ledger read returned an invalid entry list");
   }
-  if (entries.data.length === 0) {
-    return [];
+  const hasMore = entries.data.length > options.limit;
+  const rows = hasMore ? entries.data.slice(0, options.limit) : entries.data;
+  if (rows.length === 0) {
+    return { entries: [], hasMore: false, nextCursor: null };
   }
 
-  return attachPostings(client, groupId, entries.data);
+  const page = await attachPostings(client, groupId, rows);
+  return { entries: page, hasMore, nextCursor: hasMore ? page[page.length - 1].sequence : null };
+}
+
+/** The newest `limit` entries of one group, or `null` when the caller cannot see the group. */
+export async function listGroupLedgerEntries(
+  client: SupabaseClient,
+  groupId: string,
+  limit: number
+): Promise<readonly PublicLedgerEntry[] | null> {
+  const page = await readGroupLedgerPage(client, groupId, { limit });
+  return page === null ? null : page.entries;
+}
+
+export interface PublicLedgerAccountBalance {
+  readonly accountId: string;
+  readonly code: string;
+  readonly name: string;
+  readonly accountType: LedgerAccountType;
+  /** ETB, exact, two decimals, debit-positive (debits minus credits) for every account type. */
+  readonly balance: string;
+}
+
+/** Every account's balance at one chain head, from `get_ledger_balances_v1`. */
+export interface PublicLedgerBalances {
+  readonly groupId: string;
+  /** Sequence of the newest entry the balances include (`"0"` for an empty ledger). */
+  readonly headSequence: string;
+  /** Entries the balances were computed over. */
+  readonly entryCount: string;
+  readonly balances: readonly PublicLedgerAccountBalance[];
+}
+
+const COUNT = /^(0|[1-9]\d{0,18})$/;
+const SIGNED_AMOUNT = /^-?\d+\.\d{2}$/;
+
+function parseBalances(value: unknown, groupId: string): PublicLedgerBalances {
+  if (!isRecord(value)) {
+    throw integrity("Ledger balances returned an invalid body");
+  }
+  if (uuid(value, "groupId") !== groupId) {
+    throw integrity("Ledger balances returned another group");
+  }
+  const headSequence = str(value, "headSequence");
+  const entryCount = str(value, "entryCount");
+  if (!COUNT.test(headSequence) || !COUNT.test(entryCount)) {
+    throw integrity("Ledger balances returned an invalid head or count");
+  }
+  const raw = value.balances;
+  if (!Array.isArray(raw)) {
+    throw integrity("Ledger balances returned an invalid account list");
+  }
+  const seen = new Set<string>();
+  const balances = raw.map((item): PublicLedgerAccountBalance => {
+    if (!isRecord(item)) {
+      throw integrity("Ledger balances returned an invalid account");
+    }
+    const accountId = uuid(item, "accountId");
+    const accountType = str(item, "accountType");
+    const balance = str(item, "balance");
+    if (seen.has(accountId) || !LEDGER_ACCOUNT_TYPES.includes(accountType as LedgerAccountType) || !SIGNED_AMOUNT.test(balance)) {
+      throw integrity("Ledger balances returned an invalid account");
+    }
+    seen.add(accountId);
+    return { accountId, code: str(item, "code"), name: str(item, "name"), accountType: accountType as LedgerAccountType, balance };
+  });
+  return { groupId, headSequence, entryCount, balances };
+}
+
+/**
+ * Per-account balances for one group at one chain head, or `null` when the
+ * caller is not a member (the function refuses; absent and not-yours are the
+ * same answer). Runs `get_ledger_balances_v1` under the caller's JWT; the
+ * function computes head, count and balances in a single statement, so they
+ * describe one snapshot.
+ */
+export async function readLedgerBalances(
+  client: SupabaseClient,
+  groupId: string
+): Promise<PublicLedgerBalances | null> {
+  const result = await client.rpc("get_ledger_balances_v1", { p_group_id: groupId });
+  if (result.error) {
+    const message = typeof result.error.message === "string" ? result.error.message : "";
+    if (message.includes("ledger_forbidden") || result.error.code === "42501") {
+      return null;
+    }
+    throw storageFailure(result.error);
+  }
+  return parseBalances(result.data, groupId);
 }
 
 function parseProvenance(value: unknown): PublicLedgerProvenance & { readonly entryId: string } {

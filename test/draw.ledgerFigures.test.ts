@@ -153,8 +153,100 @@ describe("loadCycleLedgerFigures", () => {
     expect(await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", deps([], 500))).toEqual({ status: "unavailable" });
   });
 
-  it("refuses to total a ledger longer than one read returns", async () => {
-    const many = Array.from({ length: 100 }, (_, index) => entry(String(index + 2), "2026-10-02T00:00:00.000Z", "1.00"));
-    expect(await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", deps(many))).toEqual({ status: "incomplete" });
+  /** A server over `all` (newest first) that honours limit and beforeSequence like the real route. */
+  const pagedDeps = (all: ReturnType<typeof entry>[] & { recordedAt?: string }[], calls: string[] = []) => ({
+    getToken: async () => "token",
+    fetchImpl: (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/my-groups")) {
+        return Response.json({ groups: [{ groupId: "g", role: "member", accounts: [{ id: "cash", code: "POT_CASH" }] }] });
+      }
+      calls.push(url);
+      const params = new URL(url, "http://localhost").searchParams;
+      const limit = Number(params.get("limit") ?? "50");
+      const before = params.get("beforeSequence");
+      const eligible = all.filter((row) => before === null || BigInt(row.sequence) < BigInt(before));
+      const entries = eligible.slice(0, limit);
+      const hasMore = eligible.length > limit;
+      return Response.json({
+        entries,
+        hasMore,
+        nextCursor: hasMore ? entries[entries.length - 1].sequence : null
+      });
+    }) as typeof fetch
+  });
+
+  const day = (n: number) => `2026-10-${String(n).padStart(2, "0")}T00:00:00.000Z`;
+  const recorded = (row: ReturnType<typeof entry>) => ({ ...row, recordedAt: row.occurredAt });
+
+  it("pages back through a group of more than 100 entries so the whole cycle is attributed", async () => {
+    // 250 entries: the oldest 50 are before the cycle (September), the newest 200 are in it.
+    const all = Array.from({ length: 250 }, (_, index) => {
+      const sequence = 250 - index;
+      return recorded(entry(String(sequence), sequence > 50 ? day(5) : "2026-09-01T00:00:00.000Z", "2.00"));
+    });
+    const calls: string[] = [];
+    const result = await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", pagedDeps(all, calls));
+    expect(result).toMatchObject({ status: "ready", figures: { count: 200, total: "400.00", unattributedCount: 200 } });
+    expect(calls).toEqual([
+      "/api/ledger/entries?groupId=g&limit=100",
+      "/api/ledger/entries?groupId=g&limit=100&beforeSequence=151",
+      "/api/ledger/entries?groupId=g&limit=100&beforeSequence=51"
+    ]);
+  });
+
+  it("stops paging once a page reaches entries recorded before the cycle, even if the ledger is longer", async () => {
+    const all = Array.from({ length: 1000 }, (_, index) => {
+      const sequence = 1000 - index;
+      return recorded(entry(String(sequence), sequence > 950 ? day(5) : "2026-09-01T00:00:00.000Z", "1.00"));
+    });
+    const calls: string[] = [];
+    const result = await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", pagedDeps(all, calls));
+    expect(result).toMatchObject({ status: "ready", figures: { count: 50, total: "50.00" } });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("counts a backdated entry only if it occurred in the cycle, and keeps paging past it", async () => {
+    // Sequence 150 is recorded in October but backdated to September: it must not
+    // end the paging (older in-cycle entries exist) and must not be counted.
+    const all = Array.from({ length: 150 }, (_, index) => {
+      const sequence = 150 - index;
+      return { ...entry(String(sequence), sequence === 150 ? "2026-09-15T00:00:00.000Z" : day(5), "1.00"), recordedAt: day(5) };
+    });
+    const result = await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", pagedDeps(all));
+    expect(result).toMatchObject({ status: "ready", figures: { count: 149 } });
+  });
+
+  it("says incomplete, with no total, only when the page bound is hit before the cycle start", async () => {
+    const all = Array.from({ length: 450 }, (_, index) => recorded(entry(String(450 - index), day(5), "1.00")));
+    const calls: string[] = [];
+    expect(await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", pagedDeps(all, calls), 3)).toEqual({ status: "incomplete" });
+    expect(calls).toHaveLength(3);
+    // The same ledger within a larger bound is read in full.
+    expect(await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", pagedDeps(all), 5)).toMatchObject({
+      status: "ready",
+      figures: { count: 450, total: "450.00" }
+    });
+  });
+
+  it("is not incomplete when the bound is reached exactly on the last page", async () => {
+    const all = Array.from({ length: 300 }, (_, index) => recorded(entry(String(300 - index), day(5), "1.00")));
+    expect(await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", pagedDeps(all), 3)).toMatchObject({
+      status: "ready",
+      figures: { count: 300 }
+    });
+  });
+
+  it("is unavailable when a later page cannot be read", async () => {
+    let calls = 0;
+    const base = pagedDeps(Array.from({ length: 250 }, (_, index) => recorded(entry(String(250 - index), day(5), "1.00"))));
+    const result = await loadCycleLedgerFigures("2026-10-01T00:00:00.000Z", {
+      getToken: base.getToken,
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).startsWith("/api/ledger/entries") && (calls += 1) === 2) return new Response("{}", { status: 502 });
+        return base.fetchImpl(input, init);
+      }) as typeof fetch
+    });
+    expect(result).toEqual({ status: "unavailable" });
   });
 });

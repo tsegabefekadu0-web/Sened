@@ -12,6 +12,7 @@ import { consumeRateLimit, PROXY_RULE, READ_RULE, WRITE_RULE, type RateLimitRule
  */
 export const RATE_LIMITED = new Set([
   "/api/ledger/entries",
+  "/api/ledger/balances",
   "/api/ledger/member-roles",
   // Invite links: create/list share one path (the method picks the rule),
   // redeem and revoke are writes, the member list is a read.
@@ -102,7 +103,7 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
   if (pathname === "/api/ledger/invites/redeem" || pathname === "/api/ledger/invites/revoke") {
     return WRITE_RULE;
   }
-  if (pathname === "/api/ledger/members") {
+  if (pathname === "/api/ledger/members" || pathname === "/api/ledger/balances") {
     return READ_RULE;
   }
   if (pathname === "/api/bank-verifications" || pathname === "/api/ledger/member-roles") {

@@ -1,9 +1,10 @@
 import type { AuthedFetchDeps } from "@/lib/auth/authedFetch";
-import { readGroupLedger, type WireEntry } from "./clientRead";
+import { fetchLedgerBalances, readEntriesPage, readMyGroup, type WireEntry } from "./clientRead";
+import { STANDARD_ACCOUNTS } from "./accounts";
 import { LEDGER_ENTRY_TYPES, type LedgerEntryType } from "./types";
 import { loadMembers } from "./clientInvites";
-import { summarizeLedger, type EntryProvenance, type HomeLedgerSummary, type SummaryEntry } from "./homeSummary";
-import { toEtbMinorUnits } from "./money";
+import { summarizeContributions, type EntryProvenance, type HomeLedgerSummary, type SummaryEntry } from "./homeSummary";
+import { formatEtbMinorUnits, toEtbMinorUnits } from "./money";
 
 export type HomeLedgerResult =
   | {
@@ -17,18 +18,22 @@ export type HomeLedgerResult =
        * Empty when nothing has provenance or the members could not be read.
        */
       readonly memberLabels: Readonly<Record<string, string | null>>;
+      /**
+       * True when older entries than the contributions listed exist. The pot
+       * balance still covers the whole ledger (it is computed by the server);
+       * only the feed is the most recent page.
+       */
+      readonly feedTruncated: boolean;
     }
   /** The group exists and has no entries yet: the balance is genuinely zero. */
   | { readonly status: "empty" }
   | { readonly status: "unauthorized" }
   | { readonly status: "no-group" }
   | { readonly status: "multiple-groups" }
-  /** More entries than one read returns, so a total would be a guess. */
-  | { readonly status: "incomplete" }
   | { readonly status: "error" };
 
-/** The most the entries route returns in one read (`LEDGER_READ_MAX_LIMIT`). */
-const READ_LIMIT = 100;
+/** The most the entries route returns in one read (`LEDGER_READ_MAX_LIMIT`): the feed is one such page. */
+export const ENTRIES_PAGE_LIMIT = 100;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -62,7 +67,7 @@ export function toEntryProvenance(value: unknown): EntryProvenance | null {
   };
 }
 
-function toSummaryEntry(entry: WireEntry): SummaryEntry | null {
+export function toSummaryEntry(entry: WireEntry): SummaryEntry | null {
   if (
     typeof entry.id !== "string" ||
     typeof entry.occurredAt !== "string" ||
@@ -102,43 +107,107 @@ function toSummaryEntry(entry: WireEntry): SummaryEntry | null {
   };
 }
 
+/** Parse a server balance such as `"-12.50"` to minor units; anything else throws. */
+function balanceToMinorUnits(balance: string): bigint {
+  const negative = balance.startsWith("-");
+  const units = toEtbMinorUnits(negative ? balance.slice(1) : balance);
+  return negative ? -units : units;
+}
+
 /**
  * Load what the home screen shows from the caller's group ledger.
  *
- * Reuses `readGroupLedger` for the group and its entries, so the group rules
- * (none, several, unauthorized) are exactly the correction form's. The entries
- * route is newest-first and capped, with no cursor: if the read came back full
- * and does not reach sequence 1, older entries exist that were not read, and
- * this says `incomplete` rather than totalling part of the ledger.
+ * The pot balance is the server's: `GET /api/ledger/balances` sums every
+ * posting in one database snapshot, so it exists for a ledger of any length and
+ * is never assembled from a page. The feed is the most recent page of entries,
+ * read with `beforeSequence = head + 1` so it ends exactly at the head the
+ * balance was computed at: an entry appended between the two reads is in
+ * neither, and the screen cannot show a contribution the balance does not
+ * contain. The group rules (none, several, unauthorized) are those of the
+ * correction form (`readMyGroup`).
+ *
+ * Two integrity refusals rather than a guess: a negative pot (cash cannot be
+ * owed), and, when the page happens to be the entire ledger, a page whose pot
+ * net differs from the server balance (the two would contradict each other on
+ * screen).
  */
 export async function loadHomeLedger(deps: AuthedFetchDeps = {}): Promise<HomeLedgerResult> {
-  const read = await readGroupLedger(deps, { limit: READ_LIMIT });
-  if (read.status !== "ok") {
-    // "read-only" is only produced for `writerOnly` callers.
-    return { status: read.status === "read-only" ? "error" : read.status };
+  const mine = await readMyGroup(deps);
+  if (mine.status !== "ok") {
+    return { status: mine.status };
+  }
+
+  const snapshot = await fetchLedgerBalances(mine.groupId, deps);
+  if (snapshot.status !== "ok") {
+    return { status: snapshot.status };
+  }
+  const pot = snapshot.balances.find((account) => account.code === STANDARD_ACCOUNTS.POT_CASH.code);
+  if (!pot) {
+    return { status: "error" };
+  }
+  let potUnits: bigint;
+  let head: bigint;
+  let count: bigint;
+  try {
+    potUnits = balanceToMinorUnits(pot.balance);
+    head = BigInt(snapshot.headSequence);
+    count = BigInt(snapshot.entryCount);
+  } catch {
+    return { status: "error" };
+  }
+  if (potUnits < 0n || (head === 0n) !== (count === 0n) || count > head) {
+    return { status: "error" };
+  }
+  if (head === 0n) {
+    return potUnits === 0n ? { status: "empty" } : { status: "error" };
+  }
+
+  const page = await readEntriesPage(
+    mine.groupId,
+    { limit: ENTRIES_PAGE_LIMIT, beforeSequence: (head + 1n).toString() },
+    deps
+  );
+  if (page.status !== "ok") {
+    return { status: page.status };
   }
   const entries: SummaryEntry[] = [];
-  for (const wire of read.entries) {
+  for (const wire of page.entries) {
     const entry = toSummaryEntry(wire);
-    if (entry === null) {
+    // An entry newer than the snapshot would contradict the balance beside it.
+    if (entry === null || BigInt(entry.sequence) > head) {
       return { status: "error" };
     }
     entries.push(entry);
   }
-  if (entries.length === 0) {
-    return { status: "empty" };
-  }
-  const oldest = entries.reduce((low, entry) => (BigInt(entry.sequence) < BigInt(low) ? entry.sequence : low), entries[0].sequence);
-  if (entries.length >= READ_LIMIT && oldest !== "1") {
-    return { status: "incomplete" };
-  }
-  let summary: HomeLedgerSummary;
+
+  let contributions;
   try {
-    summary = summarizeLedger(entries, read.accounts);
+    contributions = summarizeContributions(entries, pot.accountId);
+    if (!page.hasMore && entries.length > 0) {
+      let net = 0n;
+      for (const entry of entries) {
+        for (const posting of entry.postings) {
+          if (posting.accountId === pot.accountId) {
+            const units = toEtbMinorUnits(posting.amount);
+            net += posting.direction === "debit" ? units : -units;
+          }
+        }
+      }
+      if (net !== potUnits || BigInt(entries.length) !== count) {
+        return { status: "error" };
+      }
+    }
   } catch {
     return { status: "error" };
   }
-  return { status: "ready", summary, memberLabels: await readMemberLabels(read.groupId, summary, deps) };
+
+  const summary: HomeLedgerSummary = { potBalance: formatEtbMinorUnits(potUnits), contributions };
+  return {
+    status: "ready",
+    summary,
+    feedTruncated: page.hasMore,
+    memberLabels: await readMemberLabels(mine.groupId, summary, deps)
+  };
 }
 
 /**

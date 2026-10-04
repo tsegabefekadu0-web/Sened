@@ -81,7 +81,7 @@ function postingRows(forEntry = entryId) {
 
 function builder(table: string) {
   const self: Record<string, unknown> = {};
-  for (const op of ["select", "eq", "in", "order", "limit"]) {
+  for (const op of ["select", "eq", "in", "lt", "order", "limit"]) {
     self[op] = (...args: unknown[]) => {
       mocks.calls.push({ table, op, args });
       return self;
@@ -141,13 +141,13 @@ describe("GET /api/ledger/entries", () => {
       op: "order",
       args: ["sequence", { ascending: false }]
     });
-    expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "limit", args: [50] });
+    expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "limit", args: [51] });
   });
 
   it("is read-only and runs under the anon key, never a service role", async () => {
     await GET(request(`?groupId=${groupId}`));
     const ops = new Set(mocks.calls.map((call) => call.op));
-    expect([...ops].every((op) => ["select", "eq", "in", "order", "limit"].includes(op))).toBe(true);
+    expect([...ops].every((op) => ["select", "eq", "in", "lt", "order", "limit"].includes(op))).toBe(true);
     const clientCalls = vi.mocked(createClient).mock.calls;
     expect(clientCalls.length).toBeGreaterThan(0);
     for (const call of clientCalls) {
@@ -183,7 +183,7 @@ describe("GET /api/ledger/entries", () => {
 
   it("honours a valid limit", async () => {
     await GET(request(`?groupId=${groupId}&limit=5`));
-    expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "limit", args: [5] });
+    expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "limit", args: [6] });
   });
 
   it("returns 404 when RLS hides the group, without reading its entries", async () => {
@@ -275,6 +275,89 @@ describe("GET /api/ledger/entries", () => {
       correctsEntryId: entryId,
       rationale: "Wrong member credited"
     });
+  });
+});
+
+describe("GET /api/ledger/entries cursor paging", () => {
+  const ids = ["a", "b", "c"].map((letter) => letter.repeat(8) + "-0000-4000-8000-" + letter.repeat(12));
+
+  function threeEntries() {
+    // The route asks for limit + 1 rows; the database returns them newest first.
+    mocks.results.ledger_entries = {
+      data: [
+        entryRow({ id: ids[2], sequence: 30 }),
+        entryRow({ id: ids[1], sequence: 20 }),
+        entryRow({ id: ids[0], sequence: 10 })
+      ],
+      error: null
+    };
+    mocks.results.ledger_entry_postings = {
+      data: [...postingRows(ids[2]), ...postingRows(ids[1]), ...postingRows(ids[0])],
+      error: null
+    };
+  }
+
+  it("keeps the existing fields and adds hasMore: false and nextCursor: null on a short page", async () => {
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+    expect(body.entries).toHaveLength(1);
+    expect(body.hasMore).toBe(false);
+    expect(body.nextCursor).toBeNull();
+  });
+
+  it("returns exactly `limit` entries with hasMore and a cursor when older entries exist", async () => {
+    threeEntries();
+    const body = await (await GET(request(`?groupId=${groupId}&limit=2`))).json();
+    expect(body.entries.map((entry: { sequence: string }) => entry.sequence)).toEqual(["30", "20"]);
+    expect(body.hasMore).toBe(true);
+    // The cursor is the oldest returned sequence: the next page is strictly older.
+    expect(body.nextCursor).toBe("20");
+    expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "limit", args: [3] });
+    expect(mocks.calls.some((call) => call.op === "lt")).toBe(false);
+  });
+
+  it("passes beforeSequence as a strict less-than on sequence, in the same newest-first order", async () => {
+    await GET(request(`?groupId=${groupId}&beforeSequence=20`));
+    expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "lt", args: ["sequence", "20"] });
+    expect(mocks.calls).toContainEqual({ table: "ledger_entries", op: "order", args: ["sequence", { ascending: false }] });
+  });
+
+  it("marks the last page: a page filled exactly to the limit with nothing older has hasMore false", async () => {
+    mocks.results.ledger_entries = { data: [entryRow({ id: ids[1], sequence: 20 }), entryRow({ id: ids[0], sequence: 10 })], error: null };
+    mocks.results.ledger_entry_postings = { data: [...postingRows(ids[1]), ...postingRows(ids[0])], error: null };
+    const body = await (await GET(request(`?groupId=${groupId}&limit=2&beforeSequence=30`))).json();
+    expect(body.entries).toHaveLength(2);
+    expect(body.hasMore).toBe(false);
+    expect(body.nextCursor).toBeNull();
+  });
+
+  it("returns an empty last page when the cursor is at or before the first entry", async () => {
+    mocks.results.ledger_entries = { data: [], error: null };
+    const response = await GET(request(`?groupId=${groupId}&beforeSequence=1`));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ entries: [], hasMore: false, nextCursor: null });
+  });
+
+  it("walks the whole chain by following nextCursor, without gaps or repeats", async () => {
+    const all = [30, 20, 10];
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let pages = 0; pages < 5; pages += 1) {
+      const eligible = all.filter((sequence) => cursor === null || sequence < Number(cursor));
+      const rows = eligible.slice(0, 2);
+      mocks.results.ledger_entries = {
+        data: rows.map((sequence) => entryRow({ id: ids[sequence / 10 - 1], sequence })),
+        error: null
+      };
+      mocks.results.ledger_entry_postings = { data: rows.flatMap((sequence) => postingRows(ids[sequence / 10 - 1])), error: null };
+      // limit=1 => the route reads limit + 1 = 2 rows, which is what `rows` models.
+      const body: { entries: Array<{ sequence: string }>; hasMore: boolean; nextCursor: string | null } = await (
+        await GET(request(`?groupId=${groupId}&limit=1${cursor ? `&beforeSequence=${cursor}` : ""}`))
+      ).json();
+      seen.push(...body.entries.map((entry) => entry.sequence));
+      if (!body.hasMore) break;
+      cursor = body.nextCursor;
+    }
+    expect(seen).toEqual(["30", "20", "10"]);
   });
 });
 
@@ -402,7 +485,15 @@ describe("GET /api/ledger/entries query contract", () => {
     ["REJECTS (400) limit above the maximum", `?groupId=${groupId}&limit=101`],
     ["REJECTS (400) a non-numeric limit", `?groupId=${groupId}&limit=abc`],
     ["REJECTS (400) a negative limit", `?groupId=${groupId}&limit=-1`],
-    ["REJECTS (400) a fractional limit", `?groupId=${groupId}&limit=1.5`]
+    ["REJECTS (400) a fractional limit", `?groupId=${groupId}&limit=1.5`],
+    ["REJECTS (400) beforeSequence=0", `?groupId=${groupId}&beforeSequence=0`],
+    ["REJECTS (400) a negative beforeSequence", `?groupId=${groupId}&beforeSequence=-5`],
+    ["REJECTS (400) a non-numeric beforeSequence", `?groupId=${groupId}&beforeSequence=abc`],
+    ["REJECTS (400) a fractional beforeSequence", `?groupId=${groupId}&beforeSequence=1.5`],
+    ["REJECTS (400) a zero-padded beforeSequence", `?groupId=${groupId}&beforeSequence=007`],
+    ["REJECTS (400) an exponent beforeSequence", `?groupId=${groupId}&beforeSequence=1e3`],
+    ["REJECTS (400) a beforeSequence past bigint", `?groupId=${groupId}&beforeSequence=9223372036854775808`],
+    ["REJECTS (400) a repeated beforeSequence", `?groupId=${groupId}&beforeSequence=5&beforeSequence=6`]
   ];
 
   it.each(rejects)("%s", async (_name, query) => {

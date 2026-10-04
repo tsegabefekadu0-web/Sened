@@ -81,9 +81,12 @@ export const ledgerEntryRequestSchema = z
 
 export const LEDGER_READ_DEFAULT_LIMIT = 50;
 export const LEDGER_READ_MAX_LIMIT = 100;
+/** `ledger_entries.sequence` is a Postgres bigint. */
+const LEDGER_SEQUENCE_MAX = 9_223_372_036_854_775_807n;
 
 /**
- * Query string of `GET /api/ledger/entries`. Strict: an unknown parameter is a
+ * Query string of `GET /api/ledger/entries` (`groupId`, optional `limit` and
+ * optional `beforeSequence` cursor). Strict: an unknown parameter is a
  * 400, not ignored, so a client cannot believe it filtered by something the
  * server never looked at. A repeated parameter arrives as an array and fails.
  */
@@ -95,13 +98,26 @@ export const ledgerEntriesQuerySchema = z
       .regex(/^[1-9]\d{0,2}$/)
       .transform((value) => Number(value))
       .refine((value) => value <= LEDGER_READ_MAX_LIMIT, "limit is too large")
+      .optional(),
+    // Cursor: only entries with a smaller sequence are returned. A positive
+    // bigint in canonical decimal form (no sign, no leading zero, no exponent),
+    // so the value the server compares is exactly the value the client sent.
+    beforeSequence: z
+      .string()
+      .regex(/^[1-9]\d{0,18}$/)
+      // zod runs every check, so the shape is re-tested before BigInt() sees the value.
+      .refine((value) => !/^[1-9]\d{0,18}$/.test(value) || BigInt(value) <= LEDGER_SEQUENCE_MAX, "beforeSequence is too large")
       .optional()
   })
-  .strict()
+.strict()
   .transform((value) => ({
     groupId: value.groupId,
-    limit: value.limit ?? LEDGER_READ_DEFAULT_LIMIT
+    limit: value.limit ?? LEDGER_READ_DEFAULT_LIMIT,
+    beforeSequence: value.beforeSequence ?? null
   }));
+
+/** Query of `GET /api/ledger/balances`. Strict, like every ledger read. */
+export const ledgerBalancesQuerySchema = z.object({ groupId: uuidSchema }).strict();
 
 /**
  * `POST /api/ledger/member-roles` body. Strict: a smuggled `tenantId` or an

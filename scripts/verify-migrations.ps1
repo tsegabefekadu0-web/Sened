@@ -141,5 +141,10 @@ if ($check.Out -notmatch 'ALL LEDGER PROVENANCE CHECKS PASSED') {
     throw 'VERIFICATION DID NOT REACH THE LEDGER PROVENANCE SUCCESS MARKER'
 }
 
+if ($check.Out -notmatch 'ALL LEDGER BALANCES CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE LEDGER BALANCES SUCCESS MARKER'
+}
+
 docker rm -f $container 2>&1 | Out-Null
 Write-Host 'Migrations applied and verified.' -ForegroundColor Green

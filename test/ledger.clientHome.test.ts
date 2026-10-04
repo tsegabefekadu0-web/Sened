@@ -37,30 +37,117 @@ function deps(responses: Response[]) {
   return { getToken: async () => "tok", fetchImpl };
 }
 
+/** `GET /api/ledger/balances` body: the pot and income nets at `head`, over `count` entries. */
+function balancesBody(pot: string, head: number, count = head) {
+  return {
+    groupId: GROUP,
+    headSequence: String(head),
+    entryCount: String(count),
+    balances: [
+      { accountId: POT, code: "POT_CASH", name: "x", accountType: "asset", balance: pot },
+      { accountId: INCOME, code: "CONTRIBUTION_INCOME", name: "y", accountType: "income", balance: pot.startsWith("-") ? pot.slice(1) : `-${pot}` }
+    ]
+  };
+}
+
+const page = (entries: unknown[], hasMore = false, nextCursor: string | null = null) => ({ entries, hasMore, nextCursor });
+
 describe("loadHomeLedger", () => {
-  it("reads the group and its entries (max page) and totals the pot, for a plain member too", async () => {
-    const d = deps([json(groupBody("member")), json({ entries: [wire(2, "5.05"), wire(1, "10.00")] })]);
+  it("takes the pot from the balances endpoint and reads the feed up to that head, for a plain member too", async () => {
+    const d = deps([
+      json(groupBody("member")),
+      json(balancesBody("15.05", 2)),
+      json(page([wire(2, "5.05"), wire(1, "10.00")]))
+    ]);
     const result = await loadHomeLedger(d);
     expect(result.status).toBe("ready");
     expect(result.status === "ready" && result.summary.potBalance).toBe("15.05");
     expect(result.status === "ready" && result.summary.contributions.map((c) => c.id)).toEqual(["e2", "e1"]);
-    expect(d.fetchImpl.mock.calls[1][0]).toBe(`/api/ledger/entries?groupId=${GROUP}&limit=100`);
+    expect(result.status === "ready" && result.feedTruncated).toBe(false);
+    expect(d.fetchImpl.mock.calls[1][0]).toBe(`/api/ledger/balances?groupId=${GROUP}`);
+    // The feed ends exactly at the snapshot's head: sequence < head + 1.
+    expect(d.fetchImpl.mock.calls[2][0]).toBe(`/api/ledger/entries?groupId=${GROUP}&limit=100&beforeSequence=3`);
   });
 
-  it("is empty when the group has no entries", async () => {
-    expect(await loadHomeLedger(deps([json(groupBody()), json({ entries: [] })]))).toEqual({ status: "empty" });
+  it("gives a group with more than 100 entries a balance (the old 'incomplete' case) and a truncated feed", async () => {
+    const recent = Array.from({ length: 100 }, (_, i) => wire(250 - i, "2.00"));
+    const result = await loadHomeLedger(
+      deps([json(groupBody()), json(balancesBody("500.00", 250)), json(page(recent, true, "151"))])
+    );
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") return;
+    // The balance is the server's figure, not the sum of the 100 entries shown (200.00).
+    expect(result.summary.potBalance).toBe("500.00");
+    expect(result.summary.contributions).toHaveLength(100);
+    expect(result.summary.contributions[0].sequence).toBe("250");
+    expect(result.feedTruncated).toBe(true);
+  });
+
+  it("totals a ledger of exactly one page and checks the page against the server balance", async () => {
+    const full = Array.from({ length: 100 }, (_, i) => wire(100 - i, "1.00"));
+    const result = await loadHomeLedger(deps([json(groupBody()), json(balancesBody("100.00", 100)), json(page(full))]));
+    expect(result.status === "ready" && result.summary.potBalance).toBe("100.00");
+    expect(result.status === "ready" && result.feedTruncated).toBe(false);
+  });
+
+  it("refuses contradictory numbers: a complete page that does not add up to the server balance", async () => {
+    const result = await loadHomeLedger(
+      deps([json(groupBody()), json(balancesBody("99.00", 2)), json(page([wire(2, "5.00"), wire(1, "10.00")]))])
+    );
+    expect(result.status).toBe("error");
+  });
+
+  it("refuses an entry newer than the balance snapshot rather than showing it beside a balance that lacks it", async () => {
+    const result = await loadHomeLedger(
+      deps([json(groupBody()), json(balancesBody("10.00", 1)), json(page([wire(2, "5.00"), wire(1, "10.00")]))])
+    );
+    expect(result.status).toBe("error");
+  });
+
+  it("is empty when the snapshot has no entries, without reading the feed", async () => {
+    const d = deps([json(groupBody()), json(balancesBody("0.00", 0))]);
+    expect(await loadHomeLedger(d)).toEqual({ status: "empty" });
+    expect(d.fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("errors on a negative pot, as before", async () => {
+    expect((await loadHomeLedger(deps([json(groupBody()), json(balancesBody("-5.00", 1)), json(page([wire(1)]))]))).status).toBe("error");
+  });
+
+  it("errors when the balances have no pot account, or are malformed", async () => {
+    const noPot = { ...balancesBody("1.00", 1), balances: [balancesBody("1.00", 1).balances[1]] };
+    expect((await loadHomeLedger(deps([json(groupBody()), json(noPot)]))).status).toBe("error");
+    for (const bad of [
+      { ...balancesBody("1.00", 1), headSequence: "01" },
+      { ...balancesBody("1.00", 1), entryCount: 1 },
+      { ...balancesBody("1.5", 1) },
+      { ...balancesBody("1.00", 1), balances: "x" },
+      balancesBody("1.00", 0, 1),
+      balancesBody("1.00", 1, 5),
+      balancesBody("5.00", 0, 0)
+    ]) {
+      expect((await loadHomeLedger(deps([json(groupBody()), json(bad), json(page([wire(1, "1.00")]))]))).status).toBe("error");
+    }
+  });
+
+  it("rejects a feed that says there is more but gives no usable cursor", async () => {
+    const result = await loadHomeLedger(
+      deps([json(groupBody()), json(balancesBody("1.00", 5)), json({ entries: [wire(5, "1.00")], hasMore: true })])
+    );
+    expect(result.status).toBe("error");
   });
 
   it.each([
     ["no group", [json({ groups: [] })], "no-group"],
     ["several groups", [json({ groups: [{ groupId: GROUP }, { groupId: GROUP }] })], "multiple-groups"],
     ["a 401 on groups", [json({}, 401)], "unauthorized"],
-    ["a 401 on entries", [json(groupBody()), json({}, 401)], "unauthorized"],
+    ["a 401 on balances", [json(groupBody()), json({}, 401)], "unauthorized"],
+    ["a 401 on entries", [json(groupBody()), json(balancesBody("10.00", 1)), json({}, 401)], "unauthorized"],
     ["a 502 on groups", [json({}, 502)], "error"],
-    ["a 502 on entries", [json(groupBody()), json({}, 502)], "error"],
-    ["a malformed entry", [json(groupBody()), json({ entries: [{ id: "x" }] })], "error"],
-    ["a malformed amount", [json(groupBody()), json({ entries: [wire(1, "1.234")] })], "error"],
-    ["a chart with no pot account", [json({ groups: [{ groupId: GROUP, accounts: [accounts[1]] }] }), json({ entries: [wire(1)] })], "error"]
+    ["a 502 on balances", [json(groupBody()), json({}, 502)], "error"],
+    ["a 502 on entries", [json(groupBody()), json(balancesBody("10.00", 1)), json({}, 502)], "error"],
+    ["a malformed entry", [json(groupBody()), json(balancesBody("10.00", 1)), json(page([{ id: "x" }]))], "error"],
+    ["a malformed amount", [json(groupBody()), json(balancesBody("1.23", 1)), json(page([wire(1, "1.234")]))], "error"]
   ])("reports %s distinctly", async (_name, responses, status) => {
     expect((await loadHomeLedger(deps(responses as Response[]))).status).toBe(status);
   });
@@ -68,17 +155,6 @@ describe("loadHomeLedger", () => {
   it("is unauthorized when there is no token, and an error when the network throws", async () => {
     expect((await loadHomeLedger({ getToken: async () => null, fetchImpl: vi.fn() })).status).toBe("unauthorized");
     expect((await loadHomeLedger({ getToken: async () => "t", fetchImpl: vi.fn().mockRejectedValue(new Error("x")) })).status).toBe("error");
-  });
-
-  it("refuses to total a ledger longer than one read", async () => {
-    const page = Array.from({ length: 100 }, (_, i) => wire(150 - i));
-    expect((await loadHomeLedger(deps([json(groupBody()), json({ entries: page })]))).status).toBe("incomplete");
-  });
-
-  it("totals a full read that reaches sequence 1", async () => {
-    const page = Array.from({ length: 100 }, (_, i) => wire(100 - i, "1.00"));
-    const result = await loadHomeLedger(deps([json(groupBody()), json({ entries: page })]));
-    expect(result.status === "ready" && result.summary.potBalance).toBe("100.00");
   });
 });
 
@@ -98,6 +174,7 @@ describe("loadHomeLedger provenance", () => {
   it("carries a complete provenance object onto the contribution and names the payer from the members API", async () => {
     const d = deps([
       json(groupBody()),
+      json(balancesBody("20.00", 2)),
       json({ entries: [{ ...wire(2), provenance: proof }, wire(1)] }),
       json(members(null))
     ]);
@@ -114,26 +191,26 @@ describe("loadHomeLedger provenance", () => {
     expect(plain.provenance).toBeNull();
     // The members API showed this caller no email, so none is invented.
     expect(result.memberLabels).toEqual({ [PAYER]: null });
-    expect(d.fetchImpl.mock.calls[2][0]).toBe(`/api/ledger/members?groupId=${GROUP}`);
+    expect(d.fetchImpl.mock.calls[3][0]).toBe(`/api/ledger/members?groupId=${GROUP}`);
   });
 
   it("passes on an email only when the members API already returned one", async () => {
     const result = await loadHomeLedger(
-      deps([json(groupBody()), json({ entries: [{ ...wire(1), provenance: proof }] }), json(members("payer@example.test"))])
+      deps([json(groupBody()), json(balancesBody("10.00", 1)), json({ entries: [{ ...wire(1), provenance: proof }] }), json(members("payer@example.test"))])
     );
     expect(result.status === "ready" && result.memberLabels).toEqual({ [PAYER]: "payer@example.test" });
   });
 
   it("does not read the members when nothing is bank-verified", async () => {
-    const d = deps([json(groupBody()), json({ entries: [wire(1)] })]);
+    const d = deps([json(groupBody()), json(balancesBody("10.00", 1)), json({ entries: [wire(1)] })]);
     const result = await loadHomeLedger(d);
-    expect(d.fetchImpl).toHaveBeenCalledTimes(2);
+    expect(d.fetchImpl).toHaveBeenCalledTimes(3);
     expect(result.status === "ready" && result.memberLabels).toEqual({});
   });
 
   it("keeps the verified contribution when the members cannot be read", async () => {
     const result = await loadHomeLedger(
-      deps([json(groupBody()), json({ entries: [{ ...wire(1), provenance: proof }] }), json({}, 502)])
+      deps([json(groupBody()), json(balancesBody("10.00", 1)), json({ entries: [{ ...wire(1), provenance: proof }] }), json({}, 502)])
     );
     expect(result.status).toBe("ready");
     expect(result.status === "ready" && result.summary.contributions[0].provenance?.memberUserId).toBe(PAYER);
@@ -148,7 +225,9 @@ describe("loadHomeLedger provenance", () => {
     ["the wrong kind", { ...proof, kind: "manual" }],
     ["a bare string", "verified"]
   ])("treats %s as no provenance, so the row is never half-verified", async (_name, bad) => {
-    const result = await loadHomeLedger(deps([json(groupBody()), json({ entries: [{ ...wire(1), provenance: bad }] })]));
+    const result = await loadHomeLedger(
+      deps([json(groupBody()), json(balancesBody("10.00", 1)), json({ entries: [{ ...wire(1), provenance: bad }] })])
+    );
     expect(result.status === "ready" && result.summary.contributions[0].provenance).toBeNull();
   });
 });

@@ -3392,3 +3392,253 @@ end;
 $prov$;
 rollback;
 select 'ALL LEDGER PROVENANCE CHECKS PASSED' as result;
+
+-- ---------------------------------------------------------------------------
+-- Ledger balances (20261007100000_ledger_balances.sql)
+--
+-- get_ledger_balances_v1 replaces "sum the entries list" for the home screen and
+-- /draw, so it has to be exactly the sum of the postings, in one consistent
+-- snapshot, and visible only to the group's members. Checks that (a) every
+-- account's balance equals an independently computed sum of its postings, to
+-- the cent, in debit-positive form, including a non-round amount, a
+-- disbursement, a correction and a ledger of more than 100 entries (the old
+-- cap), (b) debits equal credits overall, so the balances net to zero across
+-- accounts, (c) the head sequence and entry count are the chain head's and the
+-- entries' own, and the balances are the balances AT that head, (d) a fresh
+-- group lists every account at 0.00 with head 0, (e) posting moves head, count
+-- and the two affected balances by exactly the posted amount, (f) members of the
+-- group (owner and plain member) can read it, an outsider, another group's
+-- owner and an anonymous caller are refused, and anon cannot execute it, and
+-- (g) the result carries exactly the documented keys. Runs in a transaction
+-- that is rolled back.
+-- ---------------------------------------------------------------------------
+reset role;
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+
+do $bal$
+declare
+  owner_uid  constant text := '11111111-1111-4111-8111-111111111111';
+  other_uid  constant text := '22222222-2222-4222-8222-222222222222';
+  viewer_uid constant text := '33333333-3333-4333-8333-333333333333';
+  outsider   constant text := '44444444-4444-4444-8444-444444444444';
+  group_b    uuid;
+  group_c    uuid;
+  tenant_b   uuid;
+  cash_b     uuid;
+  income_b   uuid;
+  expense_b  uuid;
+  e_first    uuid;
+  result     jsonb;
+  later      jsonb;
+  n          bigint;
+  head_seq   bigint;
+  expected   numeric;
+  got        numeric;
+  shift      numeric;
+  acct       record;
+  i          int;
+begin
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  group_b := (public.sened_ledger_provision_group_v1('Balances equb') ->> 'groupId')::uuid;
+  perform set_config('request.jwt.claim.sub', other_uid, true);
+  group_c := (public.sened_ledger_provision_group_v1('Empty balances equb') ->> 'groupId')::uuid;
+  select tenant_id into tenant_b from public.ledger_groups where id = group_b;
+  select id into cash_b from public.ledger_accounts where group_id = group_b and code = 'POT_CASH';
+  select id into income_b from public.ledger_accounts where group_id = group_b and code = 'CONTRIBUTION_INCOME';
+  select id into expense_b from public.ledger_accounts where group_id = group_b and code = 'PAYOUT_EXPENSE';
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role)
+  values (group_b, tenant_b, viewer_uid::uuid, 'member');
+
+  -- ---- A fresh group: head 0, every account listed at 0.00 --------------------
+  perform set_config('request.jwt.claim.sub', other_uid, true);
+  result := public.get_ledger_balances_v1(group_c);
+  if result ->> 'headSequence' <> '0' or result ->> 'entryCount' <> '0' then
+    raise exception 'BALANCES 1 FAILED: an empty group reported head % count %', result ->> 'headSequence', result ->> 'entryCount';
+  end if;
+  select count(*) into n from public.ledger_accounts where group_id = group_c;
+  if jsonb_array_length(result -> 'balances') <> n or n = 0 then
+    raise exception 'BALANCES 2 FAILED: an empty group did not list all % accounts', n;
+  end if;
+  if exists (select 1 from jsonb_array_elements(result -> 'balances') b where b ->> 'balance' <> '0.00') then
+    raise exception 'BALANCES 3 FAILED: an empty group has a balance that is not exactly 0.00';
+  end if;
+  if result ->> 'groupId' <> group_c::text then
+    raise exception 'BALANCES 3b FAILED: the group id is not echoed';
+  end if;
+
+  -- ---- Fixtures: round, non-round, disbursement, correction, then 120 more ----
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  e_first := (public.post_ledger_entry_v1(group_b, 'bal-1', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_b, 'direction', 'debit', 'amount', '25.00'),
+                      jsonb_build_object('accountId', income_b, 'direction', 'credit', 'amount', '25.00'))) -> 'entry' ->> 'id')::uuid;
+  perform public.post_ledger_entry_v1(group_b, 'bal-2', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_b, 'direction', 'debit', 'amount', '1234567890123.45'),
+                      jsonb_build_object('accountId', income_b, 'direction', 'credit', 'amount', '1234567890123.45')));
+  perform public.post_ledger_entry_v1(group_b, 'bal-3', now(), 'disbursement', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', expense_b, 'direction', 'debit', 'amount', '100.25'),
+                      jsonb_build_object('accountId', cash_b, 'direction', 'credit', 'amount', '100.25')));
+  perform public.post_ledger_entry_v1(group_b, 'bal-4', now(), 'correction', e_first, 'Wrong amount recorded',
+    jsonb_build_array(jsonb_build_object('accountId', income_b, 'direction', 'debit', 'amount', '25.00'),
+                      jsonb_build_object('accountId', cash_b, 'direction', 'credit', 'amount', '25.00')));
+  for i in 1..120 loop
+    perform public.post_ledger_entry_v1(group_b, 'bal-bulk-' || i, now(), 'contribution', null, null,
+      jsonb_build_array(jsonb_build_object('accountId', cash_b, 'direction', 'debit', 'amount', '0.07'),
+                        jsonb_build_object('accountId', income_b, 'direction', 'credit', 'amount', '0.07')));
+  end loop;
+
+  -- ---- (a) every balance is the independent sum of its postings --------------
+  result := public.get_ledger_balances_v1(group_b);
+  for acct in
+    select a.id, a.code, a.account_type
+    from public.ledger_accounts a where a.group_id = group_b
+  loop
+    select coalesce(sum(case p.direction when 'debit' then p.amount else -p.amount end), 0) into expected
+    from public.ledger_entry_postings p where p.group_id = group_b and p.account_id = acct.id;
+    select (b ->> 'balance')::numeric into got
+    from jsonb_array_elements(result -> 'balances') b where (b ->> 'accountId')::uuid = acct.id;
+    if got is null or got <> expected then
+      raise exception 'BALANCES 4 FAILED: % balance % <> sum of postings %', acct.code, got, expected;
+    end if;
+    if (select b ->> 'balance' from jsonb_array_elements(result -> 'balances') b where (b ->> 'accountId')::uuid = acct.id)
+       <> to_char(expected, 'FM9999999999999999999990.00') then
+      raise exception 'BALANCES 5 FAILED: % balance is not rendered as an exact two-decimal string', acct.code;
+    end if;
+    if (select b ->> 'accountType' from jsonb_array_elements(result -> 'balances') b where (b ->> 'accountId')::uuid = acct.id)
+       <> acct.account_type then
+      raise exception 'BALANCES 6 FAILED: % reports the wrong account type', acct.code;
+    end if;
+  end loop;
+
+  -- Known value on the pot: 25.00 + 1234567890123.45 - 100.25 - 25.00 + 120 * 0.07 = 1234567890031.60.
+  if (select b ->> 'balance' from jsonb_array_elements(result -> 'balances') b where b ->> 'code' = 'POT_CASH') <> '1234567890031.60' then
+    raise exception 'BALANCES 7 FAILED: POT_CASH is %', (select b ->> 'balance' from jsonb_array_elements(result -> 'balances') b where b ->> 'code' = 'POT_CASH');
+  end if;
+  -- Debit-positive for every type: the income account is negative, the expense account positive.
+  if (select (b ->> 'balance')::numeric from jsonb_array_elements(result -> 'balances') b where b ->> 'code' = 'CONTRIBUTION_INCOME') >= 0 then
+    raise exception 'BALANCES 8 FAILED: the income account is not credit-negative';
+  end if;
+  if (select b ->> 'balance' from jsonb_array_elements(result -> 'balances') b where b ->> 'code' = 'PAYOUT_EXPENSE') <> '100.25' then
+    raise exception 'BALANCES 9 FAILED: the expense account is not debit-positive';
+  end if;
+
+  -- ---- (b) debits = credits: the balances net to zero across accounts --------
+  select coalesce(sum((b ->> 'balance')::numeric), 0) into got from jsonb_array_elements(result -> 'balances') b;
+  if got <> 0 then raise exception 'BALANCES 10 FAILED: balances net to % across accounts, not 0', got; end if;
+  if (select sum(amount) from public.ledger_entry_postings where group_id = group_b and direction = 'debit')
+     <> (select sum(amount) from public.ledger_entry_postings where group_id = group_b and direction = 'credit') then
+    raise exception 'BALANCES 11 FAILED: total debits differ from total credits';
+  end if;
+
+  -- ---- (c) head and count are the chain's own, and the balances are AT that head ----
+  select last_sequence into head_seq from public.ledger_group_heads where group_id = group_b;
+  if (result ->> 'headSequence')::bigint <> head_seq then
+    raise exception 'BALANCES 12 FAILED: headSequence % <> chain head %', result ->> 'headSequence', head_seq;
+  end if;
+  select count(*) into n from public.ledger_entries where group_id = group_b;
+  if (result ->> 'entryCount')::bigint <> n or n <= 100 then
+    raise exception 'BALANCES 13 FAILED: entryCount % vs % entries (must exceed the old 100 cap)', result ->> 'entryCount', n;
+  end if;
+  if (select max(sequence) from public.ledger_entries where group_id = group_b) <> head_seq then
+    raise exception 'BALANCES 14 FAILED: the head is not the newest entry';
+  end if;
+  -- Balances recomputed from only the entries up to the reported head equal the reported balances.
+  for acct in select a.id, a.code from public.ledger_accounts a where a.group_id = group_b loop
+    select coalesce(sum(case p.direction when 'debit' then p.amount else -p.amount end), 0) into expected
+    from public.ledger_entry_postings p
+    join public.ledger_entries e on e.id = p.entry_id and e.group_id = p.group_id
+    where p.group_id = group_b and p.account_id = acct.id and e.sequence <= (result ->> 'headSequence')::bigint;
+    select (b ->> 'balance')::numeric into got
+    from jsonb_array_elements(result -> 'balances') b where (b ->> 'accountId')::uuid = acct.id;
+    if got <> expected then raise exception 'BALANCES 15 FAILED: % is not the balance at the reported head', acct.code; end if;
+  end loop;
+
+  -- ---- (e) one more entry moves head, count and exactly two balances by the amount ----
+  perform public.post_ledger_entry_v1(group_b, 'bal-after', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_b, 'direction', 'debit', 'amount', '10.10'),
+                      jsonb_build_object('accountId', income_b, 'direction', 'credit', 'amount', '10.10')));
+  later := public.get_ledger_balances_v1(group_b);
+  if (later ->> 'headSequence')::bigint <> head_seq + 1 or (later ->> 'entryCount')::bigint <> n + 1 then
+    raise exception 'BALANCES 16 FAILED: head/count did not advance by one';
+  end if;
+  for acct in select a.id, a.code from public.ledger_accounts a where a.group_id = group_b loop
+    select (b ->> 'balance')::numeric into got from jsonb_array_elements(later -> 'balances') b where (b ->> 'accountId')::uuid = acct.id;
+    select (b ->> 'balance')::numeric into expected from jsonb_array_elements(result -> 'balances') b where (b ->> 'accountId')::uuid = acct.id;
+    shift := case acct.code when 'POT_CASH' then 10.10 when 'CONTRIBUTION_INCOME' then -10.10 else 0 end;
+    if got - expected <> shift then
+      raise exception 'BALANCES 17 FAILED: % moved by % after a 10.10 contribution', acct.code, got - expected;
+    end if;
+  end loop;
+
+  -- ---- (g) exactly the documented keys ----------------------------------------
+  if (select array_agg(k order by k) from jsonb_object_keys(later) k) <> array['balances','entryCount','groupId','headSequence'] then
+    raise exception 'BALANCES 18 FAILED: unexpected top-level keys';
+  end if;
+  if exists (
+    select 1 from jsonb_array_elements(later -> 'balances') b
+    where (select array_agg(k order by k) from jsonb_object_keys(b) k) <> array['accountId','accountType','balance','code','name']
+  ) then
+    raise exception 'BALANCES 19 FAILED: unexpected per-account keys';
+  end if;
+
+  -- ---- (f) access: members read; outsiders, other owners and anonymous callers are refused ----
+  perform set_config('request.jwt.claim.sub', viewer_uid, true);
+  set local role authenticated;
+  if public.get_ledger_balances_v1(group_b) ->> 'headSequence' <> later ->> 'headSequence' then
+    raise exception 'BALANCES 20 FAILED: a plain member did not read the same snapshot';
+  end if;
+  reset role;
+
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  set local role authenticated;
+  if public.get_ledger_balances_v1(group_b) ->> 'entryCount' <> later ->> 'entryCount' then
+    raise exception 'BALANCES 21 FAILED: the owner did not read the same snapshot';
+  end if;
+  reset role;
+
+  perform set_config('request.jwt.claim.sub', outsider, true);
+  set local role authenticated;
+  begin
+    perform public.get_ledger_balances_v1(group_b);
+    raise exception 'BALANCES 22 FAILED: an outsider read group B balances';
+  exception when sqlstate '42501' then null;
+  end;
+  reset role;
+
+  -- Another group's owner is refused for group B, and an unknown group is refused identically.
+  perform set_config('request.jwt.claim.sub', other_uid, true);
+  set local role authenticated;
+  begin
+    perform public.get_ledger_balances_v1(group_b);
+    raise exception 'BALANCES 23 FAILED: another group''s owner read group B balances';
+  exception when sqlstate '42501' then null;
+  end;
+  begin
+    perform public.get_ledger_balances_v1('eeeeeeee-0000-4000-8000-00000000dead');
+    raise exception 'BALANCES 24 FAILED: an unknown group did not raise';
+  exception when sqlstate '42501' then null;
+  end;
+  reset role;
+
+  perform set_config('request.jwt.claim.sub', '', true);
+  set local role authenticated;
+  begin
+    perform public.get_ledger_balances_v1(group_b);
+    raise exception 'BALANCES 25 FAILED: an anonymous caller read balances';
+  exception when sqlstate '28000' then null;
+  end;
+  reset role;
+
+  if has_function_privilege('anon', 'public.get_ledger_balances_v1(uuid)', 'EXECUTE') then
+    raise exception 'BALANCES 26 FAILED: anon can execute the balances function';
+  end if;
+  if has_function_privilege('public', 'public.get_ledger_balances_v1(uuid)', 'EXECUTE') then
+    raise exception 'BALANCES 27 FAILED: PUBLIC can execute the balances function';
+  end if;
+  if not has_function_privilege('authenticated', 'public.get_ledger_balances_v1(uuid)', 'EXECUTE') then
+    raise exception 'BALANCES 28 FAILED: authenticated cannot execute the balances function';
+  end if;
+end;
+$bal$;
+rollback;
+select 'ALL LEDGER BALANCES CHECKS PASSED' as result;

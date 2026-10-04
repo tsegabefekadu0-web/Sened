@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatPotBalance, summarizeLedger, type SummaryEntry } from "@/lib/ledger/homeSummary";
+import { formatPotBalance, summarizeContributions, summarizeLedger, type SummaryEntry } from "@/lib/ledger/homeSummary";
 
 const POT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const INCOME = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -91,5 +91,18 @@ describe("formatPotBalance", () => {
   });
   it("formats the sample number", () => {
     expect(formatPotBalance(175000)).toBe("175,000");
+  });
+});
+
+describe("summarizeContributions", () => {
+  it("lists a page's contributions newest first without needing a balance, leaving out corrected ones", () => {
+    const reversal = entry("r3", "3", "correction", [[INCOME, "debit", "2.00"], [POT, "credit", "2.00"]], "c2");
+    const rows = summarizeContributions([reversal, contribution("c2", "2", "2.00"), contribution("c1", "1", "3.00")], POT);
+    expect(rows.map((row) => [row.id, row.amount])).toEqual([["c1", "3.00"]]);
+  });
+
+  it("agrees with summarizeLedger on the same entries", () => {
+    const entries = [contribution("c3", "3", "1.50"), payout("p2", "2", "1.00"), contribution("c1", "1", "9.00")];
+    expect(summarizeContributions(entries, POT)).toEqual(summarizeLedger(entries, accounts).contributions);
   });
 });

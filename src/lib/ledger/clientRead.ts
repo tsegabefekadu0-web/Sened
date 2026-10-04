@@ -47,6 +47,7 @@ export interface WireEntry {
   readonly id?: unknown;
   readonly groupId?: unknown;
   readonly occurredAt?: unknown;
+  readonly recordedAt?: unknown;
   readonly sequence?: unknown;
   readonly entryType?: unknown;
   readonly correctsEntryId?: unknown;
@@ -168,6 +169,122 @@ export async function readMyGroup(deps: AuthedFetchDeps = {}): Promise<MyGroupRe
   }
 }
 
+/** One page of `GET /api/ledger/entries`, newest first. */
+export type EntriesPageRead =
+  | {
+      readonly status: "ok";
+      readonly entries: readonly WireEntry[];
+      readonly hasMore: boolean;
+      /** The `beforeSequence` for the next older page; `null` on the last page. */
+      readonly nextCursor: string | null;
+    }
+  | { readonly status: "unauthorized" }
+  | { readonly status: "error" };
+
+/**
+ * One page of a group's entries. `beforeSequence` pages back through history
+ * (exclusive upper bound). A server that predates the cursor omits `hasMore`;
+ * that is read as "no more", which is only wrong for the older, capped route
+ * and is what those callers already assumed.
+ */
+export async function readEntriesPage(
+  groupId: string,
+  options: { readonly limit?: number; readonly beforeSequence?: string } = {},
+  deps: AuthedFetchDeps = {}
+): Promise<EntriesPageRead> {
+  try {
+    const query =
+      `groupId=${encodeURIComponent(groupId)}` +
+      (options.limit === undefined ? "" : `&limit=${options.limit}`) +
+      (options.beforeSequence === undefined ? "" : `&beforeSequence=${encodeURIComponent(options.beforeSequence)}`);
+    const response = await authedFetch(`/api/ledger/entries?${query}`, { method: "GET" }, deps);
+    if (response.status === 401) {
+      return { status: "unauthorized" };
+    }
+    if (!response.ok) {
+      return { status: "error" };
+    }
+    const body = (await response.json()) as { entries?: readonly WireEntry[]; hasMore?: unknown; nextCursor?: unknown };
+    if (!Array.isArray(body.entries)) {
+      return { status: "error" };
+    }
+    const hasMore = body.hasMore === true;
+    if (hasMore && (typeof body.nextCursor !== "string" || !/^[1-9]\d{0,18}$/.test(body.nextCursor))) {
+      return { status: "error" };
+    }
+    return {
+      status: "ok",
+      entries: body.entries,
+      hasMore,
+      nextCursor: hasMore ? (body.nextCursor as string) : null
+    };
+  } catch (error) {
+    return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
+  }
+}
+
+export interface WireBalance {
+  readonly accountId: string;
+  readonly code: string;
+  readonly accountType: string;
+  /** Exact ETB decimal string, debit-positive. */
+  readonly balance: string;
+}
+
+/** A group's per-account balances at one chain head (`GET /api/ledger/balances`). */
+export type BalancesRead =
+  | {
+      readonly status: "ok";
+      readonly headSequence: string;
+      readonly entryCount: string;
+      readonly balances: readonly WireBalance[];
+    }
+  | { readonly status: "unauthorized" }
+  | { readonly status: "error" };
+
+/** Read and strictly validate the balances snapshot; anything malformed is `error`, never a guess. */
+export async function fetchLedgerBalances(groupId: string, deps: AuthedFetchDeps = {}): Promise<BalancesRead> {
+  try {
+    const response = await authedFetch(
+      `/api/ledger/balances?groupId=${encodeURIComponent(groupId)}`,
+      { method: "GET" },
+      deps
+    );
+    if (response.status === 401) {
+      return { status: "unauthorized" };
+    }
+    if (!response.ok) {
+      return { status: "error" };
+    }
+    const body = (await response.json()) as Record<string, unknown>;
+    if (
+      typeof body.headSequence !== "string" ||
+      !/^(0|[1-9]\d{0,18})$/.test(body.headSequence) ||
+      typeof body.entryCount !== "string" ||
+      !/^(0|[1-9]\d{0,18})$/.test(body.entryCount) ||
+      !Array.isArray(body.balances)
+    ) {
+      return { status: "error" };
+    }
+    const balances: WireBalance[] = [];
+    for (const item of body.balances as readonly Record<string, unknown>[]) {
+      if (
+        typeof item?.accountId !== "string" ||
+        typeof item.code !== "string" ||
+        typeof item.accountType !== "string" ||
+        typeof item.balance !== "string" ||
+        !/^-?\d+\.\d{2}$/.test(item.balance)
+      ) {
+        return { status: "error" };
+      }
+      balances.push({ accountId: item.accountId, code: item.code, accountType: item.accountType, balance: item.balance });
+    }
+    return { status: "ok", headSequence: body.headSequence, entryCount: body.entryCount, balances };
+  } catch (error) {
+    return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
+  }
+}
+
 /**
  * Read the caller's group from `GET /api/my-groups`, then its entries from
  * `GET /api/ledger/entries`. The one place that sequence lives, shared by the
@@ -196,23 +313,11 @@ export async function readGroupLedger(
       return { status: "read-only" };
     }
 
-    const limitQuery = options.limit === undefined ? "" : `&limit=${options.limit}`;
-    const entriesResponse = await authedFetch(
-      `/api/ledger/entries?groupId=${encodeURIComponent(groupId)}${limitQuery}`,
-      { method: "GET" },
-      deps
-    );
-    if (entriesResponse.status === 401) {
-      return { status: "unauthorized" };
+    const page = await readEntriesPage(groupId, { limit: options.limit }, deps);
+    if (page.status !== "ok") {
+      return { status: page.status };
     }
-    if (!entriesResponse.ok) {
-      return { status: "error" };
-    }
-    const wire = ((await entriesResponse.json()) as { entries?: readonly WireEntry[] }).entries;
-    if (!Array.isArray(wire)) {
-      return { status: "error" };
-    }
-    return { status: "ok", groupId, accounts: mine.accounts, entries: wire };
+    return { status: "ok", groupId, accounts: mine.accounts, entries: page.entries };
   } catch (error) {
     return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
   }

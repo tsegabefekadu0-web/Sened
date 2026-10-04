@@ -132,6 +132,7 @@ function publicTranscript(round: Parameters<typeof toVerificationTranscript>[0])
     cycleId: transcript.cycleId,
     round: transcript.round,
     commitment: transcript.commitment,
+    protocolVersion: transcript.protocolVersion,
     rosterDigest: transcript.rosterDigest,
     commitmentNonce: transcript.commitmentNonce,
     seed: transcript.seed,

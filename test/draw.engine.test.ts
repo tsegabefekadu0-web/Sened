@@ -140,17 +140,21 @@ function asRound(commitment: Awaited<ReturnType<typeof createCommitment>>): Draw
 
 describe("canonical encoding", () => {
   it("is length-prefixed so a field boundary cannot be shifted without detection", () => {
-    const serialized = canonicalSerializeCommit({
-      groupId: "ab",
-      cycleId: "c",
-      round: 1,
-      drawId: "d",
-      rosterDigest: "e",
-      commitmentNonce: "f",
-      memberDigest: "0".repeat(64),
-      seed: "g"
-    });
+    const serialized = canonicalSerializeCommit(
+      {
+        groupId: "ab",
+        cycleId: "c",
+        round: 1,
+        drawId: "d",
+        rosterDigest: "e",
+        commitmentNonce: "f",
+        memberDigest: "0".repeat(64),
+        seed: "g"
+      },
+      "v2"
+    );
 
+    // The v2 tag is frozen: it is what every historical draw was hashed under.
     expect(serialized.startsWith("20:sened-draw-commit-v2")).toBe(true);
     expect(serialized).toContain("7:groupId\n2:ab");
     expect(serialized).toContain("7:cycleId\n1:c");
@@ -344,11 +348,15 @@ describe("independent verification", () => {
         cycleId: commitment.cycleId,
         round: commitment.round,
         commitment: commitment.commitment,
+        protocolVersion: commitment.protocolVersion,
         rosterDigest: commitment.rosterDigest,
         commitmentNonce: commitment.commitmentNonce,
         memberDigest: commitment.memberDigest,
         memberCommitments: commitment.memberCommitments,
         seed: SEED,
+        // v3: the revealed nonces decide the winner, so they are part of what a
+        // member needs in order to recompute it.
+        memberNonces: published.memberNonces,
         participants: commitment.participants.map((p) => ({
           memberId: p.memberId,
           ticket: p.ticket,

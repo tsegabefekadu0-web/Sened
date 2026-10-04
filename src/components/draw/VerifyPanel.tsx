@@ -135,9 +135,11 @@ export function VerifyPanel({ transcript, verification, isRunning, error }: Veri
             ["cycleId", transcript.cycleId],
             ["round", String(transcript.round)],
             ["commitment", transcript.commitment],
+            ["protocolVersion", transcript.protocolVersion ?? "v2"],
             ["rosterDigest", transcript.rosterDigest],
             ["commitmentNonce", transcript.commitmentNonce],
             ["seed", transcript.seed || "(አልተገለጠም — not revealed)"],
+            ["nonceDigest", verification.nonceDigest ?? "(n/a)"],
             ["transcriptDigest", verification.transcriptDigest ?? "(አልተሰላም)"]
           ].map(([label, value]) => (
             <React.Fragment key={label}>

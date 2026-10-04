@@ -136,7 +136,7 @@ begin
     1, 'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
     commitment, repeat('n', 32), repeat('2', 64),
     pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
-    3000.00, 8, 1000, 'verify-honest-round-1', now()
+    3000.00, 8, 1000, 'verify-honest-round-1', now(), 'v3'
   );
 
   perform public.reveal_draw_v1(
@@ -170,7 +170,7 @@ begin
     2, 'dddddddd-0000-4000-8000-000000000002'::uuid,
     commitment, repeat('o', 32), repeat('6', 64),
     pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
-    3000.00, 8, 1000, 'verify-forged-round-2', now()
+    3000.00, 8, 1000, 'verify-forged-round-2', now(), 'v3'
   );
 
   -- Claim selected_index 0 (which is member-a) but name member-c.
@@ -228,7 +228,7 @@ begin
     1, 'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
     repeat('d1', 32), repeat('r1', 32), repeat('e1', 32),
     pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
-    3000.00, 8, 1000, 'verify-order-c2-round-1', now()
+    3000.00, 8, 1000, 'verify-order-c2-round-1', now(), 'v3'
   );
   perform public.commit_draw_v1(
     'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
@@ -236,7 +236,7 @@ begin
     2, 'eeeeeeee-0000-4000-8000-000000000002'::uuid,
     repeat('d2', 32), repeat('r2', 32), repeat('e2', 32),
     pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
-    3000.00, 8, 1000, 'verify-order-c2-round-2', now()
+    3000.00, 8, 1000, 'verify-order-c2-round-2', now(), 'v3'
   );
 
   -- Round 2 first. The chosen winner has not won yet, so the ONLY reason this
@@ -613,7 +613,7 @@ begin
       repeat('e', 64),
       '[]'::jsonb,
       '[]'::jsonb,
-      5000.00, 5, 1000, 'rpc-empty-member-set', now()
+      5000.00, 5, 1000, 'rpc-empty-member-set', now(), 'v3'
     );
     raise exception 'RPC 1 FAILED: commit_draw_v1 ACCEPTED an empty member set';
   exception when others then
@@ -632,7 +632,7 @@ begin
       repeat('a', 64),
       'nonce-0123456789abcdef-XYZ',
       repeat('b', 64),
-      null, null, '[]'::jsonb, 5000.00, 5, 1000, 'rpc-null-member-set', now()
+      null, null, '[]'::jsonb, 5000.00, 5, 1000, 'rpc-null-member-set', now(), 'v3'
     );
     raise exception 'RPC 2 FAILED: commit_draw_v1 ACCEPTED a null member set';
   exception when others then
@@ -661,7 +661,7 @@ begin
       )
     ),
     '[]'::jsonb,
-    5000.00, 5, 1000, 'rpc-honest-member-set', now()
+    5000.00, 5, 1000, 'rpc-honest-member-set', now(), 'v3'
   );
 
   if not exists (
@@ -714,14 +714,14 @@ begin
     join pg_namespace on pg_namespace.oid = pg_proc.pronamespace
     where pg_namespace.nspname = 'public'
       and pg_proc.proname = 'commit_draw_v1'
-      and pg_proc.pronargs <> 15
+      and pg_proc.pronargs <> 16
   ) then
     raise exception 'RPC 6 FAILED: an old commit_draw_v1 arity still exists';
   end if;
 
   if not has_function_privilege(
     'authenticated',
-    'public.commit_draw_v1(uuid, uuid, integer, uuid, text, text, text, text, jsonb, jsonb, numeric, integer, integer, text, timestamptz)',
+    'public.commit_draw_v1(uuid, uuid, integer, uuid, text, text, text, text, jsonb, jsonb, numeric, integer, integer, text, timestamptz, text)',
     'EXECUTE'
   ) then
     raise exception 'RPC 7 FAILED: authenticated cannot execute the new commit_draw_v1';
@@ -729,13 +729,178 @@ begin
 
   if has_function_privilege(
     'anon',
-    'public.commit_draw_v1(uuid, uuid, integer, uuid, text, text, text, text, jsonb, jsonb, numeric, integer, integer, text, timestamptz)',
+    'public.commit_draw_v1(uuid, uuid, integer, uuid, text, text, text, text, jsonb, jsonb, numeric, integer, integer, text, timestamptz, text)',
     'EXECUTE'
   ) then
     raise exception 'RPC 8 FAILED: anon can execute commit_draw_v1';
   end if;
 end;
 $rpc$;
+
+-- ---------------------------------------------------------------------------
+-- Draw protocol v3 (20261004100000_draw_protocol_v3.sql)
+--
+-- v2 selected the winner from values the treasurer knew before committing, so the
+-- treasurer could grind the seed. v3 folds the revealed member nonces into the
+-- winner. The database's part: pin the protocol version at commit time, refuse a
+-- new v2 commitment even through a direct RPC call, publish the version for the
+-- verifier, and require a v3 reveal to open exactly the sealed set of members.
+-- ---------------------------------------------------------------------------
+do $proto$
+declare
+  group_uuid constant uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  cycle_uuid constant uuid := 'aaaaaaaa-0000-4000-8000-0000000000c1';
+  member_a constant text := '44444444-4444-4444-8444-444444444444';
+  member_b constant text := '55555555-5555-4555-8555-555555555555';
+  two_sealed jsonb := jsonb_build_array(
+    jsonb_build_object('memberId', member_a, 'sealed', repeat('c', 64)),
+    jsonb_build_object('memberId', member_b, 'sealed', repeat('d', 64))
+  );
+  response jsonb;
+begin
+  -- A new v2 commitment is refused by the function, not just the application.
+  begin
+    perform public.commit_draw_v1(
+      group_uuid, cycle_uuid, 3, 'cccccccc-0000-4000-8000-000000000020'::uuid,
+      repeat('a', 64), 'nonce-0123456789abcdef-XYZ', repeat('b', 64),
+      repeat('e', 64), two_sealed, '[]'::jsonb,
+      5000.00, 5, 1000, 'proto-v2-refused', now(), 'v2'
+    );
+    raise exception 'PROTO 1 FAILED: commit_draw_v1 ACCEPTED a new v2 commitment';
+  exception when others then
+    if sqlerrm not like '%draw_protocol_version_unsupported%' then
+      raise exception 'PROTO 1 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- A missing version is refused too, not defaulted to something weaker.
+  begin
+    perform public.commit_draw_v1(
+      group_uuid, cycle_uuid, 3, 'cccccccc-0000-4000-8000-000000000021'::uuid,
+      repeat('a', 64), 'nonce-0123456789abcdef-XYZ', repeat('b', 64),
+      repeat('e', 64), two_sealed, '[]'::jsonb,
+      5000.00, 5, 1000, 'proto-null-refused', now(), null
+    );
+    raise exception 'PROTO 2 FAILED: commit_draw_v1 ACCEPTED a null protocol version';
+  exception when others then
+    if sqlerrm not like '%draw_protocol_version_unsupported%' then
+      raise exception 'PROTO 2 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- A v3 commitment is stored as v3 and the response publishes it.
+  response := public.commit_draw_v1(
+    group_uuid, cycle_uuid, 3, 'cccccccc-0000-4000-8000-000000000022'::uuid,
+    repeat('a', 64), 'nonce-0123456789abcdef-XYZ', repeat('b', 64),
+    repeat('e', 64), two_sealed, '[]'::jsonb,
+    5000.00, 5, 1000, 'proto-v3-accepted', now(), 'v3'
+  );
+  if not exists (
+    select 1 from public.draw_commitments
+    where idempotency_key = 'proto-v3-accepted' and protocol_version = 'v3'
+  ) then
+    raise exception 'PROTO 3 FAILED: the v3 commitment was not stored as v3';
+  end if;
+  if response -> 'round' -> 'commitment' ->> 'protocolVersion' is distinct from 'v3' then
+    raise exception 'PROTO 4 FAILED: the round response does not publish protocolVersion: %', response;
+  end if;
+
+  -- Replaying the same key under the grindable version is refused, not swapped in.
+  begin
+    perform public.commit_draw_v1(
+      group_uuid, cycle_uuid, 3, 'cccccccc-0000-4000-8000-000000000022'::uuid,
+      repeat('a', 64), 'nonce-0123456789abcdef-XYZ', repeat('b', 64),
+      repeat('e', 64), two_sealed, '[]'::jsonb,
+      5000.00, 5, 1000, 'proto-v3-accepted', now(), 'v2'
+    );
+    raise exception 'PROTO 5 FAILED: a replay under a different protocol version was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_protocol_version_unsupported%' then
+      raise exception 'PROTO 5 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- The version column only admits known versions.
+  begin
+    insert into public.draw_commitments (
+      draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce,
+      member_digest, member_commitments, roster_digest, participants, pot_amount,
+      total_rounds, reserve_ratio_bps, actor_id, idempotency_key, protocol_version
+    ) values (
+      'cccccccc-0000-4000-8000-000000000023', group_uuid, 'bbbbbbbb-0000-4000-8000-000000000001',
+      cycle_uuid, 4, repeat('a', 64), 'nonce-0123456789abcdef-XYZ', repeat('e', 64),
+      two_sealed, repeat('b', 64), '[]'::jsonb, 5000.00, 5, 1000,
+      '11111111-1111-4111-8111-111111111111', 'proto-unknown-version', 'v9'
+    );
+    raise exception 'PROTO 6 FAILED: an unknown protocol version was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_commitments_protocol_version_known%' then
+      raise exception 'PROTO 6 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- A v3 reveal must open exactly the sealed members. The count matches here
+  -- (two for two), so only the set check can catch each of these.
+  --
+  -- The same member opened twice hides that the other was never opened, which is
+  -- precisely the unknown the treasurer cannot grind over.
+  begin
+    perform public.reveal_draw_v1(
+      'cccccccc-0000-4000-8000-000000000022'::uuid,
+      'reveal-seed-0123456789', repeat('a', 64), repeat('e', 64),
+      jsonb_build_array(
+        jsonb_build_object('memberId', member_a, 'nonce', repeat('m', 24)),
+        jsonb_build_object('memberId', member_a, 'nonce', repeat('m', 24))
+      ),
+      repeat('f', 64), repeat('a', 64), 0, member_a::uuid, repeat('c', 64),
+      5000.00, 0.00, now()
+    );
+    raise exception 'PROTO 7 FAILED: a v3 reveal opening the same member twice was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_member_commitment_missing%' then
+      raise exception 'PROTO 7 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- An outsider standing in for a sealed member.
+  begin
+    perform public.reveal_draw_v1(
+      'cccccccc-0000-4000-8000-000000000022'::uuid,
+      'reveal-seed-0123456789', repeat('a', 64), repeat('e', 64),
+      jsonb_build_array(
+        jsonb_build_object('memberId', member_a, 'nonce', repeat('m', 24)),
+        jsonb_build_object('memberId', '99999999-9999-4999-8999-999999999999', 'nonce', repeat('m', 24))
+      ),
+      repeat('f', 64), repeat('a', 64), 0, member_a::uuid, repeat('c', 64),
+      5000.00, 0.00, now()
+    );
+    raise exception 'PROTO 8 FAILED: a v3 reveal with an outsider nonce was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_member_commitment_missing%' then
+      raise exception 'PROTO 8 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- A nonce too short to carry entropy.
+  begin
+    perform public.reveal_draw_v1(
+      'cccccccc-0000-4000-8000-000000000022'::uuid,
+      'reveal-seed-0123456789', repeat('a', 64), repeat('e', 64),
+      jsonb_build_array(
+        jsonb_build_object('memberId', member_a, 'nonce', 'short'),
+        jsonb_build_object('memberId', member_b, 'nonce', repeat('m', 24))
+      ),
+      repeat('f', 64), repeat('a', 64), 0, member_a::uuid, repeat('c', 64),
+      5000.00, 0.00, now()
+    );
+    raise exception 'PROTO 9 FAILED: a v3 reveal with a short nonce was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_member_commitment_mismatch%' then
+      raise exception 'PROTO 9 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+end;
+$proto$;
 
 -- ---------------------------------------------------------------------------
 -- The read paths a client needs

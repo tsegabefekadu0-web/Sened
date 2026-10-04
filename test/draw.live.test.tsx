@@ -18,7 +18,7 @@ vi.mock("@/lib/auth/useSession", () => ({ useSession: () => hoisted.session }));
 
 import DrawPage from "@/app/draw/page";
 import { LiveDraw } from "@/components/draw/LiveDraw";
-import { drawErrorKey, readDraft, sealForDraw, sealLine, openingLine } from "@/lib/draw/clientDraw";
+import { drawErrorKey, readDraft, readSeal, sealForDraw, sealLine, openingLine } from "@/lib/draw/clientDraw";
 import { sealMemberContribution } from "@/lib/draw/engine";
 import { DRAW_ERROR_CODES } from "@/lib/draw/types";
 import { InMemoryDrawRepository } from "@/lib/draw/repository";
@@ -231,7 +231,7 @@ describe("signed in: the real flow through /api/draw/*", () => {
     expect(server.calls).not.toContain("POST /api/draw/commits");
   });
 
-  it("lets a member seal their own contribution on this device", async () => {
+  it("lets a member seal on this device, but withholds the opening until the commitment is published", async () => {
     const user = userEvent.setup();
     const server = createServer("member");
     renderLive(server, MEMBER_B);
@@ -243,10 +243,91 @@ describe("signed in: the real flow through /api/draw/*", () => {
 
     const seal = await screen.findByTestId("my-seal");
     const lines = within(seal).getAllByRole("textbox") as HTMLInputElement[];
+    expect(lines).toHaveLength(1);
     expect(lines[0]!.value).toMatch(new RegExp(`^${MEMBER_B}:[0-9a-f]{64}$`));
-    expect(lines[1]!.value).toMatch(new RegExp(`^${MEMBER_B}:\\S{16,}$`));
+    // The nonce decides the winner (protocol v3). Until the treasurer's commitment
+    // is public it must not even be in the page, or a screenshot/copy leaks the one
+    // input the treasurer cannot grind over.
+    expect(within(seal).getByTestId("opening-locked")).toHaveTextContent("Do not share your opening yet");
+    expect(within(seal).queryByTestId("opening-released")).toBeNull();
+    const stored = readSeal(drawId)!;
+    expect(seal.textContent ?? "").not.toContain(stored.nonce);
     // Sealing is local: nothing was sent to a draw route.
     expect(server.calls.some((call) => call.startsWith("POST /api/draw"))).toBe(false);
+  });
+
+  it("releases the opening only once the published commitment contains this member's seal", async () => {
+    const user = userEvent.setup();
+    const server = createServer("member");
+    renderLive(server, MEMBER_B);
+    await screen.findByTestId("draw-live");
+    const drawId = "dddddddd-0000-4000-8000-000000000002";
+
+    await user.type(screen.getByLabelText("Draw ID to seal against"), drawId);
+    await user.click(screen.getByRole("button", { name: "Seal my contribution" }));
+    const seal = await screen.findByTestId("my-seal");
+    const mine = readSeal(drawId)!;
+
+    // Asking before the treasurer has committed is an expected "not yet", not an alarm.
+    await user.click(within(seal).getByRole("button", { name: "Check whether the treasurer has committed" }));
+    expect(await within(seal).findByText("No commitment is published for this draw yet. Keep your opening private.")).toBeTruthy();
+    expect(within(seal).queryByTestId("opening-released")).toBeNull();
+
+    // The treasurer commits with a DIFFERENT member's seal, not this member's.
+    const other = await sealMemberContribution({ drawId, memberId: MEMBER_C, nonce: "member-c-nonce-0123456789" }, nodeDrawHasher);
+    const commitInput = {
+      groupId: GROUP,
+      cycleId: CYCLE,
+      round: 1,
+      totalRounds: 3,
+      drawId,
+      potAmount: "3000.00",
+      reserveRatioBps: 1000,
+      members: server.members.map((entry) => ({ memberId: entry.userId, displayName: entry.userId, status: "active" as const, contributionAmount: "1000.00" })),
+      priorWinnerIds: [],
+      idempotencyKey: `draw-commit.${drawId}`
+    };
+    await server.service.commit({ ...commitInput, memberCommitments: [other] }, { userId: TREASURER });
+    await user.click(within(seal).getByRole("button", { name: "Check whether the treasurer has committed" }));
+    expect(await within(seal).findByText(/your sealed line is not in it/)).toBeTruthy();
+    expect(within(seal).queryByTestId("opening-released")).toBeNull();
+    expect(seal.textContent ?? "").not.toContain(mine.nonce);
+  });
+
+  it("shows the opening line after the commitment that contains this member's seal is published", async () => {
+    const user = userEvent.setup();
+    const server = createServer("member");
+    renderLive(server, MEMBER_B);
+    await screen.findByTestId("draw-live");
+    const drawId = "dddddddd-0000-4000-8000-000000000003";
+
+    await user.type(screen.getByLabelText("Draw ID to seal against"), drawId);
+    await user.click(screen.getByRole("button", { name: "Seal my contribution" }));
+    const seal = await screen.findByTestId("my-seal");
+    const mine = readSeal(drawId)!;
+
+    await server.service.commit(
+      {
+        groupId: GROUP,
+        cycleId: CYCLE,
+        round: 1,
+        totalRounds: 3,
+        drawId,
+        potAmount: "3000.00",
+        reserveRatioBps: 1000,
+        members: server.members.map((entry) => ({ memberId: entry.userId, displayName: entry.userId, status: "active" as const, contributionAmount: "1000.00" })),
+        priorWinnerIds: [],
+        idempotencyKey: `draw-commit.${drawId}`,
+        memberCommitments: [{ memberId: MEMBER_B, sealed: mine.sealed }]
+      },
+      { userId: TREASURER }
+    );
+
+    await user.click(within(seal).getByRole("button", { name: "Check whether the treasurer has committed" }));
+    const released = await within(seal).findByTestId("opening-released");
+    const boxes = within(released).getAllByRole("textbox") as HTMLInputElement[];
+    expect(boxes[0]!.value).toBe(openingLine(mine));
+    expect(within(seal).queryByTestId("opening-locked")).toBeNull();
   });
 });
 

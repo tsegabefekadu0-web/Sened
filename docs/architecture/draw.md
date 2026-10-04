@@ -29,10 +29,11 @@ commitment = SHA-256( canonical_commit( groupId, cycleId, round, drawId,
                                         rosterDigest, commitmentNonce, seed ) )
 ```
 
-> **Current code (2026-10-03):** the commitment is now serialized as
-> `sened-draw-commit-v2` (`src/lib/draw/canonical.ts`) and additionally binds a
-> digest of every member's sealed nonce, so the preimage above is the
-> pre-M4.3 shape. See §5.
+> **Current code (2026-10-04):** the commitment is now serialized as
+> `sened-draw-commit-v3` (`src/lib/draw/canonical.ts`) and additionally binds a
+> digest of every member's sealed hash (`memberDigest`), so the preimage above is
+> the pre-M4.3 shape. The version tag is part of the preimage, so a v3 draw can
+> never be re-presented as v2. See §5.
 
 The seed is **never** in the response. `createCommitment`
 (`src/lib/draw/engine.ts`) returns the commitment and nothing else.
@@ -125,51 +126,146 @@ does not happen. The server's recorded winner is treated as a claim to be
 checked, never as the answer: if it disagrees, the arithmetic wins and the
 stored round is reported as unverified.
 
-## 5. ⚠️ Residual risk: seed grinding — stated, not hidden
+## 5. Seed grinding: closed in protocol v3, with residual properties stated
 
-> **Status (2026-10-03): option (1) below, member-seed commitments, has been
-> implemented** (commit 84072cb, `20260927120000_draw_member_commitments.sql`,
-> `20260927130000_draw_member_rpcs.sql`). Each member seals a nonce before the
-> treasurer commits, and the winner derives from a value the treasurer cannot
-> search over. The rest of this section describes the single-commitment scheme
-> it replaced; the abandoned-commitment warning is still in place.
+### 5.1 What was wrong (protocol v2)
 
-**A single-commitment scheme does not prevent a treasurer from searching seeds
-for a preferred winner.** They can generate many seeds offline, publish one
-commitment, reveal the one that lands on their relative, and never reveal the
-rest. The commitment is honest about the seed it holds; it cannot prove the
-treasurer did not shop for it.
+M4.3 added member-seed commitments: each member seals a nonce
+(`sealed = H(drawId, memberId, nonce)`) *before* the treasurer commits, and the
+nonce is revealed with the seed. That was meant to stop the treasurer choosing
+the winner. It did not, because the winner never depended on the nonces:
 
-What the design *does* prevent: publishing the roster after the fact, changing
-eligibility, walking back a revealed draw, and lying about the outcome. What it
-does **not** prevent: choosing a seed.
+```
+memberDigest     = H( drawId, sorted (memberId, SEALED HASH) pairs )     // known at commit time
+transcriptDigest = H( drawId, commitment, rosterDigest, memberDigest, seed )
+winner           = selectWinnerIndex( transcriptDigest )
+```
 
-I am not going to paper over this, because §12.3 forbids fabricated trust
-signals and a claim of grinding-proofness would be exactly that.
+Every input on the right-hand side is known to the treasurer *before* they
+commit: they choose `seed` and `commitmentNonce`, the roster is theirs, and the
+sealed hashes are public. They could therefore grind `seed` / `commitmentNonce`
+offline (about `n` tries for an `n`-member roster) until the winner was the
+member they wanted, then commit. The reveal would be perfectly consistent and
+every member's check would pass. The member nonces, the only values the
+treasurer does not have at commit time, never influenced the outcome.
+`draw.fairness.test.ts` only exercised grinding *after* the commit, which v2
+already prevented.
 
-**The mitigation implemented.** `draw_commitments` deliberately accepts more than
-one row per `(cycle, round)`. `count_draw_commitments_v1` returns
-`count(*) - 1` for the round, and `verifyRound` turns any value above zero into
-`suspicious_commitment_history` plus a warning naming the member vote that
-should follow. Abandoned commitments are the observable signature of grinding,
-so a treasurer who ground seeds is *detectable by the members they wronged*. The
-warning is kept separate from `verified` on purpose: verification is a
-mathematical fact, while whether to honour a draw is a governance decision.
+### 5.2 The fix (protocol v3)
 
-**What would actually close it** (as written before M4.3):
+```
+nonceDigest      = H( drawId, sorted (memberId, nonce) pairs )            // sened-draw-nonce-set-v1
+                   -- only from nonces that verified against their seals
+transcriptDigest = H( drawId, commitment, rosterDigest, memberDigest,
+                      nonceDigest, seed )                                 // sened-draw-transcript-v3
+winner           = selectWinnerIndex( transcriptDigest )                  // unchanged
+```
 
-1. **Dual commit** — every member (or a quorum) commits their own nonce; the
-   winner is derived from the concatenation. Grinding requires *every*
-   participant to collude, so it is self-policing. This is the standard fix and
-   it is a protocol change, not a patch.
-2. **Public commitment log with mandatory reveal** — all commitments for a round
-   must be revealed within a fixed window, and a round with un-revealed
-   commitments is void. Deterrent rather than preventive.
-3. **On-chain randomness** — a `vrf`-style or beacon-based source. Removes the
-   treasurer from the loop entirely, but adds infrastructure this hackathon
-   cannot rely on.
+and `commitment` is serialized as `sened-draw-commit-v3` (same fields as v2, new
+tag). The winner is now a function of values that did not exist, from the
+treasurer's point of view, when they chose the seed.
 
-Recommendation for the reviewer: treat (1) as the M4.3 milestone. (Done, see the status note above.)
+Guarantee: if **at least one** member whose nonce is sealed keeps it secret until
+the treasurer's commitment is published, nobody (treasurer included) can predict
+or steer the winner at commit time. A coalition must contain *every* sealed
+member to grind.
+
+Where it lives: `canonicalSerializeNonceSet`, `computeNonceDigest`,
+`canonicalSerializeTranscript(…, version)` in `src/lib/draw/canonical.ts`;
+`resolveMemberOpening`, `findBadOpenings`, `openReveal` and `verifyTranscript` in
+`src/lib/draw/engine.ts`. The browser (`verifyInBrowser`) runs the same
+`verifyTranscript` with WebCrypto; the verifier is the single place that both
+checks every opening and derives the winner, so there is no separate "opening
+check" that could pass while the selection used something else.
+
+Strictness added with it: the opened set must equal the sealed set *exactly*. A
+revealer who repeats one member's nonce so the count still matches (hiding that
+another was never opened) is refused, in the engine, in the verifier, and in
+`reveal_draw_v1`. An unverified nonce never contributes to a digest, and a v3
+transcript with missing or bad nonces yields no `transcriptDigest` and no winner.
+
+### 5.3 Versioning and what happens to v2 draws
+
+| | v2 (historical) | v3 (current) |
+|---|---|---|
+| commit tag | `sened-draw-commit-v2` | `sened-draw-commit-v3` |
+| transcript tag | `sened-draw-reveal-v2` | `sened-draw-transcript-v3` |
+| winner depends on nonces | no | yes (via `nonceDigest`) |
+| can be created | **no** (read-only history) | yes |
+
+Decision: **v2 draws stay verifiable under their original rules.** The v2 tags
+and preimages are frozen; `verifyTranscript` dispatches on
+`transcript.protocolVersion` (absent means v2, i.e. a row from before
+versioning), and the v2 vectors in `test/draw.nonce-binding.test.ts` were
+captured by running the pre-change engine, so any drift fails the build. v2 draws
+keep their original weakness (they were grindable); they are not re-labelled as
+safe, and nothing in the product claims otherwise.
+
+Downgrade resistance: the version is hashed into the *commitment*, so a v3
+transcript presented as v2 (or with the field stripped) fails with
+`commitment_mismatch` and names no winner; a v2 transcript presented as v3
+fails the same way. In the database, `draw_commitments.protocol_version` is set at
+commit time (existing rows backfilled `v2`), the table is append-only, and
+`commit_draw_v1` **refuses anything but `v3`**, because the function is reachable
+directly through PostgREST and a treasurer must not be able to open a new draw
+under the grindable rules by calling it by hand.
+(`20261004100000_draw_protocol_v3.sql`; apply it before deploying the
+application that sends `p_protocol_version`.)
+
+### 5.4 Protocol ordering (what the UI enforces)
+
+The guarantee holds only if a member releases their nonce **after** the
+commitment is published. `LiveDraw` therefore does not render a member's opening
+line until the draw's published commitment (`/api/draw/verify`) contains that
+member's own sealed hash; before that it shows why, offers a "has the treasurer
+committed?" check, and warns if a commitment exists but omits the member's seal.
+The opening is also withheld from the DOM, not merely hidden. This is a
+usability guard, not a cryptographic one: a member who pastes the nonce out of
+`localStorage` early defeats it for themselves, and the docs say so.
+
+### 5.5 Residual properties (honest list)
+
+1. **Collusion.** The guarantee needs one honest sealed member whose nonce stays
+   secret until after the commit. A treasurer colluding with *every* sealed
+   member can grind. One seal is the enforced floor (`MIN_MEMBER_COMMITMENTS`);
+   a group that wants more should raise `minMemberCommitments`. Note the treasurer
+   also chooses *which* members' seals to include; that is a grinding dimension
+   only over subsets of members whose nonces the treasurer still does not know,
+   so it adds no information.
+2. **Last-revealer abort (withholding).** After the commit, whoever sees the
+   other nonces and the seed can compute the outcome before deciding to
+   proceed. In this product the treasurer collects the openings and holds the
+   seed, so the treasurer can compute the winner from the nonces they receive and
+   *abort* (never reveal, re-commit with a new seed) if they dislike it. A member
+   who refuses to reveal likewise makes the draw refuse
+   (`MEMBER_COMMITMENT_MISSING`). Withholding is a veto, not a choice: it cannot
+   select a winner, it can only discard an outcome. A veto repeated until the
+   result is favourable is the same grinding in slow motion, and it leaves exactly
+   the observable trace the abandoned-commitment counter exists for: every
+   re-commit adds a row to `(cycle, round)`, `count_draw_commitments_v1` returns
+   it, and `verifyRound` turns any positive count into
+   `suspicious_commitment_history` plus a member-vote warning. That counter is
+   deliberately kept; `verified` stays a mathematical fact, honouring the draw is
+   governance. A lone member can only abort, never bias, but each abort costs the
+   treasurer a visible re-commit, not the member.
+3. **Nonce leakage before the commit** (a member screenshotting or sharing it
+   early, or the server logging it) re-opens the v2 hole for that member's share
+   of the entropy. The UI withholds it; nothing can make a human keep a secret.
+4. **The server still sees nonces at reveal.** It cannot change the winner
+   (every member recomputes it), but it is trusted to *publish* them.
+5. **The database does not recompute the derivation.** `reveal_draw_v1` checks
+   structure (opened set equals the sealed set for v3, nonce length, digest
+   equality) and the existing trigger pins the winner to the committed roster and
+   index, but neither the nonce-to-seal hash nor the seed-to-winner derivation is
+   reimplemented in plpgsql (see `20260926110000_draw_reveal_binding.sql` for why).
+   Those are enforced by `verifyRound` on the server and, independently, by every
+   member's browser.
+
+### 5.6 Earlier options (kept for the record)
+
+Before M4.3 the options considered were dual commit (what v3 completes), a
+public commitment log with mandatory reveal (partly present as the
+abandoned-commitment counter), and an external randomness beacon (not adopted).
 
 ## 6. M4.2 — Rotation
 
@@ -369,16 +465,18 @@ UUID regex, is in `src/middleware.ts`'s `RATE_LIMITED` with write or read rules
 
 ## 12. Tests
 
-`test/draw.*.test.ts` — **126 tests across 6 files** as of 2026-10-03 (the
-table below lists the original four; `draw.fairness.test.ts` and
-`draw.rpc-contract.test.ts` were added later). The full suite is 1039 tests in
-59 files.
+`test/draw.*.test.ts` — **182 tests across 8 files** as of 2026-10-04 (the
+table below lists the main ones; `draw.fairness.test.ts`,
+`draw.rpc-contract.test.ts`, `draw.live.test.tsx` and
+`draw.nonce-binding.test.ts` were added later). The full suite is 1124 tests in
+64 files.
 
 | File | Tests | Covers |
 |---|---|---|
 | `draw.engine.test.ts` | 34 | canonical encoding, unbiased selection, commit, reveal, independent verification, every tamper class, rotation |
 | `draw.service.test.ts` | 19 | commit/replay/conflict, reveal gates, payout → balanced hash-chained ledger entry, full cycle, repeat winner, fail-closed hasher |
 | `draw.api.route.test.ts` | 32 | 401/403/503, spoofed-field rejection, numeric money, weak entropy, nonce-equals-seed, duplicate members, error→status map, member-can-verify |
+| `draw.nonce-binding.test.ts` | 31 | v3: grinding control (v2 is grindable, 300/300) and v3 at chance, fixed-preimage nonce sensitivity, golden vectors (v3 hand-recomputed; v2 captured from the pre-change engine), v2 history, downgrade/upgrade refusal, tampered/dropped/repeated nonces, browser == server, tampered nonce digest |
 | `draw.ui.test.tsx` | 11 | ceremony, both Mesob assets, honest reserve, rotation across rounds, locale switch, tamper refusal, VerifyPanel tamper reporting |
 
 Security-relevant pattern throughout: **every negative test asserts the side
@@ -438,7 +536,9 @@ Notes on how it behaves:
   request. So a member seals on their device (the draw id is bound into the
   seal, so the treasurer creates the id first and shares it), and sends the
   treasurer the `memberId:hash` line, later the `memberId:nonce` opening. The UI
-  requires at least one seal from a member other than the committer.
+  requires at least one seal from a member other than the committer. A member's
+  opening line is not shown until the published commitment contains their seal
+  (§5.4).
 - The treasurer's seed lives in `localStorage` on the treasurer's device until
   the reveal (the server never returns one it generated), and is wiped after.
 - The commit endpoint takes the seed in clear because the server computes the
@@ -462,12 +562,9 @@ real server would publish.
   and a UI to show who has sealed.
 - **Contribution amounts and pot** are typed by the treasurer; nothing reads
   them from the ledger yet, so the reserve uses the typed figures.
-- **Observation for review:** the winner is derived from the member *digest*
-  (a hash of the sealed hashes), not from the nonces, and a treasurer sees the
-  sealed hashes before choosing a seed. So the treasurer can still try seeds
-  against the known digest before committing. The existing fairness tests cover
-  grinding *after* the commit only. Worth a protocol review before the draw is
-  described as grinding-proof.
+- ~~Observation: the winner depended on the member digest, not the nonces, so a
+  treasurer could grind seeds before committing~~ — fixed in protocol v3 (§5);
+  the residual properties that remain are listed in §5.5.
 - `VerifyPanel` and `RiskPanel` still carry Amharic-only text.
 - **Supabase round-trip tests** — the repository is written and the SQL is
   verified against real Postgres, but the suite has no live-Supabase test. The

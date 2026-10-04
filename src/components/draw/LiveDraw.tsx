@@ -7,6 +7,7 @@ import {
   canRunTreasurerSteps,
   checkOpenings,
   commitDraw,
+  commitmentPublishedFor,
   drawErrorKey,
   fetchVerification,
   isUuid,
@@ -139,6 +140,8 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
   const [sealDrawId, setSealDrawId] = useState("");
   const [mySeal, setMySeal] = useState<MySeal | null>(null);
   const [verifyDrawId, setVerifyDrawId] = useState("");
+  /** Set when a "has the treasurer committed?" check found nothing yet. */
+  const [noCommitmentYet, setNoCommitmentYet] = useState(false);
 
   const [cycleId, setCycleId] = useState("");
   const [round, setRound] = useState("1");
@@ -220,6 +223,7 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
 
   useEffect(() => {
     setMySeal(isUuid(sealDrawId) ? readSeal(sealDrawId.trim().toLowerCase()) : null);
+    setNoCommitmentYet(false);
   }, [sealDrawId]);
 
   const run = useCallback(async (name: string, action: () => Promise<void>) => {
@@ -244,6 +248,25 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
       const made = await sealForDraw(drawId, myUserId);
       writeSeal(made);
       setMySeal(made);
+    });
+
+  /**
+   * "Has the treasurer committed, with my seal in it?" — asked by a member before
+   * their opening is shown. A missing round is an expected answer here (the
+   * treasurer simply has not committed yet), not an error to alarm anyone with.
+   */
+  const checkCommitment = () =>
+    run("check", async () => {
+      if (mySeal === null) return;
+      setNoCommitmentYet(false);
+      const result = await fetchVerification(mySeal.drawId, deps);
+      if (!result.ok) {
+        if (result.code === "not_found" || result.code === "not_committed") return setNoCommitmentYet(true);
+        return fail(result);
+      }
+      setWire(result.data);
+      setCheck(await verifyInBrowser(result.data));
+      setVerifyDrawId(mySeal.drawId);
     });
 
   // -- step 1: open + commit -----------------------------------------------------
@@ -482,8 +505,32 @@ export function LiveDraw({ locale, accessToken, deps }: LiveDrawProps) {
             <div data-testid="my-seal">
               <p className="mt-2 text-[12px] font-semibold text-[#065F46]">{t("drawLive.sealDone")}</p>
               <CopyField label={t("drawLive.sealLineLabel")} value={sealLine(mySeal)} copyLabel={t("drawLive.copy")} />
-              <CopyField label={t("drawLive.openingLineLabel")} value={openingLine(mySeal)} copyLabel={t("drawLive.copy")} />
-              <p className={HINT}>{t("drawLive.sealKeepSecret")}</p>
+              {commitmentPublishedFor(wire, mySeal) ? (
+                <div data-testid="opening-released">
+                  <p className="mt-2 text-[12px] font-semibold text-[#065F46]">{t("drawLive.openingReady")}</p>
+                  <CopyField label={t("drawLive.openingLineLabel")} value={openingLine(mySeal)} copyLabel={t("drawLive.copy")} />
+                  <p className={HINT}>{t("drawLive.sealKeepSecret")}</p>
+                </div>
+              ) : (
+                // The opening is the one input the treasurer cannot grind over, so
+                // it is not even rendered until the commitment that fixes
+                // everything else is public and contains this member's seal.
+                <div data-testid="opening-locked">
+                  <p role="status" className="mt-2 rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2 text-[12px] font-semibold text-[#6B4E16]">
+                    {t("drawLive.openingLocked")}
+                  </p>
+                  {wire !== null && wire.round.drawId === mySeal.drawId ? (
+                    <p role="alert" className="mt-2 text-[12px] font-semibold text-[#863214]">
+                      {t("drawLive.openingMissing")}
+                    </p>
+                  ) : noCommitmentYet ? (
+                    <p className="mt-2 text-[12px] text-[#6F625D]">{t("drawLive.openingNone")}</p>
+                  ) : null}
+                  <button type="button" className={`${SECONDARY} mt-2`} disabled={busy !== null} onClick={() => void checkCommitment()}>
+                    {busy === "check" ? t("drawLive.working") : t("drawLive.openingCheck")}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </section>

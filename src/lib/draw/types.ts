@@ -1,6 +1,28 @@
 export const DRAW_ROUND_STATES = ["committed", "revealed", "paid"] as const;
 export type DrawRoundState = (typeof DRAW_ROUND_STATES)[number];
 
+/**
+ * Draw protocol versions.
+ *
+ * `v2` is the original member-seed protocol. It sealed member nonces before the
+ * treasurer committed, but the winner was derived only from values the treasurer
+ * already knew at commit time (the sealed hashes, never the nonces), so the
+ * treasurer could still grind `seed`/`commitmentNonce` offline until the winner
+ * was who they wanted. It is kept ONLY so historical draws stay verifiable.
+ *
+ * `v3` folds a digest of the revealed member nonces into the transcript digest
+ * that selects the winner. The nonces are the one input the treasurer does not
+ * have at commit time, so the winner can no longer be searched for. New draws
+ * are always `v3`; the database refuses a new `v2` commitment.
+ */
+export const DRAW_PROTOCOL_VERSIONS = ["v2", "v3"] as const;
+export type DrawProtocolVersion = (typeof DRAW_PROTOCOL_VERSIONS)[number];
+export const DRAW_CURRENT_PROTOCOL_VERSION: DrawProtocolVersion = "v3";
+
+export function isDrawProtocolVersion(value: unknown): value is DrawProtocolVersion {
+  return typeof value === "string" && (DRAW_PROTOCOL_VERSIONS as readonly string[]).includes(value);
+}
+
 export const DRAW_MEMBER_STATUSES = ["active", "inactive"] as const;
 export type DrawMemberStatus = (typeof DRAW_MEMBER_STATUSES)[number];
 
@@ -113,6 +135,13 @@ export interface DrawCommitment {
   readonly round: number;
   readonly commitment: string;
   /**
+   * Which derivation this draw was committed under. Bound into the commitment
+   * hash itself (`sened-draw-commit-v3`), pinned by the database at commit time,
+   * and never changed afterwards, so a verifier cannot be talked into checking a
+   * v3 draw under the weaker v2 rules.
+   */
+  readonly protocolVersion: DrawProtocolVersion;
+  /**
    * Public half of the sealed entropy. It is published at commit time and is
    * part of the hashed preimage, so the commitment cannot be re-derived from a
    * different nonce — but publishing it early means the commitment is fixed
@@ -202,6 +231,11 @@ export interface DrawVerificationResult {
   readonly winningTicket: string | null;
   readonly selectedIndex: number | null;
   readonly transcriptDigest: string | null;
+  /**
+   * Digest of the verified member nonces that fed the winner selection. `null`
+   * for a v2 draw (which has none) and whenever the nonces did not all verify.
+   */
+  readonly nonceDigest?: string | null;
   readonly recomputedCommitment: string | null;
   readonly errors: readonly DrawVerificationError[];
 }

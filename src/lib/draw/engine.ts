@@ -2,6 +2,7 @@ import {
   computeCommitment,
   computeMemberCommitment,
   computeMemberDigest,
+  computeNonceDigest,
   computeRosterDigest,
   computeTranscriptDigest,
   deriveTicket,
@@ -10,6 +11,7 @@ import {
   selectWinnerIndex,
   type DrawVerificationTranscript
 } from "./canonical";
+import { DRAW_CURRENT_PROTOCOL_VERSION } from "./types";
 import { DrawError } from "./errors";
 import { planReserve, assessDrawRisk, type ReservePlan } from "./risk";
 import { buildParticipants, excludePriorWinners } from "./rotation";
@@ -19,6 +21,7 @@ import type {
   DrawMember,
   DrawMemberCommitment,
   DrawMemberNonce,
+  DrawProtocolVersion,
   DrawReveal,
   DrawRiskAssessment,
   DrawRound,
@@ -47,6 +50,12 @@ export interface CommitRequest {
   readonly drawId: string;
   readonly commitmentNonce: string;
   readonly seed: string;
+  /**
+   * Which derivation to commit under. Defaults to `v3`. `v2` exists only so
+   * tests and migration tooling can build legacy fixtures; the service never
+   * passes it and the database refuses a new v2 commitment.
+   */
+  readonly protocolVersion?: DrawProtocolVersion;
   /**
    * Sealed contributions from members, published as hashes. The nonces stay with
    * their owners until the reveal.
@@ -138,6 +147,7 @@ function unverified(
     winningTicket: null,
     selectedIndex: null,
     transcriptDigest: null,
+    nonceDigest: null,
     recomputedCommitment: null,
     errors
   };
@@ -209,6 +219,7 @@ export async function createCommitment(
     { drawId: request.drawId, contributions: memberCommitments },
     hasher
   );
+  const protocolVersion = request.protocolVersion ?? DRAW_CURRENT_PROTOCOL_VERSION;
   const commitment = await computeCommitment(
     {
       groupId: request.groupId,
@@ -220,6 +231,7 @@ export async function createCommitment(
       memberDigest,
       seed: request.seed
     },
+    protocolVersion,
     hasher
   );
 
@@ -229,6 +241,7 @@ export async function createCommitment(
     cycleId: request.cycleId,
     round: request.round,
     commitment,
+    protocolVersion,
     commitmentNonce: request.commitmentNonce,
     memberDigest,
     memberCommitments,
@@ -258,20 +271,69 @@ export interface RevealResult {
  * behaviour §12.5 requires.
  */
 /**
- * Recompute the member digest from revealed nonces, checking each against the
- * hash that was sealed at commit time.
+ * Check revealed nonces against the seals, without throwing.
  *
- * This is the heart of the fairness property. A member's nonce is only accepted
- * if it hashes to what that member published before the ceremony; the aggregate
- * is then compared with the digest bound into the commitment. Change one nonce
- * and the digest changes, so the commitment cannot be reproduced — which is
- * exactly what stops a treasurer from revealing a nonce of their own choosing.
+ * Returns the members whose opening is missing, wrong, repeated, or belongs to a
+ * member who sealed nothing. Shared by the reveal (which refuses on any problem)
+ * and by `verifyTranscript` (which reports it), so there is one definition of
+ * "this nonce opens that seal" and the browser and server cannot disagree on it.
  */
-export async function resolveMemberDigest(
+export async function findBadOpenings(
+  drawId: string,
+  sealed: readonly DrawMemberCommitment[],
+  nonces: readonly DrawMemberNonce[],
+  hasher: DrawHasher
+): Promise<string[]> {
+  const bad = new Set<string>();
+  const counts = new Map<string, number>();
+  for (const entry of nonces) {
+    counts.set(entry.memberId, (counts.get(entry.memberId) ?? 0) + 1);
+  }
+  const byMember = new Map(nonces.map((entry) => [entry.memberId, entry.nonce]));
+  for (const contribution of sealed) {
+    const nonce = byMember.get(contribution.memberId);
+    if (nonce === undefined || nonce.length < 16 || (counts.get(contribution.memberId) ?? 0) !== 1) {
+      bad.add(contribution.memberId);
+      continue;
+    }
+    let recomputed: string | null;
+    try {
+      recomputed = await computeMemberCommitment(
+        { drawId, memberId: contribution.memberId, nonce },
+        hasher
+      );
+    } catch {
+      recomputed = null;
+    }
+    if (recomputed !== contribution.sealed) bad.add(contribution.memberId);
+  }
+  for (const entry of nonces) {
+    if (!sealed.some((contribution) => contribution.memberId === entry.memberId)) bad.add(entry.memberId);
+  }
+  return [...bad];
+}
+
+/**
+ * Open every sealed member contribution.
+ *
+ * A member's nonce is only accepted if it hashes to what that member published
+ * before the ceremony. Two digests come out:
+ *
+ *  - `memberDigest`: over the sealed hashes, which must equal the digest bound
+ *    into the commitment (the set of contributors cannot have changed).
+ *  - `nonceDigest`: over the verified `(memberId, nonce)` pairs. In protocol v3
+ *    this feeds the transcript digest and therefore the winner, which is what
+ *    stops a treasurer from grinding: the nonces are unknown at commit time.
+ *
+ * The opened set must equal the sealed set exactly. A duplicated member would
+ * let a revealer repeat one nonce to hide that another was never opened — and
+ * the unopened one is precisely the unknown the treasurer cannot grind over.
+ */
+export async function resolveMemberOpening(
   commitment: DrawCommitment,
   nonces: readonly DrawMemberNonce[],
   hasher: DrawHasher
-): Promise<string> {
+): Promise<{ readonly memberDigest: string; readonly nonceDigest: string }> {
   if (nonces.length !== commitment.memberCommitments.length) {
     throw new DrawError(
       "MEMBER_COMMITMENT_MISSING",
@@ -283,6 +345,7 @@ export async function resolveMemberDigest(
     commitment.memberCommitments.map((contribution) => [contribution.memberId, contribution.sealed])
   );
 
+  const opened = new Set<string>();
   for (const entry of nonces) {
     const sealed = sealedByMember.get(entry.memberId);
     if (sealed === undefined) {
@@ -291,6 +354,13 @@ export async function resolveMemberDigest(
         "A revealed contribution belongs to a member who sealed nothing. The draw is refused."
       );
     }
+    if (opened.has(entry.memberId)) {
+      throw new DrawError(
+        "MEMBER_COMMITMENT_MISSING",
+        `The contribution of ${entry.memberId} was opened twice, so another sealed contribution was left unopened. The draw is refused.`
+      );
+    }
+    opened.add(entry.memberId);
     if (!entry.nonce || entry.nonce.length < 16) {
       throw new DrawError(
         "INVALID_REQUEST",
@@ -319,7 +389,22 @@ export async function resolveMemberDigest(
       "The member contributions no longer hash to the committed digest. The draw is refused."
     );
   }
-  return memberDigest;
+  // Every nonce above verified against its seal, so this digest covers only
+  // verified nonces.
+  const nonceDigest = await computeNonceDigest(
+    { drawId: commitment.drawId, nonces },
+    hasher
+  );
+  return { memberDigest, nonceDigest };
+}
+
+/** Back-compat wrapper: the digest over the sealed hashes. */
+export async function resolveMemberDigest(
+  commitment: DrawCommitment,
+  nonces: readonly DrawMemberNonce[],
+  hasher: DrawHasher
+): Promise<string> {
+  return (await resolveMemberOpening(commitment, nonces, hasher)).memberDigest;
 }
 
 /**
@@ -356,10 +441,16 @@ export async function openReveal(
   hasher: DrawHasher
 ): Promise<RevealResult> {
   // Every sealed contribution must be opened, and opened correctly, before the
-  // winner is derived. This is the step that makes the draw fair: the winner
-  // depends on nonces the treasurer chose not, so no seed search could have
-  // reached this outcome.
-  const memberDigest = await resolveMemberDigest(commitment, input.memberNonces, hasher);
+  // winner is derived. In v3 this is the step that makes the draw fair: the
+  // transcript digest that selects the winner includes a digest of these nonces,
+  // which the treasurer did not have when they committed, so no seed search could
+  // have targeted this outcome. (In legacy v2 the nonces were checked but did not
+  // feed the winner — that was the grinding hole.)
+  const { memberDigest, nonceDigest } = await resolveMemberOpening(
+    commitment,
+    input.memberNonces,
+    hasher
+  );
 
   const recomputed = await computeCommitment(
     {
@@ -372,6 +463,7 @@ export async function openReveal(
       memberDigest,
       seed: input.seed
     },
+    commitment.protocolVersion,
     hasher
   );
 
@@ -396,8 +488,10 @@ export async function openReveal(
       commitment: commitment.commitment,
       rosterDigest: commitment.rosterDigest,
       memberDigest,
-      seed: input.seed
+      seed: input.seed,
+      nonceDigest
     },
+    commitment.protocolVersion,
     hasher
   );
 
@@ -477,6 +571,9 @@ export async function verifyTranscript(
   const codes: DrawVerificationCode[] = [];
   const errors: DrawVerificationError[] = [];
   const warnings: string[] = [];
+  // A transcript with no version predates versioning: v2. This cannot downgrade
+  // a v3 draw, because the version is part of the commitment preimage.
+  const protocolVersion: DrawProtocolVersion = transcript.protocolVersion ?? "v2";
 
   if (transcript.participants.length === 0) {
     return unverified(
@@ -497,6 +594,19 @@ export async function verifyTranscript(
         {
           code: "incomplete_transcript",
           detail: "The seed has not been revealed yet, so the draw cannot be verified."
+        }
+      ]
+    );
+  }
+
+  if (protocolVersion === "v3" && (transcript.memberNonces === undefined || transcript.memberNonces.length === 0)) {
+    return unverified(
+      ["incomplete_transcript"],
+      [
+        {
+          code: "incomplete_transcript",
+          detail:
+            "The member nonces have not been published, and in a v3 draw they decide the winner, so the draw cannot be verified."
         }
       ]
     );
@@ -584,6 +694,33 @@ export async function verifyTranscript(
     });
   }
 
+  // 3b. Does every revealed nonce open the seal it claims to? In v3 the nonce
+  // digest feeds the winner, so it is computed only from nonces that verified:
+  // an unverified nonce must never influence a selection a member then trusts.
+  // For v2 the check runs whenever nonces are supplied (the legacy winner does
+  // not depend on them, but a forged opening is still tampering).
+  let nonceDigest: string | null = null;
+  if (transcript.memberNonces !== undefined) {
+    const bad = await findBadOpenings(
+      transcript.drawId,
+      transcript.memberCommitments,
+      transcript.memberNonces,
+      hasher
+    );
+    if (bad.length > 0) {
+      codes.push("member_commitment_mismatch");
+      errors.push({
+        code: "member_commitment_mismatch",
+        detail: `The revealed nonce for ${bad.join(", ")} is missing or does not open what that member sealed.`
+      });
+    } else if (protocolVersion === "v3") {
+      nonceDigest = await computeNonceDigest(
+        { drawId: transcript.drawId, nonces: transcript.memberNonces },
+        hasher
+      );
+    }
+  }
+
   // 4. Does the seed reproduce the commitment?
   const recomputedCommitment = await computeCommitment(
     {
@@ -596,6 +733,7 @@ export async function verifyTranscript(
       memberDigest: transcript.memberDigest,
       seed: transcript.seed
     },
+    protocolVersion,
     hasher
   );
   if (recomputedCommitment !== transcript.commitment) {
@@ -607,16 +745,23 @@ export async function verifyTranscript(
     });
   }
 
-  const transcriptDigest = await computeTranscriptDigest(
-    {
-      drawId: transcript.drawId,
-      commitment: transcript.commitment,
-      rosterDigest: transcript.rosterDigest,
-      memberDigest: transcript.memberDigest,
-      seed: transcript.seed
-    },
-    hasher
-  );
+  // v3 without a verified nonce digest has no transcript digest at all: there
+  // is nothing honest to compute it from.
+  const transcriptDigest =
+    protocolVersion === "v3" && nonceDigest === null
+      ? null
+      : await computeTranscriptDigest(
+          {
+            drawId: transcript.drawId,
+            commitment: transcript.commitment,
+            rosterDigest: transcript.rosterDigest,
+            memberDigest: transcript.memberDigest,
+            seed: transcript.seed,
+            nonceDigest
+          },
+          protocolVersion,
+          hasher
+        );
 
   /**
    * Fail closed before naming anybody.
@@ -635,6 +780,7 @@ export async function verifyTranscript(
       winningTicket: null,
       selectedIndex: null,
       transcriptDigest,
+      nonceDigest,
       recomputedCommitment,
       errors
     };
@@ -643,7 +789,7 @@ export async function verifyTranscript(
   let selection;
   try {
     selection = await selectWinnerIndex(
-      { transcriptDigest, eligibleCount: rosterParticipants.length },
+      { transcriptDigest: transcriptDigest as string, eligibleCount: rosterParticipants.length },
       hasher
     );
   } catch (error) {
@@ -663,6 +809,7 @@ export async function verifyTranscript(
       winningTicket: null,
       selectedIndex: null,
       transcriptDigest,
+      nonceDigest,
       recomputedCommitment,
       errors
     };
@@ -691,6 +838,7 @@ export async function verifyTranscript(
     winningTicket: winner?.ticket ?? null,
     selectedIndex: selection.index,
     transcriptDigest,
+    nonceDigest,
     recomputedCommitment,
     errors
   };
@@ -713,6 +861,7 @@ export async function verifyRound(
       cycleId: round.cycleId,
       round: round.round,
       commitment: round.commitment,
+      protocolVersion: round.protocolVersion,
       rosterDigest: round.rosterDigest,
       commitmentNonce: round.commitmentNonce,
       memberDigest: round.memberDigest,
@@ -721,6 +870,10 @@ export async function verifyRound(
         sealed: contribution.sealed
       })),
       seed: round.reveal?.seed ?? "",
+      memberNonces: (round.reveal?.memberNonces ?? []).map((entry) => ({
+        memberId: entry.memberId,
+        nonce: entry.nonce
+      })),
       participants: round.participants.map((participant) => ({
         memberId: participant.memberId,
         ticket: participant.ticket,

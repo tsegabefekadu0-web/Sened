@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { DrawError, isDrawError } from "./errors";
-import type { DrawErrorCode } from "./types";
+import { DRAW_CURRENT_PROTOCOL_VERSION, isDrawProtocolVersion, type DrawErrorCode } from "./types";
 import type {
   DrawCommitment,
   DrawPayout,
@@ -85,6 +85,14 @@ export class InMemoryDrawRepository implements DrawRepository {
     requireUuid(context.userId, "userId");
     requireUuid(commitment.drawId, "drawId");
     requireUuid(commitment.groupId, "groupId");
+    // Mirrors the database: a new commitment must be the current protocol. v2
+    // let the treasurer grind the winner, so it is readable but never writable.
+    if (commitment.protocolVersion !== DRAW_CURRENT_PROTOCOL_VERSION) {
+      throw new DrawError(
+        "INVALID_REQUEST",
+        `New draws must use protocol ${DRAW_CURRENT_PROTOCOL_VERSION}; ${commitment.protocolVersion} is read-only history.`
+      );
+    }
 
     const key = `${commitment.groupId}:${commitment.idempotencyKey}`;
     const existingDrawId = this.commitmentKeys.get(key);
@@ -213,6 +221,9 @@ function mapSupabaseError(error: { readonly code?: string; readonly message?: st
     return new DrawError("NO_ELIGIBLE_PARTICIPANTS", message);
   }
   if (message === "draw_commitment_mismatch") return new DrawError("COMMITMENT_MISMATCH", message);
+  if (message === "draw_protocol_version_unsupported") return new DrawError("INVALID_REQUEST", message);
+  if (message === "draw_member_commitment_missing") return new DrawError("MEMBER_COMMITMENT_MISSING", message);
+  if (message === "draw_member_commitment_mismatch") return new DrawError("MEMBER_COMMITMENT_MISMATCH", message);
   if (message === "draw_already_revealed") return new DrawError("ALREADY_REVEALED", message);
   if (message === "draw_not_committed") return new DrawError("NOT_COMMITTED", message);
   // Enforced by the database, not the application: the winner must be the
@@ -250,6 +261,8 @@ function parseRound(value: unknown): DrawRound {
     cycleId: String(parsed.cycleId),
     round: Number(parsed.round),
     commitment: String(parsed.commitment),
+    // Rows from before the protocol column existed are v2 by definition.
+    protocolVersion: isDrawProtocolVersion(parsed.protocolVersion) ? parsed.protocolVersion : "v2",
     commitmentNonce: String(parsed.commitmentNonce),
     memberDigest: String(parsed.memberDigest ?? ""),
     memberCommitments: (parsed.memberCommitments ?? []) as DrawRound["memberCommitments"],
@@ -295,7 +308,9 @@ export class SupabaseDrawRepository implements DrawRepository {
       p_total_rounds: commitment.totalRounds,
       p_reserve_ratio_bps: commitment.reserveRatioBps,
       p_idempotency_key: commitment.idempotencyKey,
-      p_occurred_at: commitment.committedAt
+      p_occurred_at: commitment.committedAt,
+      // Pinned in the database so the derivation cannot be relabelled later.
+      p_protocol_version: commitment.protocolVersion
     });
     if (error) {
       throw mapSupabaseError(error);

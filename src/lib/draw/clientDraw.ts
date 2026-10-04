@@ -14,15 +14,16 @@ import { readMyGroup } from "@/lib/ledger/clientRead";
 import { formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
 import type { MessageKey } from "@/lib/i18n";
 
-import { computeMemberCommitment, webDrawHasher, type DrawVerificationTranscript } from "./canonical";
-import { sealMemberContribution, verifyTranscript } from "./engine";
+import { webDrawHasher, type DrawVerificationTranscript } from "./canonical";
+import { findBadOpenings, sealMemberContribution, verifyTranscript } from "./engine";
 import { assessDrawRisk, planReserve } from "./risk";
-import type {
-  DrawMemberCommitment,
-  DrawMemberNonce,
-  DrawRiskAssessment,
-  DrawRoundState,
-  DrawVerificationResult
+import {
+  isDrawProtocolVersion,
+  type DrawMemberCommitment,
+  type DrawMemberNonce,
+  type DrawRiskAssessment,
+  type DrawRoundState,
+  type DrawVerificationResult
 } from "./types";
 
 // -- roles --------------------------------------------------------------------
@@ -207,6 +208,8 @@ export interface WireServerVerification {
   readonly warnings: readonly string[];
   readonly winnerMemberId: string | null;
   readonly transcriptDigest: string | null;
+  /** Digest of the verified member nonces (v3). Absent from servers that predate v3. */
+  readonly nonceDigest?: string | null;
 }
 
 export interface WireVerify {
@@ -249,6 +252,7 @@ function isTranscript(value: unknown): value is DrawVerificationTranscript {
     isString(row.rosterDigest) &&
     isString(row.commitmentNonce) &&
     isString(row.memberDigest) &&
+    (row.protocolVersion === undefined || isDrawProtocolVersion(row.protocolVersion)) &&
     Array.isArray(row.memberCommitments) &&
     isString(row.seed) &&
     Array.isArray(row.participants)
@@ -376,6 +380,7 @@ export type DisagreementKind =
   | "verdict"
   | "winner"
   | "digest"
+  | "nonceDigest"
   | "recordedWinner"
   | "payout";
 
@@ -400,24 +405,7 @@ export async function checkOpenings(
   sealed: readonly DrawMemberCommitment[],
   nonces: readonly DrawMemberNonce[]
 ): Promise<readonly string[]> {
-  const bad: string[] = [];
-  const byMember = new Map(nonces.map((entry) => [entry.memberId, entry.nonce]));
-  for (const contribution of sealed) {
-    const nonce = byMember.get(contribution.memberId);
-    if (nonce === undefined) {
-      bad.push(contribution.memberId);
-      continue;
-    }
-    const recomputed = await computeMemberCommitment(
-      { drawId, memberId: contribution.memberId, nonce },
-      webDrawHasher
-    ).catch(() => null);
-    if (recomputed !== contribution.sealed) bad.push(contribution.memberId);
-  }
-  for (const entry of nonces) {
-    if (!sealed.some((contribution) => contribution.memberId === entry.memberId)) bad.push(entry.memberId);
-  }
-  return bad;
+  return findBadOpenings(drawId, sealed, nonces, webDrawHasher);
 }
 
 /**
@@ -427,31 +415,15 @@ export async function checkOpenings(
  * produces is itself the tamper signal.
  */
 export async function verifyInBrowser(wire: WireVerify): Promise<BrowserCheck> {
-  const { round, transcript } = wire;
+  const { round } = wire;
+  // The nonces arrive beside the transcript on the wire. Fold them in so the one
+  // verifier that derives the winner is also the one that checks every opening:
+  // in v3 the winner depends on them, so there is no separate "opening check"
+  // that could pass while the selection used something else.
+  const transcript: DrawVerificationTranscript = { ...wire.transcript, memberNonces: wire.memberNonces };
   const revealed = round.revealed && transcript.seed.length > 0;
 
-  let local = await verifyTranscript(transcript, webDrawHasher);
-
-  if (revealed && local.verified) {
-    const bad = await checkOpenings(transcript.drawId, transcript.memberCommitments, wire.memberNonces);
-    if (bad.length > 0) {
-      local = {
-        ...local,
-        verified: false,
-        winnerMemberId: null,
-        winningTicket: null,
-        selectedIndex: null,
-        codes: [...local.codes.filter((code) => code !== "ok"), "member_commitment_mismatch"],
-        errors: [
-          ...local.errors,
-          {
-            code: "member_commitment_mismatch",
-            detail: `The revealed nonce for ${bad.join(", ")} is missing or does not open what that member sealed.`
-          }
-        ]
-      };
-    }
-  }
+  const local = await verifyTranscript(transcript, webDrawHasher);
 
   const disagreements: DisagreementKind[] = [];
   if (
@@ -476,6 +448,14 @@ export async function verifyInBrowser(wire: WireVerify): Promise<BrowserCheck> {
       wire.verification.transcriptDigest !== local.transcriptDigest
     ) {
       disagreements.push("digest");
+    }
+    if (
+      wire.verification.nonceDigest !== undefined &&
+      wire.verification.nonceDigest !== null &&
+      local.nonceDigest !== null &&
+      wire.verification.nonceDigest !== local.nonceDigest
+    ) {
+      disagreements.push("nonceDigest");
     }
     if (
       wire.verification.winnerMemberId !== null &&
@@ -551,6 +531,26 @@ export async function sealForDraw(drawId: string, memberId: string): Promise<MyS
 export const sealLine = (seal: Pick<MySeal, "memberId" | "sealed">): string => `${seal.memberId}:${seal.sealed}`;
 /** `memberId:nonce` — what a member sends the treasurer for the reveal. */
 export const openingLine = (seal: Pick<MySeal, "memberId" | "nonce">): string => `${seal.memberId}:${seal.nonce}`;
+
+/**
+ * Has the treasurer's commitment been published with THIS member's seal in it?
+ *
+ * A member's nonce decides the winner, and it is only unknown to the treasurer
+ * for as long as the member keeps it. Releasing it before the commitment is
+ * published hands the treasurer the one input they could not grind over, so the
+ * UI offers the opening line only once this returns true: the published round is
+ * this draw, and the sealed set it committed to contains the member's own hash.
+ */
+export function commitmentPublishedFor(
+  wire: Pick<WireVerify, "round" | "transcript"> | null,
+  seal: Pick<MySeal, "drawId" | "memberId" | "sealed"> | null
+): boolean {
+  if (wire === null || seal === null) return false;
+  if (wire.round.drawId !== seal.drawId || wire.transcript.drawId !== seal.drawId) return false;
+  return wire.transcript.memberCommitments.some(
+    (entry) => entry.memberId === seal.memberId && entry.sealed === seal.sealed
+  );
+}
 
 export type LineParse<T> =
   | { readonly ok: true; readonly entries: readonly T[] }

@@ -38,6 +38,7 @@ const round: DrawRound = {
   cycleId,
   round: 1,
   commitment,
+  protocolVersion: "v3",
   commitmentNonce: "nonce-abcdefghijklmnop",
   memberDigest,
   memberCommitments: [{ memberId: "00014444-4444-8444-8444-444444444444", sealed: "f".repeat(64) }],

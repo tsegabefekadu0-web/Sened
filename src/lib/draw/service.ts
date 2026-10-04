@@ -104,7 +104,7 @@ export function payoutIdempotencyKey(commitment: string): string {
  */
 export type CommitDrawInput = Omit<
   CommitRequest,
-  "drawId" | "commitmentNonce" | "seed" | "committedBy" | "committedAt"
+  "drawId" | "commitmentNonce" | "seed" | "committedBy" | "committedAt" | "protocolVersion"
 > & {
   readonly drawId?: string;
   readonly commitmentNonce?: string;

@@ -2,6 +2,7 @@ import { authedFetch, NotSignedInError, type AuthedFetchDeps } from "@/lib/auth/
 import { listCycles } from "@/lib/draw/clientDraw";
 import { attributeCodeFromServer, type AttributeFailureCode } from "./attributionCodes";
 import { loadMembers } from "./clientInvites";
+import type { ContributionChannel } from "./paymentChannel";
 import { readMyGroup, type GroupChoiceOptions } from "./clientRead";
 import { formatEtbAmount, isEtbAmount } from "./money";
 import type { LedgerEntryRequest } from "./types";
@@ -21,6 +22,10 @@ export interface ContributionPayer {
   readonly memberUserId: string;
   readonly cycleId?: string;
   readonly round?: number;
+  /** How it was paid, when the treasurer said. A cash contribution has no bank to say it for them. */
+  readonly channel?: ContributionChannel;
+  /** A short plain-text note (trimmed, 1..280 characters), when the treasurer wrote one. */
+  readonly note?: string;
 }
 
 /** What became of the attribution that rode along on the post. */
@@ -133,7 +138,9 @@ export async function postContribution(
           attribution: {
             memberUserId: payer.memberUserId,
             ...(payer.cycleId === undefined ? {} : { cycleId: payer.cycleId }),
-            ...(payer.round === undefined ? {} : { round: payer.round })
+            ...(payer.round === undefined ? {} : { round: payer.round }),
+            ...(payer.channel === undefined ? {} : { channel: payer.channel }),
+            ...(payer.note === undefined ? {} : { note: payer.note })
           }
         })
       },

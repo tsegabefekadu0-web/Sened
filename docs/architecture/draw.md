@@ -545,7 +545,10 @@ so the method picks).
 `ledger.attribution.api.route.test.ts`, `ledger.clientAttribution.test.ts`,
 `contribution-feed.attribution.test.tsx`, `home.attribution.test.tsx`, and for §18 `draw.contributions.test.ts`,
 `draw.contributions.client.test.ts`, `draw.contributions.rpc-contract.test.ts`,
-`draw.contributions.ui.test.tsx`, `draw.gate.service.test.ts`, `draw.gate.api.route.test.ts`). The SQL itself is proven by
+`draw.contributions.ui.test.tsx`, `draw.gate.service.test.ts`, `draw.gate.api.route.test.ts`, and for §17.4-17.5
+`ledger.attribution-channel.rpc-contract.test.ts`, `offline.attribution.autoretry.test.ts`,
+`offline.attribution.autoretry.console.test.tsx`, plus channel/note cases added to the attribution, record-form,
+feed, home, sync and read-route tests). The SQL itself is proven by
 `scripts/verify-migrations.sql` against a real Postgres 16, not by vitest. Counts
 are in the report that accompanied the change; run `npx vitest run` for the current
 total.
@@ -912,20 +915,24 @@ attribution: null | {
   memberUserId, recordedBy, recordedAt,
   cycleId: string | null, round: number | null,
   revision: number,          // 1 = never corrected
-  reason: string | null      // the latest correction's reason
+  reason: string | null,     // the latest correction's reason
+  channel: "telebirr" | "cbe" | "awash" | "cash" | "other" | null,  // §17.4
+  note: string | null                                                 // §17.4
 }
 ```
 
 For `bank_verification`, `memberUserId` and `recordedAt` are the verification's own
-user and time and `recordedBy` is the actor who recorded the entry.
+user and time and `recordedBy` is the actor who recorded the entry; `channel` is the
+verification's provider and `note` is always `null`. `channel` and `note` are additive
+(§17.4): a database or client one release behind neither sends nor needs them.
 
 **Writing it.**
 
 | | Who | Body |
 |---|---|---|
-| `POST /api/ledger/attributions` | owner / treasurer | `{ groupId, entryId, memberUserId, cycleId?, round? }`; 201, or 200 for a repeat |
-| `PUT /api/ledger/attributions` | owner / treasurer | the same plus `reason` (10..1000); appends a superseding record |
-| `POST /api/ledger/entries` | owner / treasurer | optional `attribution: { memberUserId, cycleId?, round? }` on a **contribution**: the entry is posted first (the `attribution` is split off before validation, fingerprint and hash), then attributed; a refusal is *reported* in the response (`attribution: { status: "refused", error }`) and never rolls the entry back |
+| `POST /api/ledger/attributions` | owner / treasurer | `{ groupId, entryId, memberUserId, cycleId?, round?, channel?, note? }`; 201, or 200 for a repeat |
+| `PUT /api/ledger/attributions` | owner / treasurer | the same plus `reason` (10..1000); appends a superseding record (`channel`/`note`: absent keeps, `null` clears, §17.4) |
+| `POST /api/ledger/entries` | owner / treasurer | optional `attribution: { memberUserId, cycleId?, round?, channel?, note? }` on a **contribution**: the entry is posted first (the `attribution` is split off before validation, fingerprint and hash), then attributed; a refusal is *reported* in the response (`attribution: { status: "refused", error }`) and never rolls the entry back |
 
 The body never names who is recording or the source (a 400). Errors carry the
 database's code: 403 `forbidden`; 404 `ledger_entry_not_found`,
@@ -963,9 +970,9 @@ float), date paid (not in the future), the payer (the group's active members fro
 within `1..totalRounds`; choosing a cycle offers its per-member contribution as the
 amount if none is typed. The request is `buildContributionRequest`: a balanced
 `contribution` (debit `POT_CASH`, credit `CONTRIBUTION_INCOME`, the group's own account
-ids from `/api/my-groups`), plus `attribution: { memberUserId, cycleId?, round? }`. The
-channel and a free-text note are not recorded, because a contribution's entry schema has
-neither (`rationale` is accepted for corrections only).
+ids from `/api/my-groups`), plus `attribution: { memberUserId, cycleId?, round?, channel?,
+note? }`. How it was paid and a short note are recorded with the payer, beside the entry
+and never in it (§17.4); `rationale` is still accepted for corrections only.
 
 The idempotency key is per *attempt*: the same values resubmitted after a failure or an
 unknown outcome reuse the key and the timestamp, so the request is byte-identical and
@@ -998,11 +1005,103 @@ so a replay never writes a second record, and a replay whose first attribution n
 landed records it now. A replay naming a *different* payer gets `attribution_exists`
 (`REFUSED`) and the first record stays.
 
-**What does not exist.** There is no channel or note on a contribution. The offline
-member and cycle lists are a per-device copy of the last online read (labelled as such);
-the server re-checks the member and cycle when the draft syncs. The retry of a refused
-attribution is a button on `/offline` (or on the form), not automatic. Voice
-contributions still go through bank verification, which carries its own provenance.
+**What does not exist.** The offline member and cycle lists are a per-device copy of the
+last online read (labelled as such); the server re-checks the member and cycle when the
+draft syncs. Voice contributions still go through bank verification, which carries its
+own provenance. The retry of a payer that did not record on the first attempt is
+automatic only where that is safe, and otherwise a button (§17.5).
+
+### 17.4 How it was paid, and a note
+
+`supabase/migrations/20261012100000_attribution_channel_and_note.sql`. A contribution's
+entry has no channel or free-text field, and the entry format is hash-chained, so neither
+is added to it. Both live **beside the entry, on the attribution record**.
+
+**Why the attribution row and not a sibling table.** It is already the per-contribution
+metadata record, with exactly the semantics a channel and note need: append-only
+(update, delete and truncate refused), one line of history per entry, and correction only
+by a superseding row that names the row it replaces and carries a reason. A sibling table
+would copy all of that (table, immutability triggers, unique indexes, RLS, two RPCs and a
+read function) and then have to be kept consistent with the attribution it describes. The
+price is that a channel or note cannot exist without a payer. That matches every writer:
+the record form and the offline draft both require a payer for a contribution, and the
+"who paid" control is where it is corrected. Two nullable columns are added with
+`add column if not exists`; that is not an `UPDATE`, so the immutability trigger is not
+involved, existing rows read `null`/`null`, and `ledger_entries` (and so `entry_hash` and
+the chain head) is not touched.
+
+**The values.** `channel` is one of `telebirr | cbe | awash | cash | other`, or null (not
+said); the first three are the bank-verification providers. `note` is optional plain
+text: trimmed, 1..280 characters (code points), with no control character (C0, DEL, C1)
+and no invisible bidirectional or zero-width formatting character (U+200B-200F,
+U+202A-202E, U+2066-2069, U+FEFF), so a note is one honest line that renders as written.
+It is enforced three times with the same rule: `CHECK` constraints on the table
+(`ledger_attributions_channel_values`, `ledger_attributions_note_shape`), the RPC
+(`ledger_invalid_request`, 22023, before anything is read) and `src/lib/ledger/
+paymentChannel.ts` (the Zod schema, the device and the forms). A note is **data**: it is
+stored and returned as written, and every screen renders it as text (React escapes it;
+nothing here sets inner HTML). Everyone in the group can read it, which the form says.
+
+**RPCs.** `record_ledger_entry_attribution_v1(group, entry, member, cycle, round
+[, channel, note])` and `supersede_ledger_entry_attribution_v1(group, entry, member,
+reason, cycle, round [, channel, note])`. The old arities were dropped and recreated with
+the two trailing parameters defaulting to null, so PostgREST has exactly one function of
+each name to choose (checked by the harness: `to_regprocedure` of every old arity is
+null), and a caller that sends nothing new behaves as before.
+
+- *record:* null or the empty string means none. An attribution that repeats the existing
+  one *including channel and note* is a replay (`replayed: true`, so a retry of a lost
+  response is `RECORDED`, not a second row); one that differs in member, cycle, round,
+  channel or note is `attribution_exists`.
+- *supersede:* the channel and note are **kept** when the argument is null and **cleared**
+  when it is the empty string, and the new row stores the resulting full state. So
+  correcting the payer alone does not silently wipe them, correcting the channel alone is
+  possible, and a correction that changes none of the five values is
+  `attribution_unchanged`. Over HTTP: absent keeps, `null` clears (the server maps it to
+  the empty string).
+
+**Bank-verified entries (the provenance rule): refuse, do not merely ignore.** The
+channel of a bank-verified entry is the *provider* of the verification, and the
+treasurer's word is never shown as, or over, a bank's. So record and supersede are
+refused with `attribution_bank_verified` for such an entry **whatever channel or note
+they carry**: a manual channel can never contradict the provider because it cannot be
+written at all (stricter than refusing only a contradicting channel, and it needs no second
+rule to stay consistent; a note on a verified entry is refused too, since the bank row has
+no note). If a bank link appears *after* a manual row exists, the read reports the bank:
+`channel` is the provider and `note` is `null`; the manual row, with its channel and
+note, stays in the history unused. This is enforced in SQL (`sened_attribute_entry`, plus
+the table trigger for any other writer) and proved by `scripts/verify-migrations.sql`
+("ALL PAYMENT CHANNEL AND NOTE CHECKS PASSED").
+
+**Read.** `sened_attribution_json` (so `get_ledger_entry_attributions_v1`, so `GET
+/api/ledger/entries` and the `/api/sync` pull) gains `channel` and `note`.
+`sened_effective_attribution` is deliberately not changed (its return type belongs to an
+earlier migration that the idempotency pass re-applies); a small helper,
+`sened_attribution_channel_note`, supplies the two values for the row that wins.
+
+**Screens.** The record form has a channel select and a note field and echoes both back
+after posting; the "Who paid this?" control on a ledger row records them with a first
+payer and, when correcting, starts from what is recorded and sends only what changed
+(a changed channel or note alone keeps the payer as recorded; blanking one clears it; the
+reason is still required); the home feed row and detail show the channel and note beside
+"recorded by the treasurer" as plain text (a verified row shows its provider and never a
+note); an offline draft carries both in its payload (§17.5 and `offline-pwa.md`).
+
+### 17.5 Retrying a payer that did not record
+
+Entry and payer are two writes, and the entry is posted whatever happens to the payer. A
+retry therefore sends only `POST /api/ledger/attributions` for the server's entry id (the
+entry is never pushed again), and the database answers an identical record with the
+existing one, so repeating it cannot double-record. Whether to repeat it *automatically*
+depends on the last answer (`src/lib/offline/attributionPolicy.ts`):
+
+| answer | kind | what happens |
+|---|---|---|
+| nothing reported (`unknown`), `attribution_failed`, `attribution_unreadable`, `attribution_conflict`, a network error, a 5xx, a rate limit | transient | retried automatically, with backoff, within a bound |
+| `attribution_exists`, `forbidden`, member not in the group, a verified bank receipt, the entry reversed, not a contribution, entry or cycle not found, anything this client does not recognise | definitive | **never** retried by itself: "Needs your attention", the reason, and the manual button |
+
+The details are in `offline-pwa.md` §7a. The record form's own retry (for an online post)
+stays a button: it is one click away on the screen that just reported the failure.
 
 ### 17.2 Collateral: guarantors
 

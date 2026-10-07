@@ -1,3 +1,4 @@
+import { attributionFromPayload } from "@/lib/db/attribution";
 import { getLocalChainHead, listMirrorChain, storeMirrorEntries } from "@/lib/db/mirror";
 import { readDivergence, readSyncMeta, recordDivergence, recordPullProgress, recordSyncActivity } from "@/lib/db/meta";
 import {
@@ -8,6 +9,7 @@ import {
   settleTerminal
 } from "@/lib/db/outbox";
 import type { SenedDatabase } from "@/lib/db/schema";
+import { classifyAttributionError } from "./attributionPolicy";
 import { nextAttemptAtMs, DEFAULT_LEASE_MS, DEFAULT_MAX_ATTEMPTS, type BackoffOptions } from "./backoff";
 import {
   blocksPush,
@@ -221,12 +223,47 @@ export class OfflineSyncEngine {
     };
   }
 
+  /**
+   * Where the automatic retry of a draft's payer starts. The entry is synced either
+   * way; this only decides whether the payer that rode along needs a follow-up.
+   *
+   * - recorded, or no payer on the draft: nothing to schedule;
+   * - the server refused it with a definitive answer: nothing is retried by itself
+   *   (the console says why and keeps the manual button);
+   * - the write failed, or the server did not say: the sync result counts as the first
+   *   try when it reported a failure, and the next one is due after the backoff; a
+   *   silent result is due straight away.
+   */
+  private async attributionScheduleFor(
+    mutationId: string,
+    result: SyncPushResult,
+    now: Date
+  ): Promise<{ readonly attempts: number; readonly nextAttemptAt: number | null } | undefined> {
+    const row = await this.db.outbox.get(mutationId);
+    if (!row || attributionFromPayload(row.payload) === null || result.attribution?.outcome === "RECORDED") {
+      return undefined;
+    }
+    const refused = result.attribution?.outcome === "REFUSED";
+    if (!refused) {
+      return { attempts: 0, nextAttemptAt: null };
+    }
+    if (classifyAttributionError(result.attribution?.error ?? null) === "definitive") {
+      return { attempts: 1, nextAttemptAt: null };
+    }
+    return {
+      attempts: 1,
+      nextAttemptAt: nextAttemptAtMs({ attempt: 1, nowMs: now.getTime(), retryAfterMs: null, options: this.backoff })
+    };
+  }
+
   private async settleResult(mutationId: string, result: SyncPushResult): Promise<DrainOutcome> {
     const now = this.clock();
     if (result.outcome === "ACCEPTED" || result.outcome === "REPLAYED") {
+      const attributionRetry = await this.attributionScheduleFor(mutationId, result, now);
       const settled = await settleSynced(this.db, mutationId, result, {
         now,
-        expectedLeaseOwner: this.leaseOwner
+        expectedLeaseOwner: this.leaseOwner,
+        ...(attributionRetry ? { attributionRetry } : {})
       });
       return { mutationId, state: "synced", code: null, message: settled.serverEntryId };
     }

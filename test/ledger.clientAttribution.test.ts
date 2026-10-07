@@ -38,6 +38,27 @@ describe("attributePayer", () => {
     expect(Object.keys(body).sort()).toEqual(["entryId", "groupId", "memberUserId"]);
   });
 
+  it("sends the channel and note only when given, and a correction distinguishes absent (keep) from null (clear)", async () => {
+    const { deps: d, fetchImpl } = deps(json(okBody(), 201));
+    await attributePayer({ ...input, channel: "cash", note: "Hand to hand" }, d);
+    expect(JSON.parse((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body as string)).toEqual({
+      ...input,
+      channel: "cash",
+      note: "Hand to hand"
+    });
+
+    fetchImpl.mockClear();
+    await supersedePayer({ ...input, reason: "Receipt book shows cash" }, d);
+    const kept = JSON.parse((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect("channel" in kept).toBe(false);
+    expect("note" in kept).toBe(false);
+
+    fetchImpl.mockClear();
+    await supersedePayer({ ...input, reason: "Removing what was recorded", channel: null, note: null }, d);
+    const cleared = JSON.parse((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(cleared).toMatchObject({ channel: null, note: null });
+  });
+
   it("reports a replay as ok with replayed set", async () => {
     expect(await attributePayer(input, deps(json(okBody(1, true), 200)).deps)).toEqual({ status: "ok", replayed: true, revision: 1 });
   });

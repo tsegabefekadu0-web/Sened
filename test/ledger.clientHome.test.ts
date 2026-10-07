@@ -282,7 +282,9 @@ describe("loadHomeLedger attribution (who paid a cash contribution)", () => {
     cycleId: null,
     round: null,
     revision: 1,
-    reason: null
+    reason: null,
+    channel: null,
+    note: null
   };
   const proof = {
     kind: "bank_verification",
@@ -313,6 +315,49 @@ describe("loadHomeLedger attribution (who paid a cash contribution)", () => {
     expect(attributed.attribution).toEqual(record);
     expect(plain.attribution).toBeNull();
     expect(result.memberLabels).toEqual({ [PAYER]: "payer@example.test" });
+  });
+
+  it("carries the treasurer's channel and note, and treats an older server's record (neither key) as not stated", async () => {
+    const withBoth = { ...record, channel: "cash", note: "Brought by his brother" };
+    const { channel: _c, note: _n, ...older } = record;
+    const result = await loadHomeLedger(
+      deps([
+        json(groupBody()),
+        json(balancesBody("20.00", 2)),
+        json({ entries: [{ ...wire(2), attribution: withBoth }, { ...wire(1), attribution: older }] }),
+        json(members)
+      ])
+    );
+    if (result.status !== "ready") throw new Error("not ready");
+    const [first, second] = result.summary.contributions;
+    expect(first.attribution).toMatchObject({ channel: "cash", note: "Brought by his brother" });
+    expect(second.attribution).toMatchObject({ channel: null, note: null });
+  });
+
+  it("drops a channel outside the list and a non-text note instead of showing them", async () => {
+    const result = await loadHomeLedger(
+      deps([
+        json(groupBody()),
+        json(balancesBody("10.00", 1)),
+        json({ entries: [{ ...wire(1), attribution: { ...record, channel: "paypal", note: 12 } }] }),
+        json(members)
+      ])
+    );
+    if (result.status !== "ready") throw new Error("not ready");
+    expect(result.summary.contributions[0].attribution).toMatchObject({ channel: null, note: null, memberUserId: PAYER });
+  });
+
+  it("shows a bank-verified row's provider as its channel and never a note, whatever the server sent with it", async () => {
+    const result = await loadHomeLedger(
+      deps([
+        json(groupBody()),
+        json(balancesBody("10.00", 1)),
+        json({ entries: [{ ...wire(1), provenance: proof, attribution: { ...record, channel: "cash", note: "I paid cash" } }] }),
+        json(members)
+      ])
+    );
+    if (result.status !== "ready") throw new Error("not ready");
+    expect(result.summary.contributions[0].attribution).toMatchObject({ source: "bank_verification", channel: "cbe", note: null });
   });
 
   it("makes bank provenance win over a treasurer's record that came with it", async () => {

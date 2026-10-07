@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { isMaskedReference } from "../banking/referenceMask";
 import { LedgerError } from "./errors";
 import { formatEtbAmount } from "./money";
+import { isContributionChannel, type ContributionChannel } from "./paymentChannel";
 import { isUuid } from "./rules";
 import {
   LEDGER_ACCOUNT_TYPES,
@@ -90,6 +91,17 @@ export interface PublicLedgerAttribution {
   readonly round: number | null;
   readonly revision: number;
   readonly reason: string | null;
+  /**
+   * How it was paid. The treasurer's word for `source: "treasurer"`; the
+   * verification's PROVIDER for `source: "bank_verification"` (a manual channel can
+   * never be recorded against a bank-verified entry). `null` = not said.
+   */
+  readonly channel: ContributionChannel | null;
+  /**
+   * The treasurer's plain-text note (1..280 characters), or `null`. Always `null`
+   * for a bank-verified entry. Data, never markup: render it as text.
+   */
+  readonly note: string | null;
 }
 
 /** What the browser sees. No tenant id, request fingerprint or idempotency key. */
@@ -470,6 +482,15 @@ function parseAttribution(value: unknown): PublicLedgerAttribution & { readonly 
   if (cycleId !== null && !isUuid(cycleId)) {
     throw integrity("Ledger read returned an invalid attribution cycle");
   }
+  // Additive keys: absent (a database one migration behind) and null both mean "not said".
+  const channel = value.channel ?? null;
+  if (channel !== null && !isContributionChannel(channel)) {
+    throw integrity("Ledger read returned an invalid attribution channel");
+  }
+  const note = value.note ?? null;
+  if (note !== null && (typeof note !== "string" || note.length === 0 || note.length > 560)) {
+    throw integrity("Ledger read returned an invalid attribution note");
+  }
   // Only the named fields are copied: whatever else a row carried is dropped.
   return {
     entryId: uuid(value, "entryId"),
@@ -480,7 +501,9 @@ function parseAttribution(value: unknown): PublicLedgerAttribution & { readonly 
     cycleId,
     round: typeof round === "number" ? round : null,
     revision,
-    reason: nullableStr(value, "reason")
+    reason: nullableStr(value, "reason"),
+    channel,
+    note
   };
 }
 

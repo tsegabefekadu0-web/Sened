@@ -10,6 +10,14 @@ import type { MemberAttire } from "@/lib/memberAvatarStyle";
 import { createTranslator, type Locale, type MessageKey } from "@/lib/i18n";
 import type { AttributeResult } from "@/lib/ledger/clientAttribution";
 import { formatEtbGrouped } from "@/lib/ledger/money";
+import {
+  CONTRIBUTION_CHANNELS,
+  CONTRIBUTION_NOTE_MAX,
+  checkContributionNote,
+  isBlankNote,
+  isContributionChannel,
+  type ContributionChannel
+} from "@/lib/ledger/paymentChannel";
 
 /**
  * A contribution's trust state.
@@ -47,7 +55,7 @@ export interface MemberContribution {
    */
   source?: "ledger";
   /** The rail the member named. A claim, not a confirmation. */
-  channel?: "telebirr" | "cbe" | "awash" | "cash";
+  channel?: ContributionChannel;
   /** A bank reference, when one was read out. A claim, not a confirmation. */
   transactionId?: string;
   status: ContributionStatus;
@@ -86,6 +94,13 @@ export interface MemberContribution {
     /** How many records the entry's history holds (1 = never corrected). */
     readonly revision: number;
     readonly recordedAtLabel: string;
+    /** How it was paid, in the treasurer's words (not a verification). Absent or `null` = not said. */
+    readonly channel?: ContributionChannel | null;
+    /**
+     * The treasurer's plain-text note. Rendered ONLY as text (React escapes it); it is
+     * never interpreted as markup, and a verified row never shows it.
+     */
+    readonly note?: string | null;
   };
 }
 
@@ -97,11 +112,18 @@ export interface MemberContribution {
 export interface PayerAttribution {
   /** Members who can be named as the payer: the group's active members. */
   readonly members: readonly { readonly userId: string; readonly label: string }[];
-  /** `reason` is sent only when correcting an existing record. Resolves to the call's outcome. */
+  /**
+   * `reason` is sent only when correcting an existing record. `channel` and `note` are
+   * sent only when there is something to say: on a first record, when given; on a
+   * correction, when CHANGED (`null` clears, a value sets, absent keeps). Resolves to
+   * the call's outcome.
+   */
   readonly onAttribute: (input: {
     readonly entryId: string;
     readonly memberUserId: string;
     readonly reason?: string;
+    readonly channel?: ContributionChannel | null;
+    readonly note?: string | null;
   }) => Promise<AttributeResult>;
 }
 
@@ -110,12 +132,30 @@ const ATTIRE_KEY: Readonly<Record<MemberAttire, string>> = {
   netela: "shell.feed.attireNetela"
 };
 
-const CHANNEL_KEY: Readonly<Record<NonNullable<MemberContribution["channel"]>, string>> = {
+const CHANNEL_KEY: Readonly<Record<ContributionChannel, string>> = {
   telebirr: "shell.feed.channelTelebirr",
   cbe: "shell.feed.channelCbe",
   awash: "shell.feed.channelAwash",
-  cash: "shell.feed.channelCash"
+  cash: "shell.feed.channelCash",
+  other: "shell.feed.channelOther"
 };
+
+/**
+ * The channel to show for a row. A verified row shows the provider that answered; any
+ * other ledger row shows the treasurer's recorded channel (which is their word, shown
+ * as plain text beside the "recorded by the treasurer" label, never as a badge).
+ */
+function shownChannel(contribution: MemberContribution): ContributionChannel | undefined {
+  if (isVerified(contribution)) {
+    return contribution.channel;
+  }
+  return contribution.treasurerPayer?.channel ?? contribution.channel;
+}
+
+/** The note to show, only for a row that is not bank-verified. */
+function shownNote(contribution: MemberContribution): string | null {
+  return !isVerified(contribution) && contribution.treasurerPayer?.note ? contribution.treasurerPayer.note : null;
+}
 
 /**
  * Fail closed in the view.
@@ -169,6 +209,8 @@ export function ContributionFeed({
   const [snapshot, setSnapshot] = useState<MemberContribution | null>(null);
   const [payerChoice, setPayerChoice] = useState("");
   const [payerReason, setPayerReason] = useState("");
+  const [payerChannel, setPayerChannel] = useState<ContributionChannel | "">("");
+  const [payerNote, setPayerNote] = useState("");
   const [payerBusy, setPayerBusy] = useState(false);
   const [payerMessage, setPayerMessage] = useState<{ readonly ok: boolean; readonly text: string } | null>(null);
 
@@ -180,6 +222,9 @@ export function ContributionFeed({
     setSnapshot(next);
     setPayerChoice("");
     setPayerReason("");
+    // A correction starts from what is recorded, so changing one thing keeps the rest.
+    setPayerChannel(next?.treasurerPayer?.channel ?? "");
+    setPayerNote(next?.treasurerPayer?.note ?? "");
     setPayerMessage(null);
   };
 
@@ -190,22 +235,47 @@ export function ContributionFeed({
 
   const submitPayer = async (entry: MemberContribution) => {
     if (!attribution || payerBusy) return;
-    if (payerChoice === "") {
+    const correcting = entry.treasurerPayer !== undefined;
+    const currentChannel = entry.treasurerPayer?.channel ?? "";
+    const currentNote = entry.treasurerPayer?.note ?? "";
+    const channelChanged = payerChannel !== currentChannel;
+    const noteChanged = payerNote.trim() !== currentNote;
+    // Correcting only how it was paid, or only the note: the payer stays as recorded.
+    const memberUserId = payerChoice !== "" ? payerChoice : correcting && (channelChanged || noteChanged) ? entry.treasurerPayer!.memberId : "";
+    if (memberUserId === "") {
       setPayerMessage({ ok: false, text: t("shell.feed.attribute.pickMember") });
       return;
     }
-    const correcting = entry.treasurerPayer !== undefined;
+    let cleanNote: string | null = null;
+    if (!isBlankNote(payerNote)) {
+      const checked = checkContributionNote(payerNote);
+      if (!checked.ok) {
+        setPayerMessage({ ok: false, text: t("shell.feed.attribute.noteError") });
+        return;
+      }
+      cleanNote = checked.note;
+    }
     const reason = payerReason.trim();
     if (correcting && reason.length < 10) {
       setPayerMessage({ ok: false, text: t("shell.feed.attribute.reasonLabel") });
       return;
     }
+    const channelValue: ContributionChannel | null = payerChannel === "" ? null : payerChannel;
     setPayerBusy(true);
     setPayerMessage(null);
     const result = await attribution.onAttribute({
       entryId: entry.id,
-      memberUserId: payerChoice,
-      ...(correcting ? { reason } : {})
+      memberUserId,
+      ...(correcting
+        ? {
+            reason,
+            ...(channelChanged ? { channel: channelValue } : {}),
+            ...(noteChanged ? { note: cleanNote } : {})
+          }
+        : {
+            ...(channelValue === null ? {} : { channel: channelValue }),
+            ...(cleanNote === null ? {} : { note: cleanNote })
+          })
     });
     setPayerBusy(false);
     if (result.status === "ok") {
@@ -217,8 +287,10 @@ export function ContributionFeed({
     }
   };
 
-  const channelLabel = (contribution: MemberContribution): string =>
-    contribution.channel ? t(CHANNEL_KEY[contribution.channel] as never) : t("shell.feed.channelNone");
+  const channelLabel = (contribution: MemberContribution): string => {
+    const channel = shownChannel(contribution);
+    return channel ? t(CHANNEL_KEY[channel] as never) : t("shell.feed.channelNone");
+  };
 
   return (
     <section className="w-full max-w-md md:max-w-none mx-auto px-4 md:px-0 pt-4 md:pt-2 pb-20 md:pb-8 select-none">
@@ -307,6 +379,14 @@ export function ContributionFeed({
                       data-testid="feed-paid-by-treasurer"
                     >
                       {t("shell.feed.paidBy")}: {c.treasurerPayer.memberLabel} · {t("shell.feed.recordedByTreasurer")}
+                    </p>
+                  ) : null}
+
+                  {!verified && c.treasurerPayer && (shownChannel(c) || shownNote(c)) ? (
+                    <p className="text-[12px] font-normal text-[#6B5433] mt-0.5 truncate font-sans" data-testid="feed-channel-note">
+                      {shownChannel(c) ? <span data-testid="feed-channel">{channelLabel(c)}</span> : null}
+                      {shownChannel(c) && shownNote(c) ? " · " : null}
+                      {shownNote(c) ? <span data-testid="feed-note">{shownNote(c)}</span> : null}
                     </p>
                   ) : null}
 
@@ -429,6 +509,14 @@ export function ContributionFeed({
                           {t("shell.feed.recordedByTreasurer")} · {selected.treasurerPayer.recordedAtLabel}
                         </span>
                       </div>
+                      {shownNote(selected) ? (
+                        <div className="flex justify-between gap-4">
+                          <span className="text-[#7A6B60]">{t("shell.feed.note")}:</span>
+                          <span className="font-semibold text-[#1F1714] text-right break-words" data-testid="feed-detail-note">
+                            {shownNote(selected)}
+                          </span>
+                        </div>
+                      ) : null}
                       <p className="leading-relaxed text-[#6B5433]">{t("shell.feed.treasurerPayerNote")}</p>
                       {selected.treasurerPayer.revision > 1 ? (
                         <p className="leading-relaxed text-[#6B5433]">
@@ -469,6 +557,35 @@ export function ContributionFeed({
                       </option>
                     ))}
                   </select>
+                </label>
+                <label className="mt-2 block">
+                  <span className="text-[#7A6B60]">{t("shell.feed.attribute.channelLabel")}</span>
+                  <select
+                    data-testid="feed-attribute-channel"
+                    value={payerChannel}
+                    onChange={(event) => setPayerChannel(isContributionChannel(event.target.value) ? event.target.value : "")}
+                    className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                  >
+                    <option value="">{t("shell.feed.channelNone")}</option>
+                    {CONTRIBUTION_CHANNELS.map((option) => (
+                      <option key={option} value={option}>
+                        {t(CHANNEL_KEY[option] as never)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="mt-2 block">
+                  <span className="text-[#7A6B60]">{t("shell.feed.attribute.noteLabel")}</span>
+                  <input
+                    type="text"
+                    data-testid="feed-attribute-note"
+                    value={payerNote}
+                    onChange={(event) => setPayerNote(event.target.value)}
+                    maxLength={CONTRIBUTION_NOTE_MAX * 2}
+                    autoComplete="off"
+                    className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                  />
+                  <span className="mt-1 block text-[11px] leading-snug text-[#6B5433]">{t("shell.feed.attribute.noteHelp")}</span>
                 </label>
                 {selected.treasurerPayer ? (
                   <label className="mt-2 block">

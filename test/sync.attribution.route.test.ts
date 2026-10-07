@@ -68,6 +68,8 @@ interface AttributionRow {
   memberUserId: string;
   cycleId: string | null;
   round: number | null;
+  channel: string | null;
+  note: string | null;
 }
 
 /**
@@ -89,12 +91,18 @@ function installFakeLedger(options: { attributionError?: { code?: string; messag
         entryId,
         memberUserId: args.p_member_user_id as string,
         cycleId: (args.p_cycle_id as string | null) ?? null,
-        round: (args.p_round as number | null) ?? null
+        round: (args.p_round as number | null) ?? null,
+        channel: (args.p_channel as string | null) ?? null,
+        note: (args.p_note as string | null) ?? null
       };
       const existing = attributions.get(entryId);
       if (existing) {
         const same =
-          existing.memberUserId === next.memberUserId && existing.cycleId === next.cycleId && existing.round === next.round;
+          existing.memberUserId === next.memberUserId &&
+          existing.cycleId === next.cycleId &&
+          existing.round === next.round &&
+          existing.channel === next.channel &&
+          existing.note === next.note;
         return same
           ? { data: envelopeOf(existing, true), error: null }
           : { data: null, error: { code: "P0001", message: "attribution_exists" } };
@@ -144,7 +152,9 @@ function envelopeOf(row: AttributionRow, replayed: boolean) {
       cycleId: row.cycleId,
       round: row.round,
       revision: 1,
-      reason: null
+      reason: null,
+      channel: row.channel,
+      note: row.note
     },
     replayed
   };
@@ -187,11 +197,66 @@ describe("POST /api/sync — push of a ledger draft that carries a payer", () =>
       p_entry_id: result.serverEntryId,
       p_member_user_id: payer,
       p_cycle_id: cycle,
-      p_round: 3
+      p_round: 3,
+      p_channel: null,
+      p_note: null
     });
     // The entry RPC saw exactly the entry fields: no `attribution` anywhere.
     const entryCall = mocks.rpc.mock.calls.find(([name]) => name === "post_ledger_entry_v1")!;
     expect(JSON.stringify(entryCall[1])).not.toContain(payer);
+  });
+
+  it("records the payment channel and the note with the payer, and neither reaches the entry's request", async () => {
+    const { attributions } = installFakeLedger();
+    const [result] = await push(
+      envelope("m1", {
+        ...draft("k-1"),
+        attribution: { memberUserId: payer, channel: "telebirr", note: "  Sent by his wife  " }
+      })
+    );
+    expect(result).toMatchObject({ outcome: "ACCEPTED", attribution: { outcome: "RECORDED" } });
+    expect(attributionCalls()[0][1]).toMatchObject({ p_channel: "telebirr", p_note: "Sent by his wife" });
+    expect([...attributions.values()][0]).toMatchObject({ channel: "telebirr", note: "Sent by his wife" });
+    const entryCall = mocks.rpc.mock.calls.find(([name]) => name === "post_ledger_entry_v1")!;
+    expect(JSON.stringify(entryCall[1])).not.toMatch(/telebirr|Sent by his wife|channel|note/);
+  });
+
+  it("a replay carrying the same channel and note is RECORDED once; a different channel or note is refused as exists", async () => {
+    const { entries, attributions } = installFakeLedger();
+    const same = envelope("m1", { ...draft("k-1"), attribution: { memberUserId: payer, channel: "cash", note: "Hand to hand" } });
+    const [first] = await push(same);
+    const [second] = await push(same);
+    expect(first).toMatchObject({ outcome: "ACCEPTED", attribution: { outcome: "RECORDED" } });
+    expect(second).toMatchObject({ outcome: "REPLAYED", attribution: { outcome: "RECORDED" } });
+
+    const [otherChannel] = await push(
+      envelope("m1", { ...draft("k-1"), attribution: { memberUserId: payer, channel: "cbe", note: "Hand to hand" } })
+    );
+    const [otherNote] = await push(
+      envelope("m1", { ...draft("k-1"), attribution: { memberUserId: payer, channel: "cash", note: "Another note" } })
+    );
+    expect(otherChannel).toMatchObject({ outcome: "REPLAYED", attribution: { outcome: "REFUSED", error: "attribution_exists" } });
+    expect(otherNote).toMatchObject({ outcome: "REPLAYED", attribution: { outcome: "REFUSED", error: "attribution_exists" } });
+    expect(entries.size).toBe(1);
+    expect(attributions.size).toBe(1);
+    expect([...attributions.values()][0]).toMatchObject({ channel: "cash", note: "Hand to hand" });
+  });
+
+  it("rejects a bad channel or note before anything is posted", async () => {
+    installFakeLedger();
+    const results = await push(
+      envelope("bad-channel", { ...draft("k-1"), attribution: { memberUserId: payer, channel: "paypal" } }, "k-1"),
+      envelope("blank-note", { ...draft("k-2"), attribution: { memberUserId: payer, note: "   " } }, "k-2"),
+      envelope("long-note", { ...draft("k-3"), attribution: { memberUserId: payer, note: "z".repeat(281) } }, "k-3"),
+      envelope("control", { ...draft("k-4"), attribution: { memberUserId: payer, note: "a\u0007b" } }, "k-4")
+    );
+    expect(results.map((result) => [result.outcome, result.error])).toEqual([
+      ["REJECTED", "invalid_request"],
+      ["REJECTED", "invalid_request"],
+      ["REJECTED", "invalid_request"],
+      ["REJECTED", "invalid_request"]
+    ]);
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
   it("keeps the entry ACCEPTED when the attribution is refused, and reports the database's reason", async () => {

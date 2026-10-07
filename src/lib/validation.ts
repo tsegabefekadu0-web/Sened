@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { WIRE_ETB_DECIMAL_PATTERN } from "@/lib/ledger/money";
 import { validateBalancedPostings } from "@/lib/ledger/rules";
+import { CONTRIBUTION_CHANNELS, checkContributionNote } from "@/lib/ledger/paymentChannel";
 
 const uuidSchema = z.string().uuid().transform((value) => value.toLowerCase());
 const amountSchema = z
@@ -156,10 +157,24 @@ export const ledgerMemberAttireRequestSchema = z
  * post (`POST /api/ledger/entries`, `attribution`): the entry id is not known yet.
  */
 const attributionRoundSchema = z.number().int().min(1).max(1000);
+/**
+ * How it was paid and a short plain-text note (see `paymentChannel.ts`). Both are
+ * optional and nullable: absent = not given, `null` = none. On a correction (PUT)
+ * absent KEEPS the earlier value and `null` clears it. The note is trimmed first and
+ * a blank one is a 400 (clients leave the field out instead).
+ */
+const attributionChannelSchema = z.enum(CONTRIBUTION_CHANNELS);
+const attributionNoteSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => checkContributionNote(value).ok, "A note is 1 to 280 characters of plain text, without control characters");
 const attributionShape = {
   memberUserId: uuidSchema,
   cycleId: uuidSchema.optional(),
-  round: attributionRoundSchema.optional()
+  round: attributionRoundSchema.optional(),
+  channel: attributionChannelSchema.nullable().optional(),
+  note: attributionNoteSchema.nullable().optional()
 };
 function roundNeedsCycle(value: { cycleId?: string; round?: number }, context: z.RefinementCtx): void {
   if (value.round !== undefined && value.cycleId === undefined) {

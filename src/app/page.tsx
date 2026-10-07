@@ -170,7 +170,9 @@ export default function SenedHome() {
                 memberLabel:
                   memberLabels?.[recorded.memberUserId] ?? t("members.anonymous", { id: recorded.memberUserId.slice(0, 8) }),
                 revision: recorded.revision,
-                recordedAtLabel: new Date(recorded.recordedAt).toLocaleString(locale === "am" ? "am-ET" : "en-US")
+                recordedAtLabel: new Date(recorded.recordedAt).toLocaleString(locale === "am" ? "am-ET" : "en-US"),
+                channel: recorded.channel ?? null,
+                note: recorded.note ?? null
               }
             };
           }
@@ -213,11 +215,24 @@ export default function SenedHome() {
         userId: member.userId,
         label: member.email ?? t("members.anonymous", { id: member.userId.slice(0, 8) })
       })),
-      onAttribute: async ({ entryId, memberUserId, reason }) => {
+      onAttribute: async ({ entryId, memberUserId, reason, channel, note }) => {
         const result =
           reason === undefined
-            ? await attributePayer({ groupId, entryId, memberUserId })
-            : await supersedePayer({ groupId, entryId, memberUserId, reason });
+            ? await attributePayer({
+                groupId,
+                entryId,
+                memberUserId,
+                ...(channel === undefined || channel === null ? {} : { channel }),
+                ...(note === undefined || note === null ? {} : { note })
+              })
+            : await supersedePayer({
+                groupId,
+                entryId,
+                memberUserId,
+                reason,
+                ...(channel === undefined ? {} : { channel }),
+                ...(note === undefined ? {} : { note })
+              });
         if (result.status === "ok") {
           reloadHome();
         }

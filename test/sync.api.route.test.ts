@@ -397,6 +397,34 @@ describe("POST /api/sync — pull", () => {
     expect(JSON.stringify(body)).not.toContain("d".repeat(64));
   });
 
+  it("carries the payment channel and note of an attributed contribution on a pulled entry, additively", async () => {
+    const payerId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const row = {
+      entryId: "55555552-5555-4555-8555-555555555555",
+      memberUserId: payerId,
+      source: "treasurer",
+      recordedBy: actorId,
+      recordedAt: "2026-10-12T09:00:00.000Z",
+      cycleId: null,
+      round: null,
+      revision: 1,
+      reason: null,
+      channel: "awash",
+      note: "<i>from the Awash branch</i>"
+    };
+    mocks.rpc.mockImplementation(async (name: string) => ({
+      data: name === "get_ledger_entry_attributions_v1" ? [row] : [],
+      error: null
+    }));
+    const body = await (await POST_SYNC(post(POST_SYNC, pullBody))).json();
+    expect(body.entries[1].attribution).toMatchObject({ channel: "awash", note: "<i>from the Awash branch</i>", source: "treasurer" });
+    // An older database sends neither key: both are null, and the rest is unchanged.
+    const { channel: _c, note: _n, ...old } = row;
+    mocks.rpc.mockImplementation(async (name: string) => ({ data: name === "get_ledger_entry_attributions_v1" ? [old] : [], error: null }));
+    const older = await (await POST_SYNC(post(POST_SYNC, pullBody))).json();
+    expect(older.entries[1].attribution).toMatchObject({ channel: null, note: null, memberUserId: payerId });
+  });
+
   it("pages: asks for limit+1, trims, and reports hasMore", async () => {
     setChain([1, 2, 3]);
     const body = await (await POST_SYNC(post(POST_SYNC, { ...pullBody, limit: 2 }))).json();

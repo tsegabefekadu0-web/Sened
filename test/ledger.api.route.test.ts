@@ -251,7 +251,9 @@ describe("POST /api/ledger/entries with an attribution (who paid a cash contribu
       p_entry_id: persistedEntry.id,
       p_member_user_id: memberId,
       p_cycle_id: null,
-      p_round: null
+      p_round: null,
+      p_channel: null,
+      p_note: null
     });
     // The public entry is unchanged by it.
     expect(body.entry.entryHash).toBe(persistedEntry.entryHash);
@@ -265,6 +267,48 @@ describe("POST /api/ledger/entries with an attribution (who paid a cash contribu
       "record_ledger_entry_attribution_v1",
       expect.objectContaining({ p_cycle_id: cycleId, p_round: 2 })
     );
+  });
+
+  it("carries the payment channel and the trimmed note to the attribution RPC, never to the entry", async () => {
+    answer({
+      data: { attribution: { ...attributionRow, channel: "cash", note: "Paid at the meeting" }, replayed: false },
+      error: null
+    });
+    const response = await POST(
+      post({ ...requestBody, attribution: { memberUserId: memberId, channel: "cash", note: "  Paid at the meeting  " } })
+    );
+    expect(response.status).toBe(201);
+    expect(mocks.rpc).toHaveBeenLastCalledWith(
+      "record_ledger_entry_attribution_v1",
+      expect.objectContaining({ p_channel: "cash", p_note: "Paid at the meeting" })
+    );
+    // The hash-chained entry never sees them.
+    const [, entryArgs] = mocks.rpc.mock.calls[0]!;
+    expect(JSON.stringify(entryArgs)).not.toMatch(/Paid at the meeting|"cash"|channel|note/);
+  });
+
+  it("REJECTS (400) a channel outside the list and a note that is blank, too long or has control characters, before any write", async () => {
+    for (const attribution of [
+      { memberUserId: memberId, channel: "paypal" },
+      { memberUserId: memberId, channel: "CASH" },
+      { memberUserId: memberId, note: "   " },
+      { memberUserId: memberId, note: "x".repeat(281) },
+      { memberUserId: memberId, note: "line one\nline two" },
+      { memberUserId: memberId, note: "bidi \u202e override" },
+      { memberUserId: memberId, note: 42 }
+    ]) {
+      mocks.rpc.mockClear();
+      expect((await POST(post({ ...requestBody, attribution }))).status, JSON.stringify(attribution)).toBe(400);
+      expect(mocks.rpc).not.toHaveBeenCalled();
+    }
+    // 280 characters (counted as characters, not bytes) and null are fine.
+    answer({ data: { attribution: attributionRow, replayed: false }, error: null });
+    for (const attribution of [
+      { memberUserId: memberId, note: "\u1220".repeat(280) },
+      { memberUserId: memberId, channel: null, note: null }
+    ]) {
+      expect((await POST(post({ ...requestBody, attribution }))).status).toBe(201);
+    }
   });
 
   it("REPORTS a refused attribution but keeps the posted entry: the ledger is never held back by it", async () => {

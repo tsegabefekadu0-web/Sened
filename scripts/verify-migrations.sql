@@ -4385,7 +4385,7 @@ begin
     raise exception 'ATTRIBUTION 2 FAILED: unexpected result %', res;
   end if;
   if (select array_agg(k order by k) from jsonb_object_keys(res -> 'attribution') k)
-     is distinct from array['cycleId','entryId','memberUserId','reason','recordedAt','recordedBy','revision','round','source'] then
+     is distinct from array['channel','cycleId','entryId','memberUserId','note','reason','recordedAt','recordedBy','revision','round','source'] then
     raise exception 'ATTRIBUTION 3 FAILED: unexpected keys %', res -> 'attribution';
   end if;
 
@@ -4620,16 +4620,16 @@ begin
   -- =========================================================================
   -- ATTRIBUTION: grants
   -- =========================================================================
-  if has_function_privilege('anon', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer)', 'EXECUTE')
-     or has_function_privilege('public', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer)', 'EXECUTE')
-     or has_function_privilege('anon', 'public.supersede_ledger_entry_attribution_v1(uuid, uuid, uuid, text, uuid, integer)', 'EXECUTE')
+  if has_function_privilege('anon', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer, text, text)', 'EXECUTE')
+     or has_function_privilege('public', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer, text, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.supersede_ledger_entry_attribution_v1(uuid, uuid, uuid, text, uuid, integer, text, text)', 'EXECUTE')
      or has_function_privilege('anon', 'public.get_ledger_entry_attributions_v1(uuid, uuid[])', 'EXECUTE')
-     or has_function_privilege('authenticated', 'public.sened_attribute_entry(text, uuid, uuid, uuid, uuid, integer, text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_attribute_entry(text, uuid, uuid, uuid, uuid, integer, text, text, text)', 'EXECUTE')
      or has_function_privilege('authenticated', 'public.sened_effective_attribution(uuid, uuid)', 'EXECUTE') then
     raise exception 'ATTRIBUTION 33 FAILED: a function is executable by a role that must not have it';
   end if;
-  if not has_function_privilege('authenticated', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer)', 'EXECUTE')
-     or not has_function_privilege('authenticated', 'public.supersede_ledger_entry_attribution_v1(uuid, uuid, uuid, text, uuid, integer)', 'EXECUTE')
+  if not has_function_privilege('authenticated', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer, text, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.supersede_ledger_entry_attribution_v1(uuid, uuid, uuid, text, uuid, integer, text, text)', 'EXECUTE')
      or not has_function_privilege('authenticated', 'public.get_ledger_entry_attributions_v1(uuid, uuid[])', 'EXECUTE') then
     raise exception 'ATTRIBUTION 34 FAILED: authenticated cannot execute an attribution RPC';
   end if;
@@ -5880,3 +5880,422 @@ $gate$;
 rollback;
 select 'ALL ATTRIBUTION AND COLLATERAL CHECKS PASSED' as result;
 select 'ALL CONTRIBUTION GRID AND GATE CHECKS PASSED' as result;
+
+-- ---------------------------------------------------------------------------
+-- Payment channel and note on an attribution (20261012100000_attribution_channel_and_note.sql)
+--
+-- A manual contribution's HOW (channel: telebirr | cbe | awash | cash | other) and a
+-- short plain-text note live on the same append-only attribution row as the payer, not
+-- on the hash-chained entry. Checks that (a) record stores a channel and a trimmed
+-- note and the read reports both, an old-style call (no channel, no note) still works
+-- and means none, (b) a channel outside the list and a note that is empty-after-trim
+-- over 280 characters or carries a control, DEL, C1 or bidi/zero-width character are
+-- refused with ledger_invalid_request and leave no row, a 280-character Amharic note is
+-- accepted, (c) a repeat that includes the same channel and note is a replay and any
+-- difference in channel or note is attribution_exists, (d) supersede KEEPS channel and
+-- note when the argument is null, CLEARS them with the empty string, stores the full
+-- resulting state in a new row, can correct the channel alone, refuses a no-op as
+-- attribution_unchanged and the original row keeps its channel and note, (e) outsiders,
+-- plain members and anonymous callers are refused and nothing is left behind, (f)
+-- PROVENANCE: a bank-verified entry refuses every manual write whatever channel it
+-- carries (matching the provider or not, with or without a note), reads as the bank
+-- provider with no note, and a bank link that appears after a manual row makes the read
+-- report the provider while the manual row (channel and note) stays in the history,
+-- (g) the table's own constraints hold against a direct insert and the row is still
+-- append-only, (h) the entry's hash and the chain head are untouched, and (i) one
+-- signature per RPC (no overload for PostgREST to choose between) with the right grants.
+-- Runs in a transaction that is rolled back.
+-- ---------------------------------------------------------------------------
+reset role;
+begin;
+select set_config('request.jwt.claim.sub', '', true);
+
+insert into auth.users (id, email) values
+  ('d1000000-0000-4000-8000-000000000001', 'chan-owner@example.test'),
+  ('d1000000-0000-4000-8000-000000000002', 'chan-treasurer@example.test'),
+  ('d1000000-0000-4000-8000-000000000003', 'chan-a@example.test'),
+  ('d1000000-0000-4000-8000-000000000004', 'chan-b@example.test'),
+  ('d1000000-0000-4000-8000-000000000005', 'chan-plain@example.test'),
+  ('d1000000-0000-4000-8000-000000000006', 'chan-outsider@example.test')
+on conflict (id) do nothing;
+
+create or replace function pg_temp.expect_error(p_uid text, p_sql text, p_msg text, p_state text)
+returns void
+language plpgsql
+as $$
+declare
+  got_msg text;
+  got_state text;
+begin
+  perform set_config('request.jwt.claim.sub', coalesce(p_uid, ''), true);
+  begin
+    set local role authenticated;
+    execute p_sql;
+    reset role;
+    raise exception 'no error' using errcode = 'XX999';
+  exception when others then
+    got_msg := sqlerrm;
+    got_state := sqlstate;
+  end;
+  reset role;
+  if got_state = 'XX999' then
+    raise exception 'EXPECT FAILED: no error from [%], wanted % %', p_sql, p_state, p_msg;
+  end if;
+  if got_msg <> p_msg or got_state <> p_state then
+    raise exception 'EXPECT FAILED: [%] wanted % %, got % %', p_sql, p_state, p_msg, got_state, got_msg;
+  end if;
+end;
+$$;
+
+create or replace function pg_temp.call_as(p_uid text, p_sql text)
+returns jsonb
+language plpgsql
+as $$
+declare
+  result jsonb;
+begin
+  perform set_config('request.jwt.claim.sub', coalesce(p_uid, ''), true);
+  set local role authenticated;
+  execute p_sql into result;
+  reset role;
+  return result;
+exception when others then
+  reset role;
+  raise;
+end;
+$$;
+
+do $chan$
+declare
+  owner_uid constant text := 'd1000000-0000-4000-8000-000000000001';
+  t_uid     constant text := 'd1000000-0000-4000-8000-000000000002';
+  a_uid     constant text := 'd1000000-0000-4000-8000-000000000003';
+  b_uid     constant text := 'd1000000-0000-4000-8000-000000000004';
+  c_uid     constant text := 'd1000000-0000-4000-8000-000000000005';
+  outsider  constant text := 'd1000000-0000-4000-8000-000000000006';
+  group_g uuid;
+  tenant_g uuid;
+  cash_g uuid;
+  income_g uuid;
+  binding_a uuid := 'dc000000-0000-4000-8000-0000000000f1';
+  e1 uuid; e2 uuid; e3 uuid; e4 uuid; e5 uuid; e_bank uuid; e_late uuid;
+  head_before record;
+  head_after record;
+  hash_before text;
+  hash_after text;
+  res jsonb;
+  res2 jsonb;
+  n bigint;
+  long_note text;
+  amharic_note text;
+begin
+  perform set_config('request.jwt.claim.sub', owner_uid, true);
+  group_g := (public.sened_ledger_provision_group_v1('Channel equb') ->> 'groupId')::uuid;
+  select tenant_id into tenant_g from public.ledger_groups where id = group_g;
+  select id into cash_g from public.ledger_accounts where group_id = group_g and code = 'POT_CASH';
+  select id into income_g from public.ledger_accounts where group_id = group_g and code = 'CONTRIBUTION_INCOME';
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status) values
+    (group_g, tenant_g, t_uid::uuid, 'treasurer', 'active'),
+    (group_g, tenant_g, a_uid::uuid, 'member', 'active'),
+    (group_g, tenant_g, b_uid::uuid, 'member', 'active'),
+    (group_g, tenant_g, c_uid::uuid, 'member', 'active');
+
+  e1 := (public.post_ledger_entry_v1(group_g, 'chan-e1', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e2 := (public.post_ledger_entry_v1(group_g, 'chan-e2', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e3 := (public.post_ledger_entry_v1(group_g, 'chan-e3', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e4 := (public.post_ledger_entry_v1(group_g, 'chan-e4', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e5 := (public.post_ledger_entry_v1(group_g, 'chan-e5', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e_bank := (public.post_ledger_entry_v1(group_g, 'bank-verified-chan-1', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+  e_late := (public.post_ledger_entry_v1(group_g, 'chan-late', now(), 'contribution', null, null,
+    jsonb_build_array(jsonb_build_object('accountId', cash_g, 'direction', 'debit', 'amount', '100.00'),
+                      jsonb_build_object('accountId', income_g, 'direction', 'credit', 'amount', '100.00'))) -> 'entry' ->> 'id')::uuid;
+
+  insert into public.bank_account_bindings (id,user_id,tenant_id,group_id,ledger_account_id,provider,account_label,account_fingerprint_hmac,sender_fingerprint_hmac,receiver_fingerprint_hmac)
+  values (binding_a, a_uid::uuid, tenant_g, group_g, cash_g, 'cbe', 'A', repeat('a',64), repeat('b',64), repeat('c',64));
+  insert into public.bank_verification_intents (id,user_id,tenant_id,group_id,bank_account_binding_id,ledger_account_id,provider,provider_reference_hmac,idempotency_key,request_fingerprint,amount,direction,occurred_at)
+  values
+    ('dd000000-0000-4000-8000-0000000000f1', a_uid::uuid, tenant_g, group_g, binding_a, cash_g, 'cbe', repeat('7',64), 'chan-bank-1', repeat('e',64), 100.00, 'inbound', now()),
+    ('dd000000-0000-4000-8000-0000000000f2', a_uid::uuid, tenant_g, group_g, binding_a, cash_g, 'cbe', repeat('6',64), 'chan-bank-2', repeat('e',64), 100.00, 'inbound', now());
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('3',64), verified_at = '2026-10-12 09:00:05.123+00',
+      ledger_entry_id = e_bank
+  where id = 'dd000000-0000-4000-8000-0000000000f1';
+  update public.bank_verification_intents
+  set state = 'VERIFIED', reason_code = 'VERIFIED', evidence_fingerprint = repeat('f',64),
+      provider_transaction_identity_hmac = repeat('4',64), verified_at = '2026-10-12 09:05:00+00'
+  where id = 'dd000000-0000-4000-8000-0000000000f2';
+
+  select last_sequence, last_hash into head_before from public.ledger_group_heads where group_id = group_g;
+  select entry_hash into hash_before from public.ledger_entries where id = e1;
+
+  -- =========================================================================
+  -- CHANNEL 1-3: record stores channel and a trimmed note; the read reports both
+  -- =========================================================================
+  res := pg_temp.call_as(t_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e1, a_uid, 'telebirr', '  Paid at the Sunday meeting  '));
+  if (res ->> 'replayed')::boolean is not false
+     or res -> 'attribution' ->> 'channel' <> 'telebirr'
+     or res -> 'attribution' ->> 'note' <> 'Paid at the Sunday meeting'
+     or res -> 'attribution' ->> 'source' <> 'treasurer' then
+    raise exception 'CHANNEL 1 FAILED: unexpected record result %', res;
+  end if;
+  res := pg_temp.call_as(c_uid, format('select public.get_ledger_entry_attributions_v1(%L, array[%L]::uuid[])', group_g, e1));
+  if res -> 0 ->> 'channel' <> 'telebirr' or res -> 0 ->> 'note' <> 'Paid at the Sunday meeting' then
+    raise exception 'CHANNEL 2 FAILED: a plain member does not read the channel and note: %', res;
+  end if;
+  -- an old-style call (no channel, no note) still works and means none
+  res := pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e2, a_uid));
+  if res -> 'attribution' -> 'channel' <> 'null'::jsonb or res -> 'attribution' -> 'note' <> 'null'::jsonb then
+    raise exception 'CHANNEL 3 FAILED: an old-style call stored a channel or note: %', res;
+  end if;
+  -- the empty string also means none (a form that sends "")
+  res := pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e3, a_uid, '', '   '));
+  if res -> 'attribution' -> 'channel' <> 'null'::jsonb or res -> 'attribution' -> 'note' <> 'null'::jsonb then
+    raise exception 'CHANNEL 4 FAILED: empty channel/note were stored: %', res;
+  end if;
+
+  -- =========================================================================
+  -- CHANNEL 5-8: shapes that are refused leave nothing behind
+  -- =========================================================================
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L)', group_g, e4, a_uid, 'paypal'), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L)', group_g, e4, a_uid, 'CASH'), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,null,%L)', group_g, e4, a_uid, repeat('x', 281)), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,null,%L)', group_g, e4, a_uid, E'line one\nline two'), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,null,%L)', group_g, e4, a_uid, E'tab\there'), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,null,%L)', group_g, e4, a_uid, 'del' || chr(127)), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,null,%L)', group_g, e4, a_uid, 'c1' || chr(133)), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,null,%L)', group_g, e4, a_uid, 'bidi' || chr(8238) || 'txt'), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,null,%L)', group_g, e4, a_uid, 'zw' || chr(8203) || 'sp'), 'ledger_invalid_request', '22023');
+  if (select count(*) from public.ledger_entry_attributions where entry_id = e4) <> 0 then
+    raise exception 'CHANNEL 5 FAILED: a refused channel or note left a row behind';
+  end if;
+  -- exactly 280 Ethiopic characters is accepted (the limit counts characters, not bytes)
+  amharic_note := repeat(chr(4768), 280);
+  res := pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e4, b_uid, 'other', amharic_note));
+  if char_length(res -> 'attribution' ->> 'note') <> 280 or res -> 'attribution' ->> 'channel' <> 'other' then
+    raise exception 'CHANNEL 6 FAILED: a 280-character Ethiopic note was not stored whole: %', res;
+  end if;
+  -- markup is data: stored and returned byte for byte, never interpreted
+  res := pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e5, b_uid, 'cash', '<b>paid</b> & "ok"'));
+  if res -> 'attribution' ->> 'note' <> '<b>paid</b> & "ok"' then
+    raise exception 'CHANNEL 7 FAILED: markup in a note was altered: %', res;
+  end if;
+
+  -- the remaining channels (awash, cbe) are accepted by a correction
+  res := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L)', group_g, e5, b_uid, 'It went through Awash instead', 'awash'));
+  res2 := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L)', group_g, e5, b_uid, 'Actually it was CBE Birr', 'cbe'));
+  if res -> 'attribution' ->> 'channel' <> 'awash' or res2 -> 'attribution' ->> 'channel' <> 'cbe'
+     or res2 -> 'attribution' ->> 'note' <> '<b>paid</b> & "ok"' then
+    raise exception 'CHANNEL 7B FAILED: awash/cbe corrections: % %', res, res2;
+  end if;
+
+  -- =========================================================================
+  -- CHANNEL 8-10: replay, exists
+  -- =========================================================================
+  res2 := pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e1, a_uid, 'telebirr', 'Paid at the Sunday meeting'));
+  if (res2 ->> 'replayed')::boolean is not true then
+    raise exception 'CHANNEL 8 FAILED: the same record with the same channel and note was not a replay: %', res2;
+  end if;
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e1, a_uid, 'cash', 'Paid at the Sunday meeting'), 'attribution_exists', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e1, a_uid, 'telebirr', 'A different note'), 'attribution_exists', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L)', group_g, e1, a_uid), 'attribution_exists', 'P0001');
+  if (select count(*) from public.ledger_entry_attributions where entry_id = e1) <> 1 then
+    raise exception 'CHANNEL 9 FAILED: more than one row for an entry after a replay and refusals';
+  end if;
+
+  -- =========================================================================
+  -- CHANNEL 10-16: supersede keeps, clears, corrects one field, refuses a no-op
+  -- =========================================================================
+  -- null keeps channel and note, so correcting the payer does not wipe them
+  res := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e1, b_uid, 'Receipt book shows B paid, not A'));
+  if (res ->> 'replayed')::boolean is not false
+     or (res -> 'attribution' ->> 'revision')::int <> 2
+     or res -> 'attribution' ->> 'memberUserId' <> b_uid
+     or res -> 'attribution' ->> 'channel' <> 'telebirr'
+     or res -> 'attribution' ->> 'note' <> 'Paid at the Sunday meeting'
+     or res -> 'attribution' ->> 'reason' <> 'Receipt book shows B paid, not A' then
+    raise exception 'CHANNEL 10 FAILED: a payer-only correction did not keep channel and note: %', res;
+  end if;
+  -- the same correction again is a replay
+  res2 := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e1, b_uid, 'Receipt book shows B paid, not A'));
+  if (res2 ->> 'replayed')::boolean is not true then
+    raise exception 'CHANNEL 11 FAILED: the same supersede again was not a replay: %', res2;
+  end if;
+  -- a no-op (same payer, channel and note, kept) is unchanged
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L)', group_g, e1, b_uid, 'Nothing about this changes at all'), 'attribution_unchanged', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L,%L)', group_g, e1, b_uid, 'Saying the same thing again', 'telebirr', 'Paid at the Sunday meeting'), 'attribution_unchanged', 'P0001');
+  -- the channel alone can be corrected
+  res := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L)', group_g, e1, b_uid, 'It was cash, not Telebirr', 'cash'));
+  if (res -> 'attribution' ->> 'revision')::int <> 3
+     or res -> 'attribution' ->> 'channel' <> 'cash'
+     or res -> 'attribution' ->> 'note' <> 'Paid at the Sunday meeting'
+     or res -> 'attribution' ->> 'memberUserId' <> b_uid then
+    raise exception 'CHANNEL 12 FAILED: a channel-only correction did not store the full state: %', res;
+  end if;
+  -- the empty string clears; the note alone can be set and cleared
+  res := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L,%L)', group_g, e1, b_uid, 'Removing the channel and the note', '', ''));
+  if res -> 'attribution' -> 'channel' <> 'null'::jsonb or res -> 'attribution' -> 'note' <> 'null'::jsonb
+     or (res -> 'attribution' ->> 'revision')::int <> 4 then
+    raise exception 'CHANNEL 13 FAILED: the empty string did not clear channel and note: %', res;
+  end if;
+  res := pg_temp.call_as(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,null,%L)', group_g, e1, b_uid, 'Adding a note afterwards', 'Brought by his brother'));
+  if res -> 'attribution' ->> 'note' <> 'Brought by his brother' or res -> 'attribution' -> 'channel' <> 'null'::jsonb then
+    raise exception 'CHANNEL 14 FAILED: a note-only correction failed: %', res;
+  end if;
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L)', group_g, e1, b_uid, 'Trying an invalid channel', 'paypal'), 'ledger_invalid_request', '22023');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,null,%L)', group_g, e1, b_uid, 'Trying a control character', E'a\nb'), 'ledger_invalid_request', '22023');
+  -- history: one root, the original channel and note preserved in it, five rows in a line
+  if (select count(*) from public.ledger_entry_attributions where entry_id = e1) <> 5
+     or (select channel from public.ledger_entry_attributions where entry_id = e1 and supersedes_id is null) <> 'telebirr'
+     or (select note from public.ledger_entry_attributions where entry_id = e1 and supersedes_id is null) <> 'Paid at the Sunday meeting'
+     or (select member_user_id from public.ledger_entry_attributions where entry_id = e1 and supersedes_id is null) <> a_uid::uuid then
+    raise exception 'CHANNEL 15 FAILED: the original attribution (with its channel and note) was not preserved';
+  end if;
+  -- a correction of an entry that has none is still attribution_not_found
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L)', group_g, e_late, a_uid, 'There is nothing to supersede', 'cash'), 'attribution_not_found', 'P0002');
+
+  -- =========================================================================
+  -- CHANNEL 16: who may write
+  -- =========================================================================
+  perform pg_temp.expect_error(c_uid,    format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e_late, a_uid, 'cash', 'x'), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error(outsider, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e_late, a_uid, 'cash', 'x'), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error('',       format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e_late, a_uid, 'cash', 'x'), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error(c_uid,    format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L)', group_g, e1, a_uid, 'A plain member cannot correct', 'cash'), 'ledger_forbidden', '42501');
+  perform pg_temp.expect_error(outsider, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L)', group_g, e1, a_uid, 'An outsider cannot correct', 'cash'), 'ledger_forbidden', '42501');
+  if (select count(*) from public.ledger_entry_attributions where entry_id = e_late) <> 0 then
+    raise exception 'CHANNEL 16 FAILED: a refused caller left a row behind';
+  end if;
+  perform pg_temp.expect_error(outsider, format('select public.get_ledger_entry_attributions_v1(%L, array[%L]::uuid[])', group_g, e1), 'ledger_forbidden', '42501');
+
+  -- =========================================================================
+  -- CHANNEL 17-21: provenance. A bank-verified entry refuses EVERY manual write, so a
+  -- manual channel can never contradict the provider; it reads as the provider.
+  -- =========================================================================
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L)', group_g, e_bank, a_uid, 'cbe'), 'attribution_bank_verified', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L)', group_g, e_bank, a_uid, 'cash'), 'attribution_bank_verified', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,null,%L)', group_g, e_bank, a_uid, 'a note'), 'attribution_bank_verified', 'P0001');
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L)', group_g, e_bank, a_uid, 'Trying to override the bank', 'cash'), 'attribution_bank_verified', 'P0001');
+  if (select count(*) from public.ledger_entry_attributions where entry_id = e_bank) <> 0 then
+    raise exception 'CHANNEL 17 FAILED: a manual write landed on a bank-verified entry';
+  end if;
+  res := pg_temp.call_as(c_uid, format('select public.get_ledger_entry_attributions_v1(%L, array[%L]::uuid[])', group_g, e_bank));
+  if res -> 0 ->> 'source' <> 'bank_verification' or res -> 0 ->> 'channel' <> 'cbe' or res -> 0 -> 'note' <> 'null'::jsonb then
+    raise exception 'CHANNEL 18 FAILED: a bank-verified entry does not read as its provider: %', res;
+  end if;
+  -- a manual row first (cash + note), the bank link appears afterwards
+  perform pg_temp.call_as(owner_uid, format('select public.record_ledger_entry_attribution_v1(%L,%L,%L,null,null,%L,%L)', group_g, e_late, b_uid, 'cash', 'Handed over in person'));
+  res := pg_temp.call_as(c_uid, format('select public.get_ledger_entry_attributions_v1(%L, array[%L]::uuid[])', group_g, e_late));
+  if res -> 0 ->> 'source' <> 'treasurer' or res -> 0 ->> 'channel' <> 'cash' or res -> 0 ->> 'note' <> 'Handed over in person' then
+    raise exception 'CHANNEL 19 FAILED: the manual channel and note are not read before the bank link: %', res;
+  end if;
+  update public.bank_verification_intents set ledger_entry_id = e_late where id = 'dd000000-0000-4000-8000-0000000000f2';
+  res := pg_temp.call_as(c_uid, format('select public.get_ledger_entry_attributions_v1(%L, array[%L]::uuid[])', group_g, e_late));
+  if res -> 0 ->> 'source' <> 'bank_verification' or res -> 0 ->> 'channel' <> 'cbe' or res -> 0 -> 'note' <> 'null'::jsonb then
+    raise exception 'CHANNEL 20 FAILED: a manual channel/note outranked a later bank link: %', res;
+  end if;
+  if (select channel from public.ledger_entry_attributions where entry_id = e_late) <> 'cash'
+     or (select note from public.ledger_entry_attributions where entry_id = e_late) <> 'Handed over in person' then
+    raise exception 'CHANNEL 21 FAILED: the manual row was not kept in the history';
+  end if;
+  perform pg_temp.expect_error(owner_uid, format('select public.supersede_ledger_entry_attribution_v1(%L,%L,%L,%L,null,null,%L)', group_g, e_late, b_uid, 'Bank link appeared afterwards', 'awash'), 'attribution_bank_verified', 'P0001');
+
+  -- =========================================================================
+  -- CHANNEL 22-27: the table holds its own rules for ANY writer, and is append-only
+  -- =========================================================================
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by, channel)
+    values (e2, group_g, tenant_g, a_uid::uuid, owner_uid::uuid, 'paypal');
+    raise exception 'CHANNEL 22 FAILED: a channel outside the list was inserted directly';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by, note)
+    values (e2, group_g, tenant_g, a_uid::uuid, owner_uid::uuid, ' padded');
+    raise exception 'CHANNEL 23 FAILED: an untrimmed note was inserted directly';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by, note)
+    values (e2, group_g, tenant_g, a_uid::uuid, owner_uid::uuid, '');
+    raise exception 'CHANNEL 24 FAILED: an empty note was inserted directly';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by, note)
+    values (e2, group_g, tenant_g, a_uid::uuid, owner_uid::uuid, repeat('y', 281));
+    raise exception 'CHANNEL 25 FAILED: a 281-character note was inserted directly';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by, note)
+    values (e2, group_g, tenant_g, a_uid::uuid, owner_uid::uuid, E'two\nlines');
+    raise exception 'CHANNEL 26 FAILED: a note with a control character was inserted directly';
+  exception when check_violation then null;
+  end;
+  begin
+    update public.ledger_entry_attributions set channel = 'other' where entry_id = e1;
+    raise exception 'CHANNEL 27 FAILED: a channel was updated in place';
+  exception when others then
+    if sqlerrm <> 'attribution_history_immutable' then raise exception 'CHANNEL 27 FAILED: %', sqlerrm; end if;
+  end;
+  begin
+    update public.ledger_entry_attributions set note = null where entry_id = e1;
+    raise exception 'CHANNEL 28 FAILED: a note was updated in place';
+  exception when others then
+    if sqlerrm <> 'attribution_history_immutable' then raise exception 'CHANNEL 28 FAILED: %', sqlerrm; end if;
+  end;
+  -- the trigger rules still apply to a direct insert carrying a channel
+  begin
+    insert into public.ledger_entry_attributions (entry_id, group_id, tenant_id, member_user_id, recorded_by, channel)
+    values (e_bank, group_g, tenant_g, a_uid::uuid, owner_uid::uuid, 'cbe');
+    raise exception 'CHANNEL 29 FAILED: a direct insert on a bank-verified entry was accepted';
+  exception when others then
+    if sqlerrm <> 'attribution_bank_verified' then raise exception 'CHANNEL 29 FAILED: %', sqlerrm; end if;
+  end;
+
+  -- =========================================================================
+  -- CHANNEL 30-32: the chain is untouched; one signature per RPC; grants
+  -- =========================================================================
+  select last_sequence, last_hash into head_after from public.ledger_group_heads where group_id = group_g;
+  select entry_hash into hash_after from public.ledger_entries where id = e1;
+  if head_after.last_sequence <> head_before.last_sequence or head_after.last_hash <> head_before.last_hash or hash_after <> hash_before then
+    raise exception 'CHANNEL 30 FAILED: the ledger chain moved while channel and note were recorded';
+  end if;
+  select count(*) into n from pg_proc p join pg_namespace s on s.oid = p.pronamespace
+  where s.nspname = 'public' and p.proname in ('record_ledger_entry_attribution_v1', 'supersede_ledger_entry_attribution_v1', 'sened_attribute_entry');
+  if n <> 3 then
+    raise exception 'CHANNEL 31 FAILED: expected one signature each for the two RPCs and the helper, found % functions', n;
+  end if;
+  if to_regprocedure('public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer)') is not null
+     or to_regprocedure('public.supersede_ledger_entry_attribution_v1(uuid, uuid, uuid, text, uuid, integer)') is not null
+     or to_regprocedure('public.sened_attribute_entry(text, uuid, uuid, uuid, uuid, integer, text)') is not null then
+    raise exception 'CHANNEL 32 FAILED: an old arity is still callable (PostgREST could not choose between overloads)';
+  end if;
+  if has_function_privilege('anon', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer, text, text)', 'EXECUTE')
+     or has_function_privilege('public', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer, text, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.supersede_ledger_entry_attribution_v1(uuid, uuid, uuid, text, uuid, integer, text, text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_attribute_entry(text, uuid, uuid, uuid, uuid, integer, text, text, text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_attribution_channel_note(uuid, uuid, text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_attribution_json(uuid, uuid)', 'EXECUTE') then
+    raise exception 'CHANNEL 33 FAILED: a function is executable by a role that must not have it';
+  end if;
+  if not has_function_privilege('authenticated', 'public.record_ledger_entry_attribution_v1(uuid, uuid, uuid, uuid, integer, text, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.supersede_ledger_entry_attribution_v1(uuid, uuid, uuid, text, uuid, integer, text, text)', 'EXECUTE') then
+    raise exception 'CHANNEL 34 FAILED: authenticated cannot execute the attribution RPCs';
+  end if;
+end;
+$chan$;
+rollback;
+select 'ALL PAYMENT CHANNEL AND NOTE CHECKS PASSED' as result;

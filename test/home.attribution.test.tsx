@@ -171,6 +171,74 @@ describe("home feed: who paid a cash contribution", () => {
     expect(hoisted.attribute).not.toHaveBeenCalled();
   });
 
+  it("shows the treasurer's channel and note on the home feed row, as text", async () => {
+    hoisted.load.mockResolvedValue(
+      ready("member", [
+        {
+          id: "e2",
+          sequence: "8",
+          amount: "250.00",
+          attribution: { ...treasurerRecord, channel: "telebirr", note: "<i>from his wife's phone</i>" }
+        }
+      ])
+    );
+    render(<SenedHome />);
+    await screen.findByText("350.00");
+    expect(screen.getByTestId("feed-channel")).toHaveTextContent(am("shell.feed.channelTelebirr"));
+    expect(screen.getByTestId("feed-note")).toHaveTextContent("<i>from his wife's phone</i>");
+    expect(screen.getByTestId("feed-note").querySelector("i")).toBeNull();
+    // Still the treasurer's own record, never a bank verification.
+    expect(screen.queryByText(am("shell.feed.verifiedWord"))).toBeNull();
+  });
+
+  it("records a first payer with a channel and note through the attribute call", async () => {
+    const user = userEvent.setup();
+    hoisted.load.mockResolvedValue(ready("treasurer", [{ id: "e1", sequence: "7", amount: "100.00" }]));
+    render(<SenedHome />);
+    await screen.findByText("350.00");
+    await user.click(screen.getByText(am("shell.feed.ledgerContribution", { sequence: 7 })));
+    await user.selectOptions(screen.getByTestId("feed-attribute-member"), PAYER);
+    await user.selectOptions(screen.getByTestId("feed-attribute-channel"), "cash");
+    await user.type(screen.getByTestId("feed-attribute-note"), "Hand to hand");
+    await user.click(screen.getByTestId("feed-attribute-submit"));
+    expect(hoisted.attribute).toHaveBeenCalledWith({ groupId: GROUP, entryId: "e1", memberUserId: PAYER, channel: "cash", note: "Hand to hand" });
+  });
+
+  it("corrects only the channel through the superseding call: absent keeps the note, null clears", async () => {
+    const user = userEvent.setup();
+    hoisted.load.mockResolvedValue(
+      ready("owner", [{ id: "e2", sequence: "8", amount: "250.00", attribution: { ...treasurerRecord, channel: "cash", note: "Hand to hand" } }])
+    );
+    render(<SenedHome />);
+    await screen.findByText("350.00");
+    await user.click(screen.getByText(am("shell.feed.ledgerContribution", { sequence: 8 })));
+    await user.selectOptions(screen.getByTestId("feed-attribute-channel"), "cbe");
+    await user.type(screen.getByTestId("feed-attribute-reason"), "It was a CBE Birr transfer");
+    await user.click(screen.getByTestId("feed-attribute-submit"));
+    expect(hoisted.supersede).toHaveBeenCalledWith({
+      groupId: GROUP,
+      entryId: "e2",
+      memberUserId: PAYER,
+      reason: "It was a CBE Birr transfer",
+      channel: "cbe"
+    });
+
+    hoisted.supersede.mockClear();
+    await user.selectOptions(screen.getByTestId("feed-attribute-channel"), "");
+    await user.clear(screen.getByTestId("feed-attribute-note"));
+    await user.clear(screen.getByTestId("feed-attribute-reason"));
+    await user.type(screen.getByTestId("feed-attribute-reason"), "Removing what was recorded");
+    await user.click(screen.getByTestId("feed-attribute-submit"));
+    expect(hoisted.supersede).toHaveBeenCalledWith({
+      groupId: GROUP,
+      entryId: "e2",
+      memberUserId: PAYER,
+      reason: "Removing what was recorded",
+      channel: null,
+      note: null
+    });
+  });
+
   it("does not re-read the ledger when the record was refused, and says why", async () => {
     const user = userEvent.setup();
     hoisted.attribute.mockResolvedValue({ status: "refused", code: "bank_verified" });

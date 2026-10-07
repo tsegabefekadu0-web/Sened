@@ -1,5 +1,6 @@
 import { authedFetch, NotSignedInError, type AuthedFetchDeps } from "@/lib/auth/authedFetch";
 import { attributeCodeFromServer, type AttributeFailureCode as SharedFailureCode } from "./attributionCodes";
+import type { ContributionChannel } from "./paymentChannel";
 
 /**
  * Browser side of "who paid this contribution" (M4.2): the owner's or
@@ -18,6 +19,13 @@ export interface AttributeInput {
   readonly memberUserId: string;
   readonly cycleId?: string;
   readonly round?: number;
+  /**
+   * How it was paid / a plain-text note (already trimmed and checked by the caller;
+   * the server and the database check them again). Record: absent or `null` = none.
+   * Correction: absent KEEPS the earlier value, `null` CLEARS it.
+   */
+  readonly channel?: ContributionChannel | null;
+  readonly note?: string | null;
 }
 
 export type AttributeFailureCode = Exclude<SharedFailureCode, "forbidden">;
@@ -74,7 +82,9 @@ function bodyOf(input: AttributeInput): Record<string, unknown> {
     entryId: input.entryId,
     memberUserId: input.memberUserId,
     ...(input.cycleId === undefined ? {} : { cycleId: input.cycleId }),
-    ...(input.round === undefined ? {} : { round: input.round })
+    ...(input.round === undefined ? {} : { round: input.round }),
+    ...(input.channel === undefined ? {} : { channel: input.channel }),
+    ...(input.note === undefined ? {} : { note: input.note })
   };
 }
 

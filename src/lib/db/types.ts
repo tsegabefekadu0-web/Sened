@@ -1,3 +1,4 @@
+import type { ContributionChannel } from "@/lib/ledger/paymentChannel";
 import type { LedgerEntryRequest } from "@/lib/ledger/types";
 import type {
   LedgerEntryLike,
@@ -98,6 +99,13 @@ export interface DraftAttribution {
   readonly memberUserId: string;
   readonly cycleId?: string;
   readonly round?: number;
+  /**
+   * How it was paid (schema version 3). Absent on a draft saved before it: such a
+   * draft is still valid and is sent exactly as it always was.
+   */
+  readonly channel?: ContributionChannel | null;
+  /** A short plain-text note (trimmed, 1..280 characters), absent when there is none. */
+  readonly note?: string | null;
 }
 
 /**
@@ -157,6 +165,19 @@ export interface OutboxRow {
   readonly attributionOutcome?: SyncAttributionOutcome | null;
   /** The server's code for a `REFUSED` attribution. */
   readonly attributionError?: string | null;
+  /**
+   * How many times recording the payer has been tried since the entry synced: the
+   * attempt that came back with the sync result counts, so does each automatic
+   * retry. Drives the bounded automatic retry (`attributionRetry.ts`) and survives a
+   * reload. Absent on rows saved before schema version 3 (read as 0).
+   */
+  readonly attributionAttempts?: number;
+  /**
+   * Epoch ms before which the payer is not retried automatically (backoff, or the
+   * short lease while an attempt is in flight). `null` = due now. Absent before
+   * schema version 3.
+   */
+  readonly attributionNextAttemptAt?: number | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly settledAt: string | null;

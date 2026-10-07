@@ -601,10 +601,34 @@ describe("GET /api/ledger/entries attribution", () => {
       cycleId: null,
       round: null,
       revision: 1,
-      reason: null
+      reason: null,
+      channel: null,
+      note: null
     });
     expect(JSON.stringify(body)).not.toContain("leaked");
     expect(JSON.stringify(body)).not.toContain(tenantId);
+  });
+
+  it("exposes the payment channel and the note on the attribution, additively and as plain data", async () => {
+    mocks.attributions = {
+      data: [attributionRow({ channel: "cash", note: "<b>Paid</b> at the meeting" })],
+      error: null
+    };
+    const body = await (await GET(request(`?groupId=${groupId}`))).json();
+    expect(body.entries[0].attribution).toMatchObject({ channel: "cash", note: "<b>Paid</b> at the meeting" });
+
+    // A database one migration behind sends neither key: both read as null.
+    const { channel: _channel, note: _note, ...old } = { ...attributionRow(), channel: null, note: null };
+    mocks.attributions = { data: [old], error: null };
+    const older = await (await GET(request(`?groupId=${groupId}`))).json();
+    expect(older.entries[0].attribution).toMatchObject({ channel: null, note: null });
+  });
+
+  it("treats a channel outside the list or a non-text note as an integrity failure, never as data", async () => {
+    for (const bad of [{ channel: "paypal" }, { note: 7 }, { note: "" }]) {
+      mocks.attributions = { data: [attributionRow(bad)], error: null };
+      expect((await GET(request(`?groupId=${groupId}`))).status, JSON.stringify(bad)).toBe(502);
+    }
   });
 
   it("carries a corrected attribution's revision, reason, cycle and round", async () => {

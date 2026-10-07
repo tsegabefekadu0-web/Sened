@@ -8,7 +8,8 @@ import {
 
 export const runtime = "nodejs";
 
-const MAX_BODY_BYTES = 2_048;
+// Room for a 1000-character reason and a 280-character note in any script (up to 4 bytes a character), plus the ids.
+const MAX_BODY_BYTES = 8_192;
 
 function jsonError(error: string, status: number, message?: string): Response {
   return Response.json(
@@ -59,7 +60,9 @@ function respond(result: AttributionResult, createdStatus: number): Response {
 /**
  * `POST /api/ledger/attributions` — an owner or treasurer records WHO PAID a
  * contribution that has no bank verification.
- * Body: `{ groupId, entryId, memberUserId, cycleId?, round? }`. Strict: who is
+ * Body: `{ groupId, entryId, memberUserId, cycleId?, round?, channel?, note? }`
+ * (`channel`: telebirr | cbe | awash | cash | other; `note`: 1..280 characters of plain
+ * text, trimmed, no control characters; both optional, `null` = none). Strict: who is
  * recording is the session (a `recordedBy` is a 400), and `source` is never an
  * input. 201 on the first record, 200 when the same record is repeated.
  *

@@ -45,8 +45,8 @@ function publicEntry(entry: LedgerEntry): Omit<LedgerEntry, "tenantId" | "reques
 }
 
 /**
- * What became of the optional `attribution` that rode along on a contribution
- * post. The entry and its attribution are two writes: the ledger is the source of
+ * What became of the optional `attribution` (payer, optional cycle/round, optional
+ * `channel` and `note`) that rode along on a contribution post. The entry and its attribution are two writes: the ledger is the source of
  * truth and is never held back by, or rolled back for, the second one, so a refused
  * attribution is REPORTED (`status: "refused"` with the database's own code) and
  * the treasurer attributes the row afterwards (`POST /api/ledger/attributions`).
@@ -148,7 +148,9 @@ export async function POST(request: Request): Promise<Response> {
             entryId: result.entry.id,
             memberUserId: attribution.memberUserId,
             cycleId: attribution.cycleId,
-            round: attribution.round
+            round: attribution.round,
+            channel: attribution.channel,
+            note: attribution.note
           })
         );
       } catch {
@@ -198,9 +200,13 @@ export async function POST(request: Request): Promise<Response> {
  * provider, verifiedAt, verificationId, memberUserId, referenceMasked }`, where `referenceMasked`
  * is `••••` plus the last 1-4 characters of the bank reference or `null`, never the full reference).
  * `attribution` is `null` or who paid a contribution: `{ source: "bank_verification" | "treasurer",
- * memberUserId, recordedBy, recordedAt, cycleId, round, revision, reason }`. `bank_verification` is the
+ * memberUserId, recordedBy, recordedAt, cycleId, round, revision, reason, channel, note }`. `bank_verification` is the
  * same fact as `provenance`; `treasurer` is an owner's or treasurer's record for an entry with no bank
- * provenance, never a verification. Bank provenance wins when both exist. Read-only.
+ * provenance, never a verification. Bank provenance wins when both exist. `channel` is how it was paid
+ * (`telebirr | cbe | awash | cash | other`, or `null`): the treasurer's word for a `treasurer` record, the
+ * verification's provider for a `bank_verification` one. `note` is the treasurer's plain-text note (1..280
+ * characters) or `null`; it is data, never markup, and is always `null` for a bank-verified entry. Both keys
+ * are additive. Read-only.
  *
  * Paging: the body is `{ entries, hasMore, nextCursor }`. `beforeSequence` is an
  * exclusive upper bound on sequence; when `hasMore` is true, `nextCursor` is the

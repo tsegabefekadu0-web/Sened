@@ -189,7 +189,9 @@ async function pushOne(
             entryId: result.entry.id,
             memberUserId: attribution.memberUserId,
             cycleId: attribution.cycleId,
-            round: attribution.round
+            round: attribution.round,
+            channel: attribution.channel,
+            note: attribution.note
           })
         );
       } catch {

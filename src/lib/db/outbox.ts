@@ -7,6 +7,7 @@ import {
   type SyncAttributionOutcome,
   type SyncPushResult
 } from "@/lib/offline/contract";
+import { ATTRIBUTION_ATTEMPT_LEASE_MS, ATTRIBUTION_MAX_AUTO_ATTEMPTS, isAttributionRetryDue } from "@/lib/offline/attributionPolicy";
 import { mapStorageError } from "./database";
 import { createIdempotencyKey, newLocalId } from "./ids";
 import type { SenedDatabase } from "./schema";
@@ -74,6 +75,8 @@ export async function enqueue(
     serverSequence: null,
     attributionOutcome: null,
     attributionError: null,
+    attributionAttempts: 0,
+    attributionNextAttemptAt: null,
     createdAt: timestamp,
     updatedAt: timestamp,
     settledAt: null
@@ -212,6 +215,19 @@ export interface SettleInput {
   readonly expectedLeaseOwner?: string;
 }
 
+/** Where the automatic retry of a payer stands (see `attributionPolicy.ts`). */
+export interface AttributionRetrySchedule {
+  /** Tries so far, the one that came back with the sync result included. */
+  readonly attempts: number;
+  /** Epoch ms of the next automatic try, or `null` for as soon as possible. */
+  readonly nextAttemptAt: number | null;
+}
+
+export interface SettleSyncedInput extends SettleInput {
+  /** Set by the engine for a draft whose payer did not record; defaults to "0 tries, due now". */
+  readonly attributionRetry?: AttributionRetrySchedule;
+}
+
 function assertLease(row: OutboxRow, expectedLeaseOwner: string | undefined): void {
   if (expectedLeaseOwner !== undefined && row.leaseOwner !== null && row.leaseOwner !== expectedLeaseOwner) {
     throw new SyncError(
@@ -232,7 +248,7 @@ export async function settleSynced(
   db: SenedDatabase,
   id: string,
   result: SyncPushResult,
-  input: SettleInput
+  input: SettleSyncedInput
 ): Promise<OutboxRow> {
   if (result.outcome !== "ACCEPTED" && result.outcome !== "REPLAYED") {
     throw new SyncError("SYNC_CORRUPT_PAYLOAD", "Only an accepted or replayed result can settle as synced");
@@ -261,6 +277,8 @@ export async function settleSynced(
     // synced either way; a refused payer is surfaced, never swallowed.
     attributionOutcome: result.attribution?.outcome ?? null,
     attributionError: result.attribution?.outcome === "REFUSED" ? (result.attribution.error ?? null) : null,
+    attributionAttempts: input.attributionRetry?.attempts ?? 0,
+    attributionNextAttemptAt: input.attributionRetry?.nextAttemptAt ?? null,
     lastErrorCode: null,
     lastErrorMessage: null,
     updatedAt: input.now.toISOString(),
@@ -403,6 +421,8 @@ export async function requeueTerminal(
     serverSequence: null,
     attributionOutcome: null,
     attributionError: null,
+    attributionAttempts: 0,
+    attributionNextAttemptAt: null,
     updatedAt: now.toISOString(),
     settledAt: null
   };
@@ -437,6 +457,90 @@ export async function recordAttributionOutcome(
   };
   await db.outbox.put(next);
   return next;
+}
+
+export interface AttributionAttemptPatch {
+  readonly outcome: SyncAttributionOutcome | null;
+  /** The code for a `REFUSED` outcome. */
+  readonly error: string | null;
+  readonly attempts: number;
+  readonly nextAttemptAt: number | null;
+}
+
+/**
+ * Record one attempt at the payer of an entry the server already holds: the outcome,
+ * how many tries have been spent and when the next automatic one is due. Touches
+ * nothing but the attribution fields.
+ */
+export async function recordAttributionAttempt(
+  db: SenedDatabase,
+  id: string,
+  patch: AttributionAttemptPatch,
+  now: Date
+): Promise<OutboxRow> {
+  const row = await db.outbox.get(id);
+  if (!row) {
+    throw new SyncError("LOCAL_RECORD_NOT_FOUND", "Queued mutation was not found on this device");
+  }
+  if (row.state !== "synced") {
+    throw new SyncError("SYNC_PROTECTED_ROW", "Only an entry the server already holds can have its payer retried");
+  }
+  const next: OutboxRow = {
+    ...row,
+    attributionOutcome: patch.outcome,
+    attributionError: patch.outcome === "REFUSED" ? patch.error : null,
+    attributionAttempts: patch.attempts,
+    attributionNextAttemptAt: patch.nextAttemptAt,
+    updatedAt: now.toISOString()
+  };
+  await db.outbox.put(next);
+  return next;
+}
+
+/** Every synced draft whose payer is owed an automatic try at `now`, oldest first. */
+export async function listAttributionRetriesDue(
+  db: SenedDatabase,
+  options: { readonly now: Date; readonly groupId?: string; readonly maxAttempts?: number; readonly limit?: number }
+): Promise<OutboxRow[]> {
+  const max = options.maxAttempts ?? ATTRIBUTION_MAX_AUTO_ATTEMPTS;
+  const rows = await db.outbox.toArray();
+  return rows
+    .filter((row) => (options.groupId === undefined || row.groupId === options.groupId) && isAttributionRetryDue(row, options.now.getTime(), max))
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .slice(0, options.limit ?? 25);
+}
+
+/**
+ * Take the right to try one payer now, or `null` when it is not owed a try (already
+ * recorded, a person has to act, tries used up, not due yet, or another tab or
+ * trigger took it a moment ago). The row is re-read inside the transaction and its
+ * next-attempt time is pushed out by a short lease, so two triggers that fire together
+ * (reconnect and the service worker, say) send ONE request.
+ */
+export async function claimAttributionRetry(
+  db: SenedDatabase,
+  id: string,
+  options: { readonly now: Date; readonly maxAttempts?: number; readonly leaseMs?: number }
+): Promise<OutboxRow | null> {
+  const nowMs = options.now.getTime();
+  const max = options.maxAttempts ?? ATTRIBUTION_MAX_AUTO_ATTEMPTS;
+  try {
+    return await db.transaction("rw", db.outbox, async () => {
+      const row = await db.outbox.get(id);
+      if (!row || !isAttributionRetryDue(row, nowMs, max)) {
+        return null;
+      }
+      const claimed: OutboxRow = {
+        ...row,
+        attributionNextAttemptAt: nowMs + Math.max(1, options.leaseMs ?? ATTRIBUTION_ATTEMPT_LEASE_MS),
+        updatedAt: options.now.toISOString()
+      };
+      await db.outbox.put(claimed);
+      return claimed;
+    });
+  } catch (error) {
+    throw mapStorageError(error, "Claiming a payer to retry");
+  }
 }
 
 export async function summarizeQueue(

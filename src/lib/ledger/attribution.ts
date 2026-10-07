@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { isContributionChannel, type ContributionChannel } from "./paymentChannel";
 import { isUuid } from "./rules";
 
 /**
@@ -29,6 +30,10 @@ export interface AttributionRecord {
   readonly round: number | null;
   readonly revision: number;
   readonly reason: string | null;
+  /** How it was paid: the treasurer's word, or the provider for a bank-verified entry. `null` = not said. */
+  readonly channel: ContributionChannel | null;
+  /** The treasurer's plain-text note, or `null`. Never present for a bank-verified entry. */
+  readonly note: string | null;
 }
 
 export type AttributionRefusal =
@@ -73,6 +78,9 @@ export function parseAttributionRecord(value: unknown): AttributionRecord | null
   const cycleId = row.cycleId ?? null;
   const round = row.round ?? null;
   const reason = row.reason ?? null;
+  // Additive keys: a database one migration behind does not send them.
+  const channel = row.channel ?? null;
+  const note = row.note ?? null;
   if (
     typeof row.entryId !== "string" ||
     !isUuid(row.entryId) ||
@@ -88,7 +96,9 @@ export function parseAttributionRecord(value: unknown): AttributionRecord | null
     typeof row.revision !== "number" ||
     !Number.isSafeInteger(row.revision) ||
     row.revision < 1 ||
-    (reason !== null && typeof reason !== "string")
+    (reason !== null && typeof reason !== "string") ||
+    (channel !== null && !isContributionChannel(channel)) ||
+    (note !== null && typeof note !== "string")
   ) {
     return null;
   }
@@ -101,7 +111,9 @@ export function parseAttributionRecord(value: unknown): AttributionRecord | null
     cycleId: cycleId === null ? null : (cycleId as string).toLowerCase(),
     round: round as number | null,
     revision: row.revision,
-    reason: reason as string | null
+    reason: reason as string | null,
+    channel: channel as ContributionChannel | null,
+    note: note as string | null
   };
 }
 
@@ -120,6 +132,13 @@ export interface AttributionInput {
   readonly memberUserId: string;
   readonly cycleId?: string;
   readonly round?: number;
+  /**
+   * Record: `null`/absent = none. Supersede: absent = KEEP the current value,
+   * `null` = clear it, otherwise set it.
+   */
+  readonly channel?: ContributionChannel | null;
+  /** Same convention as `channel`. Already trimmed and validated by the caller's schema. */
+  readonly note?: string | null;
 }
 
 /** First attribution of an entry. A different one already there is `attribution_exists`. */
@@ -129,7 +148,9 @@ export async function recordAttribution(client: SupabaseClient, input: Attributi
     p_entry_id: input.entryId,
     p_member_user_id: input.memberUserId,
     p_cycle_id: input.cycleId ?? null,
-    p_round: input.round ?? null
+    p_round: input.round ?? null,
+    p_channel: input.channel ?? null,
+    p_note: input.note ?? null
   });
   if (error) {
     const known = refusal(error);
@@ -150,7 +171,10 @@ export async function supersedeAttribution(
     p_member_user_id: input.memberUserId,
     p_reason: input.reason,
     p_cycle_id: input.cycleId ?? null,
-    p_round: input.round ?? null
+    p_round: input.round ?? null,
+    // The database keeps the current value for null and clears it for the empty string.
+    p_channel: input.channel === undefined ? null : (input.channel ?? ""),
+    p_note: input.note === undefined ? null : (input.note ?? "")
   });
   if (error) {
     const known = refusal(error);

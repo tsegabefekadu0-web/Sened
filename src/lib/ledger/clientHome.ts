@@ -12,6 +12,7 @@ import {
   type SummaryEntry
 } from "./homeSummary";
 import { formatEtbMinorUnits, toEtbMinorUnits } from "./money";
+import { isContributionChannel } from "./paymentChannel";
 
 export type HomeLedgerResult =
   | {
@@ -105,6 +106,9 @@ export function toEntryAttribution(value: unknown): EntryAttribution | null {
   const cycleId = raw.cycleId ?? null;
   const round = raw.round ?? null;
   const reason = raw.reason ?? null;
+  // Additive: an older server sends neither. A malformed value is dropped, not trusted.
+  const channel = isContributionChannel(raw.channel) ? raw.channel : null;
+  const note = typeof raw.note === "string" && raw.note.length > 0 && raw.note.length <= 560 ? raw.note : null;
   if (
     (raw.source !== "bank_verification" && raw.source !== "treasurer") ||
     typeof raw.memberUserId !== "string" ||
@@ -130,7 +134,9 @@ export function toEntryAttribution(value: unknown): EntryAttribution | null {
     cycleId: cycleId as string | null,
     round: round as number | null,
     revision: raw.revision,
-    reason: reason as string | null
+    reason: reason as string | null,
+    channel,
+    note
   };
 }
 
@@ -155,7 +161,10 @@ export function effectiveAttribution(
       cycleId: null,
       round: null,
       revision: 1,
-      reason: null
+      reason: null,
+      // The provider IS the channel, and a bank row has no treasurer's note.
+      channel: provenance.provider,
+      note: null
     };
   }
   return attribution;

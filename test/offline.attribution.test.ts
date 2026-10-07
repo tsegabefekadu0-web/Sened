@@ -45,7 +45,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-describe("Dexie upgrade to schema version 2", () => {
+describe("Dexie upgrade to schema version 3 (payer in v2, channel/note and retry bookkeeping in v3)", () => {
   const V1_STORES = {
     roster: "id, groupId, [groupId+displayName], updatedAt",
     spokenNotes: "id, groupId, memberId, [groupId+occurredAt], createdAt",
@@ -55,9 +55,9 @@ describe("Dexie upgrade to schema version 2", () => {
     syncMeta: "key, groupId"
   };
 
-  it("is version 2", () => {
-    expect(DATABASE_SCHEMA_VERSION).toBe(2);
-    expect(db.verno).toBe(2);
+  it("is version 3", () => {
+    expect(DATABASE_SCHEMA_VERSION).toBe(3);
+    expect(db.verno).toBe(3);
   });
 
   it("keeps a draft and an outbox row written under version 1 valid, with no payer", async () => {
@@ -111,7 +111,7 @@ describe("Dexie upgrade to schema version 2", () => {
     const upgraded = createSenedDatabase(name);
     try {
       await upgraded.open();
-      expect(upgraded.verno).toBe(2);
+      expect(upgraded.verno).toBe(3);
       const draft = await getDraft(upgraded, "draft-old");
       expect(draft).toMatchObject({ id: "draft-old", status: "queued", request, attribution: null });
       expect(await upgraded.outbox.get("outbox-old")).toMatchObject({

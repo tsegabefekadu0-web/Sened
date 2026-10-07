@@ -166,5 +166,10 @@ if ($check.Out -notmatch 'ALL CONTRIBUTION GRID AND GATE CHECKS PASSED') {
     throw 'VERIFICATION DID NOT REACH THE CONTRIBUTION GRID AND GATE SUCCESS MARKER'
 }
 
+if ($check.Out -notmatch 'ALL PAYMENT CHANNEL AND NOTE CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE PAYMENT CHANNEL AND NOTE SUCCESS MARKER'
+}
+
 docker rm -f $container 2>&1 | Out-Null
 Write-Host 'Migrations applied and verified.' -ForegroundColor Green

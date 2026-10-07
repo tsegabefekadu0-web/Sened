@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -493,6 +493,110 @@ describe("record-contribution form: posting", () => {
     release();
     await within(form).findByTestId("record-result");
     expect(server.posts).toHaveLength(1);
+  });
+});
+
+describe("record-contribution form: how it was paid and a note", () => {
+  const channelField = (form: HTMLElement) => within(form).getByLabelText(en("record.channelLabel"), { exact: false });
+  const noteField = (form: HTMLElement) => within(form).getByLabelText(en("record.noteLabel"), { exact: false });
+
+  it("offers the five channels plus 'not stated', defaulting to not stated", async () => {
+    mount(makeServer());
+    const form = await readyForm();
+    const options = within(channelField(form)).getAllByRole("option").map((option) => [option.getAttribute("value"), option.textContent]);
+    expect(options).toEqual([
+      ["", en("record.channelNone")],
+      ["telebirr", "Telebirr"],
+      ["cbe", "CBE Birr"],
+      ["awash", "Awash Bank"],
+      ["cash", "Cash"],
+      ["other", "Other"]
+    ]);
+    expect(channelField(form)).toHaveValue("");
+    expect(noteField(form)).toHaveValue("");
+  });
+
+  it("posts the channel and the trimmed note with the payer, beside the entry and not inside it, and shows them back as text", async () => {
+    const server = makeServer();
+    mount(server);
+    const form = await readyForm();
+    const user = userEvent.setup();
+    await fill(user, form, { amount: "250", payer: BERHAN });
+    await user.selectOptions(channelField(form), "telebirr");
+    await user.type(noteField(form), "  <b>Sent</b> by his wife  ");
+    await user.click(submitButton(form));
+
+    expect(await within(form).findByTestId("record-attributed")).toBeInTheDocument();
+    expect(server.posts[0]!.attribution).toEqual({ memberUserId: BERHAN, channel: "telebirr", note: "<b>Sent</b> by his wife" });
+    // Nothing of them in the ledger entry's own fields.
+    const { attribution: _a, ...entry } = server.posts[0]!;
+    expect(JSON.stringify(entry)).not.toMatch(/telebirr|Sent|channel|note/);
+    expect(within(form).getByTestId("record-channel")).toHaveTextContent(en("record.result.channel", { channel: "Telebirr" }));
+    const shown = within(form).getByTestId("record-note");
+    expect(shown).toHaveTextContent("Note: <b>Sent</b> by his wife");
+    expect(shown.querySelector("b")).toBeNull();
+    // The form is clear for the next one.
+    expect(channelField(form)).toHaveValue("");
+    expect(noteField(form)).toHaveValue("");
+  });
+
+  it("sends neither key when they are left empty, exactly as before", async () => {
+    const server = makeServer();
+    mount(server);
+    const form = await readyForm();
+    const user = userEvent.setup();
+    await fill(user, form, { amount: "250", payer: BERHAN });
+    await user.type(noteField(form), "    ");
+    await user.click(submitButton(form));
+    await within(form).findByTestId("record-attributed");
+    expect(server.posts[0]!.attribution).toEqual({ memberUserId: BERHAN });
+    expect(within(form).queryByTestId("record-channel")).toBeNull();
+    expect(within(form).queryByTestId("record-note")).toBeNull();
+  });
+
+  it("refuses a note over 280 characters or with a control character, and posts nothing", async () => {
+    const server = makeServer();
+    mount(server);
+    const form = await readyForm();
+    const user = userEvent.setup();
+    await fill(user, form, { amount: "250", payer: BERHAN });
+    fireEvent.change(noteField(form), { target: { value: "n".repeat(281) } });
+    await user.click(submitButton(form));
+    expect(await within(form).findByText(en("record.error.note"))).toBeInTheDocument();
+    fireEvent.change(noteField(form), { target: { value: "bell\u0007" } });
+    await user.click(submitButton(form));
+    expect(await within(form).findByText(en("record.error.note"))).toBeInTheDocument();
+    expect(server.posts).toHaveLength(0);
+    // 280 characters of Ethiopic is fine.
+    fireEvent.change(noteField(form), { target: { value: "\u1220".repeat(280) } });
+    await user.click(submitButton(form));
+    await within(form).findByTestId("record-attributed");
+    expect((server.posts[0]!.attribution as { note: string }).note).toHaveLength(280);
+  });
+
+  it("the retry of a refused payer carries the same channel and note", async () => {
+    const server = makeServer({ entryResponses: [() => created("refused")] });
+    mount(server);
+    const form = await readyForm();
+    const user = userEvent.setup();
+    await fill(user, form, { amount: "250", payer: BERHAN });
+    await user.selectOptions(channelField(form), "cash");
+    await user.type(noteField(form), "Hand to hand");
+    await user.click(submitButton(form));
+    await within(form).findByTestId("record-attribution-refused");
+    await user.click(within(form).getByRole("button", { name: en("record.retry") }));
+    expect(await within(form).findByTestId("record-attributed")).toBeInTheDocument();
+    expect(server.posts).toHaveLength(1);
+    expect(server.attributions).toEqual([
+      { groupId: GROUP, entryId: ENTRY, memberUserId: BERHAN, channel: "cash", note: "Hand to hand" }
+    ]);
+  });
+
+  it("speaks Amharic", async () => {
+    mount(makeServer(), "am");
+    await screen.findByRole("form", { name: am("record.title") });
+    expect(screen.getByLabelText(am("record.channelLabel"), { exact: false })).toBeInTheDocument();
+    expect(screen.getByLabelText(am("record.noteLabel"), { exact: false })).toBeInTheDocument();
   });
 });
 

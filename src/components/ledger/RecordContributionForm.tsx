@@ -19,6 +19,14 @@ import {
   type PostedAttribution
 } from "@/lib/ledger/clientContribution";
 import { isEtbAmount } from "@/lib/ledger/money";
+import {
+  CONTRIBUTION_CHANNELS,
+  CONTRIBUTION_NOTE_MAX,
+  checkContributionNote,
+  isBlankNote,
+  isContributionChannel,
+  type ContributionChannel
+} from "@/lib/ledger/paymentChannel";
 
 /**
  * Record one contribution and who paid it (ROADMAP 4.2, owner / treasurer only).
@@ -34,6 +42,10 @@ import { isEtbAmount } from "@/lib/ledger/money";
  * - failed (nothing recorded, or the outcome unknown: resubmitting the same attempt
  *   reuses its idempotency key, so it cannot post twice).
  *
+ * How it was paid (telebirr, CBE, Awash, cash, other) and a short plain-text note
+ * travel WITH the payer: they are saved beside the entry on the attribution record,
+ * never inside the hash-chained entry. The note is shown to the group as text.
+ *
  * Plain members and signed-out visitors see read-only text and no controls. The
  * database refuses everyone else regardless of what this form shows.
  */
@@ -47,6 +59,14 @@ const CONTEXT_MESSAGES: Readonly<Record<Exclude<ContributionContext["status"], "
   "no-group": "record.noGroup",
   "choose-group": "record.chooseGroup",
   error: "record.loadError"
+};
+
+const CHANNEL_LABEL_KEYS: Readonly<Record<ContributionChannel, MessageKey>> = {
+  telebirr: "shell.feed.channelTelebirr",
+  cbe: "shell.feed.channelCbe",
+  awash: "shell.feed.channelAwash",
+  cash: "shell.feed.channelCash",
+  other: "shell.feed.channelOther"
 };
 
 const FAILURE_MESSAGES: Readonly<Record<Exclude<PostContributionResult["status"], "created">, MessageKey>> = {
@@ -93,11 +113,17 @@ interface Posted {
   readonly replayed: boolean;
   readonly groupId: string;
   readonly payerLabel: string;
-  readonly payer: { readonly memberUserId: string; readonly cycleId?: string; readonly round?: number };
+  readonly payer: {
+    readonly memberUserId: string;
+    readonly cycleId?: string;
+    readonly round?: number;
+    readonly channel?: ContributionChannel;
+    readonly note?: string;
+  };
   readonly attribution: PostedAttribution;
 }
 
-type FieldError = "amount" | "date" | "payer" | "round" | "roundNeedsCycle";
+type FieldError = "amount" | "date" | "payer" | "round" | "roundNeedsCycle" | "note";
 
 export interface RecordContributionFormProps {
   readonly locale?: Locale;
@@ -117,6 +143,8 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
   const [payer, setPayer] = useState("");
   const [cycleId, setCycleId] = useState("");
   const [round, setRound] = useState("");
+  const [channel, setChannel] = useState<ContributionChannel | "">("");
+  const [note, setNote] = useState("");
   const [fieldError, setFieldError] = useState<FieldError | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [posted, setPosted] = useState<Posted | null>(null);
@@ -142,6 +170,8 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
     setPayer("");
     setCycleId("");
     setRound("");
+    setChannel("");
+    setNote("");
     setPosted(null);
     setFailure(null);
     void loadContributionContext(deps ?? {}, { groupId: activeGroupId }).then((next) => {
@@ -202,6 +232,15 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
         return;
       }
     }
+    let cleanNote: string | undefined;
+    if (!isBlankNote(note)) {
+      const checked = checkContributionNote(note);
+      if (!checked.ok) {
+        setFieldError("note");
+        return;
+      }
+      cleanNote = checked.note;
+    }
     setFieldError(null);
 
     const fingerprint = [ready.groupId, trimmedAmount, date, payer, cycleId, roundNumber ?? ""].join("|");
@@ -226,7 +265,9 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
     const payerChoice = {
       memberUserId: payer,
       ...(cycleId === "" ? {} : { cycleId }),
-      ...(roundNumber === undefined ? {} : { round: roundNumber })
+      ...(roundNumber === undefined ? {} : { round: roundNumber }),
+      ...(channel === "" ? {} : { channel }),
+      ...(cleanNote === undefined ? {} : { note: cleanNote })
     };
     const member = ready.members.find((candidate) => candidate.userId === payer);
 
@@ -254,6 +295,8 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
       setPayer("");
       setCycleId("");
       setRound("");
+      setChannel("");
+      setNote("");
       return;
     }
     setFailure(result.status);
@@ -392,6 +435,52 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                     ))}
                   </select>
                   {errorFor("payer") ? <FieldMessage id="record-payer-error" text={t("record.error.payer")} /> : null}
+                </div>
+
+                <div>
+                  <label htmlFor="record-channel" className="text-sm font-bold text-coffee-900">
+                    {t("record.channelLabel")}
+                  </label>
+                  <select
+                    id="record-channel"
+                    value={channel}
+                    onChange={(event) => {
+                      setChannel(isContributionChannel(event.target.value) ? event.target.value : "");
+                      setFieldError(null);
+                    }}
+                    className={inputClass}
+                  >
+                    <option value="">{t("record.channelNone")}</option>
+                    {CONTRIBUTION_CHANNELS.map((option) => (
+                      <option key={option} value={option}>
+                        {t(CHANNEL_LABEL_KEYS[option])}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="record-note" className="text-sm font-bold text-coffee-900">
+                    {t("record.noteLabel")}
+                  </label>
+                  <input
+                    id="record-note"
+                    type="text"
+                    autoComplete="off"
+                    maxLength={CONTRIBUTION_NOTE_MAX * 2}
+                    value={note}
+                    onChange={(event) => {
+                      setNote(event.target.value);
+                      setFieldError(null);
+                    }}
+                    aria-invalid={errorFor("note") !== null}
+                    aria-describedby={errorFor("note") ? "record-note-help record-note-error" : "record-note-help"}
+                    className={inputClass}
+                  />
+                  <p id="record-note-help" className="mt-2 text-xs leading-5 text-inkMuted">
+                    {t("record.noteHelp")}
+                  </p>
+                  {errorFor("note") ? <FieldMessage id="record-note-error" text={t("record.error.note")} /> : null}
                 </div>
 
                 {context.cyclesLoaded ? (
@@ -552,7 +641,15 @@ function PostedResult({
             : t("record.result.posted", { sequence: posted.sequence })}
         </p>
         {attribution.status === "recorded" ? (
-          <p data-testid="record-attributed">{t("record.result.attributed", { payer: posted.payerLabel })}</p>
+          <>
+            <p data-testid="record-attributed">{t("record.result.attributed", { payer: posted.payerLabel })}</p>
+            {posted.payer.channel ? (
+              <p data-testid="record-channel">
+                {t("record.result.channel", { channel: t(CHANNEL_LABEL_KEYS[posted.payer.channel]) })}
+              </p>
+            ) : null}
+            {posted.payer.note ? <p data-testid="record-note">{t("record.result.note", { note: posted.payer.note })}</p> : null}
+          </>
         ) : attribution.status === "refused" ? (
           <p data-testid="record-attribution-refused">
             {t("record.result.refused", { reason: t(`shell.feed.attribute.error.${attribution.code}` as MessageKey) })}

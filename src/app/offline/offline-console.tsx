@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { OfflineSyncEngine } from "@/lib/offline/engine";
 import { HttpSyncTransport, UnconfiguredSyncTransport } from "@/lib/offline/transport";
@@ -11,7 +11,16 @@ import { readMyGroup } from "@/lib/ledger/clientRead";
 import { loadPayerChoices, type PayerChoices } from "@/lib/ledger/clientContribution";
 import { readCachedPayerChoices, writeCachedPayerChoices } from "@/lib/ledger/payerChoiceCache";
 import { attributionFromPayload } from "@/lib/db/attribution";
-import { attributionRefusalCode, retryDraftAttribution } from "@/lib/offline/attributionRetry";
+import { attributionRefusalCode, retryDraftAttribution, retryDueAttributions } from "@/lib/offline/attributionRetry";
+import { ATTRIBUTION_MAX_AUTO_ATTEMPTS, attributionRetryView } from "@/lib/offline/attributionPolicy";
+import {
+  CONTRIBUTION_CHANNELS,
+  CONTRIBUTION_NOTE_MAX,
+  checkContributionNote,
+  isBlankNote,
+  isContributionChannel,
+  type ContributionChannel
+} from "@/lib/ledger/paymentChannel";
 import { translate, type MessageKey } from "@/lib/i18n";
 import { isContentHashingAvailable } from "@/lib/offline/hash";
 import { offlineCopy, type OfflineLocale } from "@/lib/offline/copy";
@@ -146,7 +155,17 @@ function writeCachedGroup(email: string | null, group: Extract<GroupState, { sta
   }
 }
 
+/** The earliest an automatic payer retry is scheduled after a refresh, so a stuck row cannot spin. */
+const MIN_AUTO_RETRY_DELAY_MS = 2_000;
+
 const CHANNELS = ["telebirr", "cbe-birr", "cash", "bank-transfer"] as const;
+const CONTRIBUTION_CHANNEL_LABEL_KEYS: Readonly<Record<ContributionChannel, MessageKey>> = {
+  telebirr: "shell.feed.channelTelebirr",
+  cbe: "shell.feed.channelCbe",
+  awash: "shell.feed.channelAwash",
+  cash: "shell.feed.channelCash",
+  other: "shell.feed.channelOther"
+};
 const ENTRY_TYPES = ["contribution", "disbursement", "journal"] as const;
 
 type Connectivity = "online" | "offline" | "unknown";
@@ -473,6 +492,72 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     [refresh, t]
   );
 
+  // Automatic retry of a payer that did not record (never while signed out, only online,
+  // bounded, with the attempt count and next-due time kept on the outbox row). The same
+  // pass runs on reconnect, after every drain (the button and the service worker's drain
+  // message both call `drain`) and from a timer set for the next due time.
+  const token = authorization ? authorization.replace(/^Bearer\s+/i, "") : null;
+  const authBlocked = useRef(false);
+  useEffect(() => {
+    authBlocked.current = false;
+  }, [token]);
+
+  const autoRetryPayers = useCallback(
+    async (online?: boolean): Promise<void> => {
+      if (!db || !token || authBlocked.current) {
+        return;
+      }
+      const report = await retryDueAttributions(db, {
+        signedIn: true,
+        ...(online === undefined ? {} : { online }),
+        deps: { getToken: async () => token },
+        groupId: GROUP_ID
+      });
+      if (report.status !== "done") {
+        return;
+      }
+      if (report.stoppedSignedOut) {
+        authBlocked.current = true;
+      }
+      if (report.attempted > 0 || report.stoppedSignedOut) {
+        await refresh();
+      }
+    },
+    [db, token, GROUP_ID, refresh]
+  );
+  const autoRetryRef = useRef(autoRetryPayers);
+  useEffect(() => {
+    autoRetryRef.current = autoRetryPayers;
+  }, [autoRetryPayers]);
+
+  useEffect(() => {
+    const onOnline = () => {
+      void autoRetryRef.current(true);
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []);
+
+  useEffect(() => {
+    if (!db || !token || connectivity === "offline" || authBlocked.current) {
+      return;
+    }
+    let earliest: number | null = null;
+    for (const row of desk.outbox) {
+      const view = attributionRetryView(row, ATTRIBUTION_MAX_AUTO_ATTEMPTS);
+      if (view.kind === "auto") {
+        earliest = earliest === null ? (view.nextAt ?? 0) : Math.min(earliest, view.nextAt ?? 0);
+      }
+    }
+    if (earliest === null) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      void autoRetryRef.current();
+    }, Math.max(MIN_AUTO_RETRY_DELAY_MS, earliest - Date.now()));
+    return () => clearTimeout(timer);
+  }, [db, token, connectivity, desk.outbox]);
+
   async function drain(): Promise<void> {
     if (!engine) {
       return;
@@ -485,6 +570,8 @@ export function OfflineConsole(props: OfflineConsoleProps) {
         return t(groupBlock);
       }
       const report = await engine.drain(authorization, { groupId: GROUP_ID });
+      // Entries the server now holds may have a payer that did not record: try those too.
+      await autoRetryPayers();
       await refresh();
       // Localised, actionable copy first. A raw transport string is honest but
       // is not something an Ethiopian treasurer can act on in Amharic.
@@ -583,9 +670,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
                 ? "shell.feed.attribute.error.unauthorized"
                 : result.cause === "rate-limited"
                   ? "shell.feed.attribute.error.rate_limited"
-                  : result.cause === "forbidden"
-                    ? "shell.feed.attribute.error.forbidden"
-                    : "shell.feed.attribute.error.error") as MessageKey
+                  : "shell.feed.attribute.error.error") as MessageKey
             )
           });
       }
@@ -599,7 +684,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     incomeAccountId: string;
     occurredAt: string;
     queueNow: boolean;
-    attribution?: { memberUserId: string; cycleId?: string; round?: number };
+    attribution?: DraftFormInput["attribution"];
   }) {
     await run(async () => {
       if (!db) {
@@ -985,7 +1070,13 @@ interface DraftFormInput {
   incomeAccountId: string;
   occurredAt: string;
   queueNow: boolean;
-  attribution?: { memberUserId: string; cycleId?: string; round?: number };
+  attribution?: {
+    memberUserId: string;
+    cycleId?: string;
+    round?: number;
+    channel?: ContributionChannel;
+    note?: string;
+  };
 }
 
 function DraftsPanel({
@@ -1018,6 +1109,8 @@ function DraftsPanel({
   const [payer, setPayer] = useState("");
   const [cycleId, setCycleId] = useState("");
   const [round, setRound] = useState("");
+  const [channel, setChannel] = useState<ContributionChannel | "">("");
+  const [note, setNote] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   // The group's own chart replaces the placeholder ids once it is known.
   useEffect(() => {
@@ -1034,6 +1127,8 @@ function DraftsPanel({
     setPayer("");
     setCycleId("");
     setRound("");
+    setChannel("");
+    setNote("");
   }, [memberKey]);
   const [occurredAt, setOccurredAt] = useState(() => new Date().toISOString().slice(0, 16));
 
@@ -1045,13 +1140,25 @@ function DraftsPanel({
     return known?.email ?? translate(locale, "members.anonymous", { id: userId.slice(0, 8) });
   };
 
-  /** The attribution the form describes, `null` for none, or an error message key. */
-  function readAttribution(): { readonly memberUserId: string; readonly cycleId?: string; readonly round?: number } | null | "payer" | "round" {
+  /** The attribution the form describes, `null` for none, or the name of the field that is wrong. */
+  function readAttribution(): DraftFormInput["attribution"] | null | "payer" | "payerChannel" | "round" | "note" {
     if (entryType !== "contribution") {
       return null;
     }
+    const noteBlank = isBlankNote(note);
     if (payer === "") {
-      return cycleId !== "" || round.trim() !== "" ? "payer" : null;
+      if (cycleId !== "" || round.trim() !== "") {
+        return "payer";
+      }
+      return channel !== "" || !noteBlank ? "payerChannel" : null;
+    }
+    let cleanNote: string | undefined;
+    if (!noteBlank) {
+      const checked = checkContributionNote(note);
+      if (!checked.ok) {
+        return "note";
+      }
+      cleanNote = checked.note;
     }
     let roundNumber: number | undefined;
     if (round.trim() !== "") {
@@ -1064,7 +1171,9 @@ function DraftsPanel({
     return {
       memberUserId: payer,
       ...(cycleId === "" ? {} : { cycleId }),
-      ...(roundNumber === undefined ? {} : { round: roundNumber })
+      ...(roundNumber === undefined ? {} : { round: roundNumber }),
+      ...(channel === "" ? {} : { channel }),
+      ...(cleanNote === undefined ? {} : { note: cleanNote })
     };
   }
 
@@ -1074,8 +1183,16 @@ function DraftsPanel({
       setFormError(offlineCopy(locale, "offline.drafts.payerRequired"));
       return;
     }
+    if (attribution === "payerChannel") {
+      setFormError(offlineCopy(locale, "offline.drafts.channelNeedsPayer"));
+      return;
+    }
     if (attribution === "round") {
       setFormError(offlineCopy(locale, "offline.drafts.roundError"));
+      return;
+    }
+    if (attribution === "note") {
+      setFormError(offlineCopy(locale, "offline.drafts.noteError"));
       return;
     }
     setFormError(null);
@@ -1092,6 +1209,8 @@ function DraftsPanel({
     setPayer("");
     setCycleId("");
     setRound("");
+    setChannel("");
+    setNote("");
   }
 
   const inputClass = "rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm";
@@ -1106,6 +1225,7 @@ function DraftsPanel({
             const state: OfflineSyncState = outbox ? outbox.state : "local-draft";
             const named = draft.attribution ?? (outbox ? attributionFromPayload(outbox.payload) : null);
             const label = named ? payerLabel(named.memberUserId) : "";
+            const retry = attributionRetryView(outbox);
             return (
               <li key={draft.id} className={`rounded-xl border px-3 py-2 text-sm ${stateClassName(state)}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1141,6 +1261,24 @@ function DraftsPanel({
                         ) : (
                           <p data-testid="draft-attribution-unknown">{t("offline.attribution.unknown", { payer: label })}</p>
                         )}
+                        {retry.kind === "auto" ? (
+                          <p data-testid="draft-attribution-auto">
+                            {retry.nextAt !== null && retry.nextAt > Date.now()
+                              ? t("offline.attribution.auto", {
+                                  attempt: retry.attempt,
+                                  max: retry.maxAttempts,
+                                  time: new Date(retry.nextAt).toLocaleTimeString(locale === "am" ? "am-ET" : "en-US")
+                                })
+                              : t("offline.attribution.autoSoon", { attempt: retry.attempt, max: retry.maxAttempts })}
+                          </p>
+                        ) : null}
+                        {retry.kind === "attention" ? (
+                          <p role="alert" data-testid="draft-attribution-attention">
+                            {retry.reason === "definitive"
+                              ? t("offline.attribution.attention.definitive")
+                              : t("offline.attribution.attention.exhausted", { max: ATTRIBUTION_MAX_AUTO_ATTEMPTS })}
+                          </p>
+                        ) : null}
                         {outbox ? (
                           <button
                             type="button"
@@ -1153,6 +1291,14 @@ function DraftsPanel({
                         ) : null}
                       </>
                     )}
+                    {named.channel ? (
+                      <p data-testid="draft-attribution-channel">
+                        {t("offline.attribution.channel", {
+                          channel: translate(locale, CONTRIBUTION_CHANNEL_LABEL_KEYS[named.channel])
+                        })}
+                      </p>
+                    ) : null}
+                    {named.note ? <p data-testid="draft-attribution-note">{t("offline.attribution.note", { note: named.note })}</p> : null}
                   </div>
                 ) : null}
               </li>
@@ -1270,6 +1416,36 @@ function DraftsPanel({
                   </label>
                 </>
               ) : null}
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <label className="flex flex-1 flex-col gap-1 text-xs">
+                <span className="text-offline-quiet">{t("offline.drafts.channelLabel")}</span>
+                <select
+                  data-testid="offline-draft-channel"
+                  value={channel}
+                  onChange={(event) => setChannel(isContributionChannel(event.target.value) ? event.target.value : "")}
+                  className={inputClass}
+                >
+                  <option value="">{translate(locale, "shell.feed.channelNone")}</option>
+                  {CONTRIBUTION_CHANNELS.map((option) => (
+                    <option key={option} value={option}>
+                      {translate(locale, CONTRIBUTION_CHANNEL_LABEL_KEYS[option])}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-1 flex-col gap-1 text-xs">
+                <span className="text-offline-quiet">{t("offline.drafts.noteLabel")}</span>
+                <input
+                  data-testid="offline-draft-note"
+                  type="text"
+                  autoComplete="off"
+                  maxLength={CONTRIBUTION_NOTE_MAX * 2}
+                  value={note}
+                  onChange={(event) => setNote(event.target.value)}
+                  className={inputClass}
+                />
+              </label>
             </div>
             {payers.fromCache ? (
               <p className="text-xs text-offline-quiet" data-testid="offline-payers-cached">

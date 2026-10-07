@@ -9,7 +9,7 @@ import type {
 } from "./types";
 
 export const DEFAULT_DATABASE_NAME = "sened-offline";
-export const DATABASE_SCHEMA_VERSION = 2;
+export const DATABASE_SCHEMA_VERSION = 3;
 
 /**
  * The treasurer's offline store.
@@ -49,7 +49,7 @@ export class SenedDatabase extends Dexie {
     // gives every existing row an explicit "no payer / no attribution result"
     // value, so a draft saved before it stays valid and is sent exactly as it
     // always was. Nothing is deleted or rewritten otherwise.
-    this.version(DATABASE_SCHEMA_VERSION)
+    this.version(2)
       .stores(stores)
       .upgrade(async (transaction) => {
         await transaction
@@ -69,6 +69,31 @@ export class SenedDatabase extends Dexie {
             }
             if (row.attributionError === undefined) {
               row.attributionError = null;
+            }
+          });
+      });
+
+    // Version 3 (payment channel + note on a draft's payer, and automatic retry of a
+    // payer that did not record): no index changes.
+    //  - A draft's `attribution` may now carry `channel` and `note`. Both are
+    //    OPTIONAL and an absent one means "none", so every draft saved before this
+    //    stays valid and syncs byte-for-byte as it did; drafts are not rewritten.
+    //  - Every outbox row gets `attributionAttempts: 0` and `attributionNextAttemptAt:
+    //    null`. A row that synced but whose payer was never confirmed is therefore due
+    //    for the automatic retry (0 attempts used, nothing scheduled), and one the
+    //    server answered definitively stays in need of a person. Nothing is deleted.
+    this.version(DATABASE_SCHEMA_VERSION)
+      .stores(stores)
+      .upgrade(async (transaction) => {
+        await transaction
+          .table("outbox")
+          .toCollection()
+          .modify((row: { attributionAttempts?: unknown; attributionNextAttemptAt?: unknown }) => {
+            if (row.attributionAttempts === undefined) {
+              row.attributionAttempts = 0;
+            }
+            if (row.attributionNextAttemptAt === undefined) {
+              row.attributionNextAttemptAt = null;
             }
           });
       });

@@ -64,9 +64,13 @@ function rpcKeys(source: string, rpc: string): string[] {
 }
 
 describe("the migration is last and does not edit earlier ones", () => {
-  it("sorts after every other migration (new file only)", () => {
+  it("sorts after every migration that existed before it (a newer one may follow)", () => {
     const files = readdirSync(join(process.cwd(), DIR)).filter((name) => name.endsWith(".sql")).sort();
-    expect(files[files.length - 1]).toBe(FILE);
+    // It was the newest when it shipped; later migrations (for example
+    // 20261012100000_attribution_channel_and_note.sql) legitimately sort after it.
+    expect(files).toContain(FILE);
+    expect(files.slice(files.indexOf(FILE) + 1).every((name) => name > FILE)).toBe(true);
+    expect(files.indexOf(FILE)).toBeGreaterThan(0);
   });
 });
 

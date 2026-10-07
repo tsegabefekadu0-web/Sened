@@ -115,7 +115,10 @@ turns into a bounded retry rather than a dead end. Only `ledger-draft` has a
 server path; `spoken-note` and `roster-member` are refused, never faked.
 
 **Payer on a draft (additive).** A `ledger-draft` payload may carry
-`attribution: { memberUserId, cycleId?, round? }` (a **contribution** only). It is split
+`attribution: { memberUserId, cycleId?, round?, channel?, note? }` (a **contribution**
+only; `channel` is `telebirr | cbe | awash | cash | other` and `note` is trimmed plain
+text of 1..280 characters, both optional, both stored beside the entry and never in it,
+see `draw.md` §17.4). It is split
 off before the entry is validated, fingerprinted or hashed, then, after the entry posts,
 recorded through `record_ledger_entry_attribution_v1`. The per-item result is extended
 additively; every new field is optional, so an old client ignores it and an old payload
@@ -458,6 +461,69 @@ lattice. The maskable variant keeps its mark inside the 80% safe circle.
 
 ---
 
+### Schema version 3: payment channel, note, and the payer's retry state
+
+`DATABASE_SCHEMA_VERSION` is 3. No index changed. Version 2's upgrade stays as it was
+(`attribution: null` on a draft, `attributionOutcome` / `attributionError: null` on an
+outbox row); version 3 adds, to every outbox row, `attributionAttempts: 0` and
+`attributionNextAttemptAt: null`, and nothing else. A `DraftAttribution` may now carry
+optional `channel` and `note`; an absent one means none, so a draft saved before version
+3 (with or without a payer) is still valid, is not rewritten, and queues and syncs
+byte-for-byte as it did (`test/offline.attribution.autoretry.test.ts` upgrades a v1 and
+a v2 database to v3 and checks drafts, payloads and which rows are owed a retry).
+`normalizeDraftAttribution` checks both on the device with the server's rules (a
+blank note is "none"; a bad channel, a note over 280 characters or one with a control or
+bidi character is `INVALID_DRAFT`).
+
+### 7a. Retrying a payer that did not record
+
+The entry is posted whatever happens to the payer, so a payer that did not record is a
+follow-up. It is retried by sending only `POST /api/ledger/attributions` for the server's
+entry id, with the draft's own cycle, round, channel and note. The entry is never
+pushed again, and `record_ledger_entry_attribution_v1` answers an identical record with
+the existing one (`replayed: true`), so repeating the call cannot double-record: this is
+proved in SQL ("ALL PAYMENT CHANNEL AND NOTE CHECKS PASSED" and the earlier attribution
+checks) and in `offline.attribution.autoretry.test.ts` (a record that already exists is
+read back as `RECORDED`, a recorded payer is never sent again, two triggers at once send
+one request).
+
+*Which answers are retried by themselves* (`src/lib/offline/attributionPolicy.ts`):
+
+- **Transient**, retried automatically: the server did not say (`unknown`),
+  `attribution_failed`, `attribution_unreadable`, `attribution_conflict`, a network error,
+  a 5xx or a rate limit.
+- **Definitive**, never retried by itself: `attribution_exists` (a different payer is
+  already there), `forbidden`, `ledger_member_not_found`, `attribution_bank_verified`,
+  `attribution_entry_corrected`, `attribution_not_contribution`, entry or cycle not
+  found, and **any code this client does not know**: failing closed means a new server
+  code reaches a person instead of looping. These show "Needs your attention", the
+  reason, and the manual button.
+
+*How* (`src/lib/offline/attributionRetry.ts`, `retryDueAttributions`):
+
+- Bounded: `ATTRIBUTION_MAX_AUTO_ATTEMPTS` (8, the sync engine's own bound). The attempt
+  that came back with the sync result counts as the first. After the last, the row
+  shows "Needs your attention: the 8 automatic tries are used up".
+- Backoff: the shared `computeBackoffMs` (`backoff.ts`), jittered; the next due time is
+  stored on the outbox row (`attributionNextAttemptAt`) next to the count
+  (`attributionAttempts`), so a reload carries on where it was.
+- Only while online and signed in. Signed out, nothing is read, sent or counted
+  (`signedIn: false` returns before touching storage, and `authedFetch` independently
+  fails closed without a token). A 401 mid-run stops the run and spends no try.
+- Safe against itself: a row is claimed inside one IndexedDB transaction first (its
+  next-due time is pushed out by a 30 s lease), so the reconnect event, the drain and the
+  service worker's message firing together send one request.
+- Triggers, in `/offline`: the browser's `online` event; after every drain (the button,
+  and the service worker's `sened:outbox-drain-requested` message, which calls the same
+  drain); and a timer set for the earliest due time (never sooner than two seconds, and
+  not while offline or after a 401).
+- The manual button is unchanged for a transient failure (it changes nothing) and
+  works on any not-recorded payer, including after the tries are used up. A 403 is
+  recorded as a definitive `forbidden` by either path.
+- The row reads "Retrying automatically (attempt 2 of 8, next try at 14:03:10)" or, when
+  it is due now, "... as soon as this device is online"; a definitive refusal or used-up
+  tries reads "Needs your attention ...".
+
 ### Schema version 2: the payer on a draft
 
 `DATABASE_SCHEMA_VERSION` is 2. No index changed. `LedgerDraftRow.attribution` (a
@@ -569,10 +635,11 @@ mistakes:
 
 ## 12. Known limitations, stated rather than hidden
 
-- **Sync only runs when signed in, and only when the treasurer presses it.**
-  Signed out, the console uses `UnconfiguredSyncTransport` and a drain fails
-  closed with `SYNC_NOT_CONFIGURED`. Nothing syncs automatically when the
-  network returns.
+- **Sync only runs when signed in, and only when the treasurer presses it** (or the
+  service worker asks the open console to drain). Signed out, the console uses
+  `UnconfiguredSyncTransport` and a drain fails closed with `SYNC_NOT_CONFIGURED`.
+  Entries do not push themselves when the network returns; only the payer follow-up of
+  an entry the server already holds does (§7a), and only while the console is open.
 - **The pulled mirror is only displayed on `/offline`** (entry count and chain
   head). The home and ledger screens do not read it.
 - **The console resolves the signed-in user's group** (via `/api/my-groups`) and
@@ -583,7 +650,9 @@ mistakes:
   `localStorage` (`src/lib/ledger/payerChoiceCache.ts`), labelled as such in the console.
   A device that has never been online cannot name a payer; the draft still saves, and the
   treasurer attributes it after it syncs. The server re-checks the member and cycle when
-  the draft syncs. The retry of a refused attribution is a button, not automatic.
+  the draft syncs. The retry of a payer that did not record is automatic only for
+  answers that say nothing about the payer (§7a); a definitive refusal, or tries used up,
+  needs the button and a person.
 - **Only `ledger-draft` mutations have a server path.** Spoken notes and roster
   edits stay on the device.
 - **No audio blobs are persisted.** A 25 MB base64 string in IndexedDB is how a

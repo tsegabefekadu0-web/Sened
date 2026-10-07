@@ -1,6 +1,7 @@
 import { STANDARD_ACCOUNTS } from "./accounts";
 import { LedgerError } from "./errors";
 import { formatEtbGrouped, formatEtbMinorUnits, toEtbMinorUnits } from "./money";
+import type { ContributionChannel } from "./paymentChannel";
 import type { LedgerEntryType, LedgerPostingDirection } from "./types";
 
 /**
@@ -52,6 +53,13 @@ export interface EntryAttribution {
   /** 1 = never corrected; each correction is a new record and the earlier ones are kept. */
   readonly revision: number;
   readonly reason: string | null;
+  /**
+   * How it was paid: the treasurer's word, or the provider for a bank verification.
+   * Absent (an older server) or `null` = not said.
+   */
+  readonly channel?: ContributionChannel | null;
+  /** The treasurer's plain-text note, or absent/`null`. Data: render it as text only. */
+  readonly note?: string | null;
 }
 
 export interface SummaryEntry {

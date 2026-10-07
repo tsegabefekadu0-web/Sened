@@ -11,6 +11,7 @@ import {
   type DrawLifecycleState,
   type DrawListEntry,
   type DrawMemberNonce,
+  type DrawCommitGate,
   type DrawOpenGate,
   type DrawPayout,
   type DrawReveal,
@@ -72,6 +73,8 @@ export interface InMemoryGateOverride {
   readonly actorId: string;
   readonly reason: string;
   readonly flagged: readonly DrawGateFlag[];
+  /** Where it was given: when the draw was opened, or when it was committed. */
+  readonly stage: "open" | "commit";
 }
 
 /** One recorded policy change. */
@@ -533,7 +536,8 @@ export class InMemoryDrawRepository implements DrawRepository {
         drawId: session.drawId,
         actorId: context.userId,
         reason: override,
-        flagged
+        flagged,
+        stage: "open"
       });
     }
     return { session: this.view(session), replayed: false, gate: { policy, flagged, overridden } satisfies DrawOpenGate };
@@ -647,9 +651,18 @@ export class InMemoryDrawRepository implements DrawRepository {
 
   // -- commit / reveal / payout -----------------------------------------------------
 
-  private async assertCommitFromSession(commitment: DrawCommitment, context: DrawActorContext): Promise<void> {
+  private async assertCommitFromSession(
+    commitment: DrawCommitment,
+    context: DrawActorContext,
+    overrideReason: string | undefined
+  ): Promise<DrawCommitGate> {
     const session = this.requireSession(commitment.drawId);
     if (!this.isManager(session.groupId, context.userId)) this.forbid();
+    // A supplied reason must be a real one, whether or not it ends up needed (after the role, as in the database).
+    const reason = overrideReason === undefined ? null : overrideReason.trim();
+    if (reason !== null && (reason.length < 10 || reason.length > 1000)) {
+      throw new DrawError("INVALID_REQUEST", "draw_override_reason_invalid");
+    }
     const cycle = this.cycles.get(session.cycleId) as CycleRow;
     if (
       commitment.groupId !== session.groupId ||
@@ -701,12 +714,31 @@ export class InMemoryDrawRepository implements DrawRepository {
     if (digest !== commitment.memberDigest) {
       throw new DrawError("MEMBER_COMMITMENT_MISMATCH", "draw_member_commitment_mismatch");
     }
+
+    // The contribution gate again, with the policy and the flags as they are NOW (not as they were at open).
+    const policy = this.effectiveGate(cycle);
+    const flagged = policy === "off" ? [] : this.contributionFlags(session.cycleId, session.round);
+    let overridden = false;
+    let carriedOver = false;
+    if (policy === "block" && flagged.length > 0) {
+      const open = this.gateOverrideLog.find((entry) => entry.drawId === session.drawId && entry.stage === "open");
+      const known = new Set((open?.flagged ?? []).map((flag) => `${flag.memberId}:${flag.round}`));
+      if (flagged.every((flag) => known.has(`${flag.memberId}:${flag.round}`))) {
+        carriedOver = true;
+      } else if (reason === null) {
+        throw new DrawError("CONTRIBUTION_GATE_BLOCKED", "draw_contribution_gate_blocked", undefined, flagged);
+      } else {
+        overridden = true;
+      }
+    }
+    return { policy, flagged, overridden, carriedOver };
   }
 
   async saveCommitment(
     commitment: DrawCommitment,
-    context: DrawActorContext
-  ): Promise<{ readonly round: DrawRound; readonly replayed: boolean }> {
+    context: DrawActorContext,
+    options: { readonly overrideReason?: string } = {}
+  ): Promise<{ readonly round: DrawRound; readonly replayed: boolean; readonly gate: DrawCommitGate | null }> {
     requireUuid(context.userId, "userId");
     requireUuid(commitment.drawId, "drawId");
     requireUuid(commitment.groupId, "groupId");
@@ -730,7 +762,7 @@ export class InMemoryDrawRepository implements DrawRepository {
             "This idempotency key was already used for a different commitment"
           );
         }
-        return { round: this.project(existing), replayed: true };
+        return { round: this.project(existing), replayed: true, gate: null };
       }
     }
 
@@ -744,8 +776,9 @@ export class InMemoryDrawRepository implements DrawRepository {
       }
     }
 
+    let gate: DrawCommitGate | null = null;
     if (this.sessions.has(commitment.drawId)) {
-      await this.assertCommitFromSession(commitment, context);
+      gate = await this.assertCommitFromSession(commitment, context, options.overrideReason);
     } else if (!this.allowSessionlessCommit) {
       throw new DrawError("NOT_FOUND", "draw_not_found");
     }
@@ -755,7 +788,19 @@ export class InMemoryDrawRepository implements DrawRepository {
     const roundKey = `${commitment.cycleId}:${commitment.round}`;
     this.commitmentsPerRound.set(roundKey, (this.commitmentsPerRound.get(roundKey) ?? 0) + 1);
     void this.clock();
-    return { round: this.project(commitment), replayed: false };
+    if (gate !== null && gate.overridden) {
+      const session = this.requireSession(commitment.drawId);
+      this.gateOverrideLog.push({
+        cycleId: session.cycleId,
+        round: session.round,
+        drawId: session.drawId,
+        actorId: context.userId,
+        reason: (options.overrideReason ?? "").trim(),
+        flagged: gate.flagged,
+        stage: "commit"
+      });
+    }
+    return { round: this.project(commitment), replayed: false, gate };
   }
 
   async saveReveal(reveal: DrawReveal, context: DrawActorContext): Promise<DrawRound> {

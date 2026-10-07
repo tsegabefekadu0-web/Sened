@@ -200,7 +200,16 @@ export function createCommitHandler(
         {
           round: publicRound(result.round),
           replayed: result.replayed,
-          transcript: publicTranscript(result.round)
+          transcript: publicTranscript(result.round),
+          // Present only when a new commitment was made: what the gate looked at.
+          contributionGate: result.gate
+            ? {
+                policy: result.gate.policy,
+                flagged: result.gate.flagged.map((flag) => ({ memberId: flag.memberId, round: flag.round })),
+                overridden: result.gate.overridden,
+                carriedOver: result.gate.carriedOver
+              }
+            : null
         },
         result.replayed ? 200 : 201
       );

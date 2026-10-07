@@ -3,11 +3,11 @@ src/app/api/voice/speak/route.ts,8,* `POST /api/voice/speak` — text to speech 
 src/app/draw/page.tsx,27,እጣ
 src/app/draw/page.tsx,41,"{locale === ""am"" ? ""EN"" : ""አማ""}"
 src/app/layout.tsx,7,"title: ""Sened (ሰነድ) — የህብረተሰብ እቁብ እና ዕድር አስተዳዳሪ"","
-src/app/offline/offline-console.tsx,677,"{locale === ""en"" ? ""አማርኛ"" : ""English""}"
+src/app/offline/offline-console.tsx,762,"{locale === ""en"" ? ""አማርኛ"" : ""English""}"
 src/app/offline/page.tsx,15,"title: ""Sened · የመስመር መዝገብ ጠረጴዛ — Offline ledger desk"","
-src/app/page.tsx,259,* *verified* contributions; adding a spoken one to it would make the ደብተር
-src/app/page.tsx,285,"name: ""የተናገረ ልይል"","
-src/components/contributions/ContributionFeed.tsx,377,"? `${selected.amount.toLocaleString(locale === ""am"" ? ""am-ET"" : ""en-US"")} ብር`"
+src/app/page.tsx,274,* *verified* contributions; adding a spoken one to it would make the ደብተር
+src/app/page.tsx,300,"name: ""የተናገረ ልይል"","
+src/components/contributions/ContributionFeed.tsx,457,"? `${selected.amount.toLocaleString(locale === ""am"" ? ""am-ET"" : ""en-US"")} ብር`"
 src/components/cultural/CulturalIcons.tsx,4,* Authentic Ethiopian Meskel Cross Icon (የመስቀል ጥልፍ)
 src/components/cultural/CulturalIcons.tsx,47,* Authentic Center Diamond Embroidery Medallion (የጥልፍ አልማዝ ማዕከል)
 src/components/cultural/CulturalIcons.tsx,99,* Vertical Woven Tibeb Embroidery Border (የጥበብ ዳርቻ ጥልፍ)
@@ -52,7 +52,7 @@ src/lib/ledger/accounts.ts,59,"POT_CASH: { code: ""POT_CASH"", name: ""የእቁ
 src/lib/ledger/accounts.ts,62,"name: ""የስጠታ ገቢ"","
 src/lib/ledger/accounts.ts,67,"name: ""የእጣ ክፍያ ወጪ"","
 src/lib/ledger/accounts.ts,72,"name: ""የመክፈት ቀድሞ ሂሳብ"","
-src/lib/ledger/homeSummary.ts,12,"* account — the asset the ደብተር shows (see `accounts.ts`). It is an asset, so"
+src/lib/ledger/homeSummary.ts,13,"* account — the asset the ደብተር shows (see `accounts.ts`). It is an asset, so"
 src/lib/memberAvatarStyle.ts,10,* The four frames are Tibeb (ጥበብ) embroidery borders and are interchangeable:
 src/lib/voice/lexicon.ts,17,"""\u1274\u120c\u1265\u122d"", // ቴሌብር"
 src/lib/voice/lexicon.ts,18,"""\u1274\u1208\u1265\u122d"", // ቴለብር"

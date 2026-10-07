@@ -3141,7 +3141,7 @@ begin
     'public.get_draw_session_v1(uuid)',
     'public.submit_draw_seal_v1(uuid, text)',
     'public.submit_draw_nonce_v1(uuid, text)',
-    'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text)',
+    'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text, text)',
     'public.open_draw_reveal_v1(uuid, text)'
   ] loop
     if not has_function_privilege('authenticated', fn, 'EXECUTE') then
@@ -5473,33 +5473,39 @@ begin
     raise exception 'GRID 16 FAILED: grid after round 3 opened is wrong: %', res;
   end if;
 
-  -- SPLIT AT THE WIN. O pays after winning: with no later round due, the payment does
-  -- NOT go back and clear their flagged round 1 or 2.
+  -- POST-WIN FILL (20261013100000, superseding the 20261011100000 "split at the win"). O pays
+  -- after winning: round 3 is already met (explicit) and round 4 is not open, so nothing after the
+  -- win is due and unmet, and the payment clears O's EARLIEST missed round, round 1.
   perform pg_sleep(0.02);
   eo4 := pg_temp.fx_pay(go, grp, 'grid-eo4', '100.00', cash, income, go);
   res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
-  if pg_temp.grid_row(res, go) <> 'flagged,flagged,met,not_due' then
-    raise exception 'GRID 17 FAILED: a payment recorded after the member''s win cleared a pre-win round: %', res;
+  if pg_temp.grid_row(res, go) <> 'met,flagged,met,not_due'
+     or (pg_temp.grid_cell_json(res, go, 1) ->> 'entryId')::uuid <> eo4 then
+    raise exception 'GRID 17 FAILED: a payment recorded after the member''s win, with nothing after the win due and unmet, did not clear their earliest missed round: %', res;
   end if;
-  -- round 3 revealed (B wins), round 4 opened: O's eo4 was recorded before reveal 3, so it cannot pay round 4
+  -- round 3 revealed (B wins), round 4 opened: eo4 was decided at its own time and does not move
   perform pg_sleep(0.02);
   reset role;
   perform pg_temp.fx_reveal(grp, tnt, k, 3, gb, go);
   perform pg_sleep(0.02);
   perform pg_temp.call_as(go::text, format('select public.open_draw_v1(%L, 4, %L)', k, 'grid-open-4'));
   res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
-  if pg_temp.grid_row(res, go) <> 'flagged,flagged,met,flagged' then
-    raise exception 'GRID 18 FAILED: a payment recorded before the previous reveal paid round 4: %', res;
+  if pg_temp.grid_row(res, go) <> 'met,flagged,met,flagged'
+     or (pg_temp.grid_cell_json(res, go, 1) ->> 'entryId')::uuid <> eo4 then
+    raise exception 'GRID 18 FAILED: a payment recorded before the previous reveal paid round 4, or moved when round 4 opened: %', res;
   end if;
   eo5 := pg_temp.fx_pay(go, grp, 'grid-eo5', '100.00', cash, income, go);
   res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
-  if pg_temp.grid_row(res, go) <> 'flagged,flagged,met,met' or (pg_temp.grid_cell_json(res, go, 4) ->> 'entryId')::uuid <> eo5 then
+  if pg_temp.grid_row(res, go) <> 'met,flagged,met,met' or (pg_temp.grid_cell_json(res, go, 4) ->> 'entryId')::uuid <> eo5 then
     raise exception 'GRID 19 FAILED: a post-win payment after the previous reveal did not meet round 4: %', res;
   end if;
+  -- an explicit attribution claims round 1; the entry that held it falls to the next missed round
   eo6 := pg_temp.fx_pay(go, grp, 'grid-eo6', '100.00', cash, income, go, k, 1);
   res := pg_temp.call_as(gc::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
-  if pg_temp.grid_row(res, go) <> 'met,flagged,met,met' or (pg_temp.grid_cell_json(res, go, 1) ->> 'entryId')::uuid <> eo6 then
-    raise exception 'GRID 20 FAILED: an explicit attribution did not clear a pre-win round: %', res;
+  if pg_temp.grid_row(res, go) <> 'met,met,met,met'
+     or (pg_temp.grid_cell_json(res, go, 1) ->> 'entryId')::uuid <> eo6
+     or (pg_temp.grid_cell_json(res, go, 2) ->> 'entryId')::uuid <> eo4 then
+    raise exception 'GRID 20 FAILED: an explicit attribution did not claim round 1 (or the displaced entry did not clear the next missed round): %', res;
   end if;
 
   -- =========================================================================
@@ -5877,9 +5883,631 @@ begin
   end if;
 end;
 $gate$;
+-- ---------------------------------------------------------------------------
+-- Post-win fill and the gate at commit (20261013100000_post_win_fill_and_commit_gate.sql)
+--
+-- FILL. A payment recorded after a member's win first fills the earliest unmet round after the
+-- win that was DUE WHEN IT WAS RECORDED, else the earliest unmet round up to the win, else (the
+-- prepayment) the next round once it opens. Checks the order on a four-round timeline with a
+-- grid snapshot after every step and proves STABILITY: once a cell is met by an entry it stays
+-- met by that entry whatever is opened, revealed or recorded later (only a deliberate edit - an
+-- explicit attribution, a reversal - may re-sort). Explicit cycle+round attributions still win.
+-- The winner's collateral output is compared with the verbatim pre-20261011 derivation and may
+-- differ ONLY where a post-win entry now clears an earlier round instead of waiting for the next.
+--
+-- COMMIT-GATE. commit_draw_from_seals_v1 re-reads the effective policy and the flagged pairs:
+-- off computes nothing, warn allows and reports, block refuses (draw_contribution_gate_blocked,
+-- DETAIL = the pairs) unless the flagged set is covered by the override given at open (no pair
+-- the override did not name) or an owner/treasurer gives a 10..1000 character reason, recorded
+-- append-only with stage 'commit'. A flag appearing after the open, a policy switched to block
+-- while sealing, an override at open that the set outgrew, role checks, an outsider, a refused
+-- commit that leaves the seals valid, and no stale overload.
+-- ---------------------------------------------------------------------------
+-- The GATE checks above ended with `set constraints all immediate`; restore deferral for ledger writes.
+set constraints all deferred;
+
+insert into auth.users (id, email) values
+  ('aaaaaaaa-3000-4000-8000-000000000001', 'fill-owner@example.test'),
+  ('aaaaaaaa-3000-4000-8000-000000000002', 'fill-a@example.test'),
+  ('aaaaaaaa-3000-4000-8000-000000000003', 'fill-b@example.test'),
+  ('aaaaaaaa-3000-4000-8000-000000000004', 'fill-c@example.test'),
+  ('aaaaaaaa-4000-4000-8000-000000000001', 'cg-owner@example.test'),
+  ('aaaaaaaa-4000-4000-8000-000000000002', 'cg-treasurer@example.test'),
+  ('aaaaaaaa-4000-4000-8000-000000000003', 'cg-one@example.test'),
+  ('aaaaaaaa-4000-4000-8000-000000000004', 'cg-two@example.test')
+on conflict (id) do nothing;
+
+-- Every met cell of `p_prev` is still met by the same entry in `p_next`.
+create or replace function pg_temp.fill_stable(p_prev jsonb, p_next jsonb, p_label text)
+returns void
+language plpgsql
+as $$
+declare
+  c record;
+begin
+  for c in
+    select m ->> 'memberId' as member_id, (cell ->> 'round')::int as round_no, cell ->> 'entryId' as entry_id
+    from jsonb_array_elements(p_prev -> 'members') m, jsonb_array_elements(m -> 'cells') cell
+    where cell ->> 'status' = 'met'
+  loop
+    if (select x ->> 'entryId' from jsonb_array_elements(p_next -> 'members') mm, jsonb_array_elements(mm -> 'cells') x
+        where mm ->> 'memberId' = c.member_id and (x ->> 'round')::int = c.round_no) is distinct from c.entry_id then
+      raise exception '% FAILED: member % round % was met by entry % and no longer is', p_label, c.member_id, c.round_no, c.entry_id;
+    end if;
+  end loop;
+end;
+$$;
+
+-- For every winner, the rounds on which the collateral view differs from the pre-20261011 derivation.
+create or replace function pg_temp.fill_owed_diff(p_caller text, p_cycle uuid)
+returns jsonb
+language plpgsql
+as $$
+declare
+  res jsonb := pg_temp.call_as(p_caller, format('select public.get_draw_cycle_collateral_v1(%L)', p_cycle));
+  w jsonb;
+  legacy jsonb;
+  diffs jsonb := '{}'::jsonb;
+  rounds jsonb;
+  i integer;
+begin
+  for w in select x from jsonb_array_elements(res -> 'winners') x loop
+    legacy := pg_temp.legacy_owed(p_cycle, (w ->> 'memberId')::uuid, (w ->> 'round')::int,
+                                  (select total_rounds from public.draw_cycles where id = p_cycle));
+    rounds := '[]'::jsonb;
+    for i in 0 .. jsonb_array_length(legacy) - 1 loop
+      if legacy -> i is distinct from (w -> 'owed') -> i then
+        rounds := rounds || to_jsonb(((legacy -> i) ->> 'round')::int);
+      end if;
+    end loop;
+    if jsonb_array_length(rounds) > 0 then
+      diffs := diffs || jsonb_build_object(w ->> 'memberId', rounds);
+    end if;
+  end loop;
+  return diffs;
+end;
+$$;
+
+do $fill$
+declare
+  fo constant uuid := 'aaaaaaaa-3000-4000-8000-000000000001';
+  fa constant uuid := 'aaaaaaaa-3000-4000-8000-000000000002';
+  fb constant uuid := 'aaaaaaaa-3000-4000-8000-000000000003';
+  fc constant uuid := 'aaaaaaaa-3000-4000-8000-000000000004';
+  grp uuid; tnt uuid; cash uuid; income uuid; k uuid;
+  s0 jsonb; s1 jsonb; s2 jsonb; s3 jsonb; s4 jsonb; s5 jsonb; s6 jsonb; s7 jsonb; s8 jsonb; s9 jsonb; s10 jsonb;
+  q1 uuid; p1 uuid; p2 uuid; p3 uuid; y1 uuid; y2 uuid; y3 uuid; z1 uuid; z2 uuid; e2 uuid; e3 uuid; e4 uuid; e5 uuid;
+  w jsonb; cell jsonb; cres jsonb;
+begin
+  perform set_config('request.jwt.claim.sub', fo::text, true);
+  grp := (public.sened_ledger_provision_group_v1('Fill equb') ->> 'groupId')::uuid;
+  select tenant_id into tnt from public.ledger_groups where id = grp;
+  select id into cash from public.ledger_accounts where group_id = grp and code = 'POT_CASH';
+  select id into income from public.ledger_accounts where group_id = grp and code = 'CONTRIBUTION_INCOME';
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status) values
+    (grp, tnt, fa, 'member', 'active'), (grp, tnt, fb, 'member', 'active'), (grp, tnt, fc, 'member', 'active');
+  k := (pg_temp.call_as(fo::text, format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 4, 1000, now() - interval ''1 day'', %L)', grp, 'Fill cycle', '100.00', 'fill-k')) -> 'cycle' ->> 'cycleId')::uuid;
+
+  -- Round 1 opens; nobody has paid. A wins it (w = 1) and has not paid for round 1 either.
+  perform pg_temp.call_as(fo::text, format('select public.open_draw_v1(%L, null, %L)', k, 'fill-open-1'));
+  s0 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, k, 1, fa, fo);
+  perform pg_sleep(0.02);
+
+  -- FILL 1. A (the winner) pays after the win while NO round after the win is open: the payment
+  -- clears A's missed round 1 instead of waiting. C (not a winner) pays: round 1, as ever.
+  p1 := pg_temp.fx_pay(fo, grp, 'fill-p1', '100.00', cash, income, fa);
+  q1 := pg_temp.fx_pay(fo, grp, 'fill-q1', '100.00', cash, income, fc);
+  s1 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s1, fa) <> 'met,not_due,not_due,not_due' or (pg_temp.grid_cell_json(s1, fa, 1) ->> 'entryId')::uuid <> p1
+     or pg_temp.grid_row(s1, fc) <> 'met,not_due,not_due,not_due' or (pg_temp.grid_cell_json(s1, fc, 1) ->> 'entryId')::uuid <> q1
+     or pg_temp.grid_row(s1, fb) <> 'flagged,not_due,not_due,not_due' then
+    raise exception 'FILL 1 FAILED: a post-win payment with nothing after the win due did not clear the missed round 1: %', s1;
+  end if;
+  perform pg_temp.fill_stable(s0, s1, 'FILL 1 stability');
+  if pg_temp.fill_owed_diff(fo::text, k) <> '{}'::jsonb then
+    raise exception 'FILL 1 FAILED: collateral differs from the old derivation before round 2 is open: %', pg_temp.fill_owed_diff(fo::text, k);
+  end if;
+
+  -- FILL 2 (STABILITY). Round 2 opens. The payment recorded before it does NOT move to round 2:
+  -- round 1 stays met by p1 and round 2 is flagged. The old derivation would have moved p1 to round 2
+  -- when it opened, so this is exactly where the collateral view legitimately differs.
+  perform pg_sleep(0.02);
+  perform pg_temp.call_as(fo::text, format('select public.open_draw_v1(%L, 2, %L)', k, 'fill-open-2'));
+  s2 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s2, fa) <> 'met,flagged,not_due,not_due' or (pg_temp.grid_cell_json(s2, fa, 1) ->> 'entryId')::uuid <> p1
+     or pg_temp.grid_row(s2, fc) <> 'met,flagged,not_due,not_due' or (pg_temp.grid_cell_json(s2, fc, 1) ->> 'entryId')::uuid <> q1 then
+    raise exception 'FILL 2 FAILED: opening round 2 moved a payment that had already cleared round 1: %', s2;
+  end if;
+  perform pg_temp.fill_stable(s1, s2, 'FILL 2 stability');
+  if pg_temp.fill_owed_diff(fo::text, k) <> jsonb_build_object(fa::text, '[2]'::jsonb) then
+    raise exception 'FILL 2 FAILED: collateral must differ from the old derivation only for the winner''s round 2: %', pg_temp.fill_owed_diff(fo::text, k);
+  end if;
+
+  -- FILL 3. A pays again with round 2 open and unmet: post-win obligations first, so round 2.
+  perform pg_sleep(0.02);
+  p2 := pg_temp.fx_pay(fo, grp, 'fill-p2', '100.00', cash, income, fa);
+  s3 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s3, fa) <> 'met,met,not_due,not_due' or (pg_temp.grid_cell_json(s3, fa, 2) ->> 'entryId')::uuid <> p2
+     or (pg_temp.grid_cell_json(s3, fa, 1) ->> 'entryId')::uuid <> p1 then
+    raise exception 'FILL 3 FAILED: a post-win payment with a post-win round due did not fill it: %', s3;
+  end if;
+  perform pg_temp.fill_stable(s2, s3, 'FILL 3 stability');
+  -- the old derivation paid round 2 with p1 (the older entry); the status is the same, the entry differs
+  if pg_temp.fill_owed_diff(fo::text, k) <> jsonb_build_object(fa::text, '[2]'::jsonb) then
+    raise exception 'FILL 3 FAILED: unexpected collateral difference: %', pg_temp.fill_owed_diff(fo::text, k);
+  end if;
+
+  -- FILL 4. B wins round 2 with rounds 1 and 2 unpaid. B pays y1 before round 3 opens: it clears
+  -- the earliest missed round (1); then round 3 opens and y1 stays put.
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(grp, tnt, k, 2, fb, fo);
+  perform pg_sleep(0.02);
+  y1 := pg_temp.fx_pay(fo, grp, 'fill-y1', '100.00', cash, income, fb);
+  s4 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s4, fb) <> 'met,flagged,not_due,not_due' or (pg_temp.grid_cell_json(s4, fb, 1) ->> 'entryId')::uuid <> y1 then
+    raise exception 'FILL 4 FAILED: B''s first post-win payment did not clear round 1: %', s4;
+  end if;
+  perform pg_temp.fill_stable(s3, s4, 'FILL 4 stability');
+  perform pg_sleep(0.02);
+  perform pg_temp.call_as(fo::text, format('select public.open_draw_v1(%L, 3, %L)', k, 'fill-open-3'));
+  s5 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s5, fb) <> 'met,flagged,flagged,not_due' or (pg_temp.grid_cell_json(s5, fb, 1) ->> 'entryId')::uuid <> y1 then
+    raise exception 'FILL 4 FAILED: opening round 3 moved B''s payment: %', s5;
+  end if;
+  perform pg_temp.fill_stable(s4, s5, 'FILL 4 stability after open');
+  -- the old derivation paid B's round 3 with y1: the one place the output differs for B
+  if (pg_temp.fill_owed_diff(fo::text, k) -> fb::text) <> '[3]'::jsonb then
+    raise exception 'FILL 4 FAILED: B''s round 3 should differ from the old derivation: %', pg_temp.fill_owed_diff(fo::text, k);
+  end if;
+
+  -- FILL 5 (FILL ORDER). With round 3 open and unmet, B's next payment fills round 3 (post-win first)
+  -- although round 2 is missed too; the one after that, with nothing after the win due, clears round 2.
+  perform pg_sleep(0.02);
+  y2 := pg_temp.fx_pay(fo, grp, 'fill-y2', '100.00', cash, income, fb);
+  s6 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s6, fb) <> 'met,flagged,met,not_due' or (pg_temp.grid_cell_json(s6, fb, 3) ->> 'entryId')::uuid <> y2 then
+    raise exception 'FILL 5 FAILED: a post-win round that is due did not take priority over an older missed round: %', s6;
+  end if;
+  perform pg_temp.fill_stable(s5, s6, 'FILL 5 stability');
+  perform pg_sleep(0.02);
+  y3 := pg_temp.fx_pay(fo, grp, 'fill-y3', '100.00', cash, income, fb);
+  s7 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s7, fb) <> 'met,met,met,not_due' or (pg_temp.grid_cell_json(s7, fb, 2) ->> 'entryId')::uuid <> y3
+     or (pg_temp.grid_cell_json(s7, fb, 3) ->> 'entryId')::uuid <> y2 then
+    raise exception 'FILL 5 FAILED: with every post-win round met the payment did not clear the earliest missed round: %', s7;
+  end if;
+  perform pg_temp.fill_stable(s6, s7, 'FILL 5 stability (second)');
+
+  -- FILL 6. Round 3 is revealed (C wins) and round 4 opens. Nothing already placed moves, and a payment
+  -- recorded before round 3's reveal still cannot pay round 4 (unchanged rule).
+  perform pg_sleep(0.02);
+  p3 := pg_temp.fx_pay(fo, grp, 'fill-p3', '100.00', cash, income, fa);   -- A, before round 3 is revealed
+  reset role;
+  perform pg_sleep(0.02);
+  perform pg_temp.fx_reveal(grp, tnt, k, 3, fc, fo);
+  perform pg_sleep(0.02);
+  perform pg_temp.call_as(fo::text, format('select public.open_draw_v1(%L, 4, %L)', k, 'fill-open-4'));
+  s8 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  perform pg_temp.fill_stable(s7, s8, 'FILL 6 stability');
+  -- p3 (recorded after A's win, with round 3 open and unmet then) went to round 3; round 4 is flagged
+  if pg_temp.grid_row(s8, fa) <> 'met,met,met,flagged' or (pg_temp.grid_cell_json(s8, fa, 3) ->> 'entryId')::uuid <> p3 then
+    raise exception 'FILL 6 FAILED: A''s row after round 4 opened is wrong: %', s8;
+  end if;
+
+  -- FILL 7. C wins round 3 (their own win round and round 2 unpaid; round 1 met pre-win by q1). A post-win
+  -- payment with round 4 open fills round 4; the next one has nothing after the win due and clears round 2.
+  z1 := pg_temp.fx_pay(fo, grp, 'fill-z1', '100.00', cash, income, fc);
+  s9 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s9, fc) <> 'met,flagged,flagged,met' or (pg_temp.grid_cell_json(s9, fc, 4) ->> 'entryId')::uuid <> z1 then
+    raise exception 'FILL 7 FAILED: C''s post-win payment did not fill the open round 4: %', s9;
+  end if;
+  perform pg_temp.fill_stable(s8, s9, 'FILL 7 stability');
+  z2 := pg_temp.fx_pay(fo, grp, 'fill-z2', '100.00', cash, income, fc);
+  s10 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s10, fc) <> 'met,met,flagged,met' or (pg_temp.grid_cell_json(s10, fc, 2) ->> 'entryId')::uuid <> z2 then
+    raise exception 'FILL 7 FAILED: with round 4 met the next post-win payment did not clear the earliest missed round 2: %', s10;
+  end if;
+  perform pg_temp.fill_stable(s9, s10, 'FILL 7 stability (second)');
+
+  -- FILL 8 (EXPLICIT WINS). O (never won) has paid nothing. An explicit payment for round 2 claims round 2,
+  -- and the by-order payment that follows goes to the earliest unmet round (1), not to round 2.
+  e2 := pg_temp.fx_pay(fo, grp, 'fill-e2', '100.00', cash, income, fo, k, 2);
+  e3 := pg_temp.fx_pay(fo, grp, 'fill-e3', '100.00', cash, income, fo);
+  s9 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s9, fo) <> 'met,met,flagged,flagged'
+     or (pg_temp.grid_cell_json(s9, fo, 2) ->> 'entryId')::uuid <> e2 or (pg_temp.grid_cell_json(s9, fo, 1) ->> 'entryId')::uuid <> e3 then
+    raise exception 'FILL 8 FAILED: an explicit cycle+round attribution did not keep its round, or the by-order payment did not take the earliest other one: %', s9;
+  end if;
+  -- and for a WINNER: an explicit payment for B's round 4 (not yet reached), then one more payment that has
+  -- nothing to pay (one entry pays one round, no carry)
+  e4 := pg_temp.fx_pay(fo, grp, 'fill-e4', '100.00', cash, income, fb, k, 4);
+  s9 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s9, fb) <> 'met,met,met,met' or (pg_temp.grid_cell_json(s9, fb, 4) ->> 'entryId')::uuid <> e4 then
+    raise exception 'FILL 8 FAILED: an explicit attribution did not meet a winner''s round 4: %', s9;
+  end if;
+  e5 := pg_temp.fx_pay(fo, grp, 'fill-e5', '100.00', cash, income, fb);
+  s10 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if pg_temp.grid_row(s10, fb) <> 'met,met,met,met' or exists (
+       select 1 from jsonb_array_elements(s10 -> 'members') m, jsonb_array_elements(m -> 'cells') c
+       where c ->> 'entryId' = e5::text) then
+    raise exception 'FILL 8 FAILED: an extra payment (one entry pays one round, no carry) was assigned to a round: %', s10;
+  end if;
+
+  -- FILL 9. A reversal is a deliberate edit: reversing p1 makes A's round 1 not met by p1 any more.
+  -- Cells that were met by OTHER entries keep them.
+  perform pg_temp.fx_reverse(fo, grp, 'fill-p1-fix', p1, '100.00', cash, income);
+  s9 := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_contributions_v1(%L)', k));
+  if (pg_temp.grid_cell_json(s9, fa, 2) ->> 'entryId')::uuid <> p2 then
+    raise exception 'FILL 9 FAILED: reversing one payment moved another that was not affected: %', s9;
+  end if;
+  if pg_temp.grid_cell(s9, fa, 1) = 'met' and (pg_temp.grid_cell_json(s9, fa, 1) ->> 'entryId')::uuid = p1 then
+    raise exception 'FILL 9 FAILED: a reversed payment still counts: %', s9;
+  end if;
+
+  -- The collateral view stays consistent with the grid for every winner.
+  cres := pg_temp.call_as(fo::text, format('select public.get_draw_cycle_collateral_v1(%L)', k));
+  for w in select x from jsonb_array_elements(cres -> 'winners') x loop
+    for cell in select y from jsonb_array_elements(w -> 'owed') y loop
+      if (cell ->> 'status') <> pg_temp.grid_cell(s9, (w ->> 'memberId')::uuid, (cell ->> 'round')::int)
+         or (cell -> 'entryId') is distinct from (pg_temp.grid_cell_json(s9, (w ->> 'memberId')::uuid, (cell ->> 'round')::int) -> 'entryId') then
+        raise exception 'FILL 10 FAILED: the collateral view and the grid disagree on % round %', w ->> 'memberId', cell ->> 'round';
+      end if;
+    end loop;
+  end loop;
+end;
+$fill$;
+
+-- Seal as the member, build the commit call, and a round-2 draw ready to commit.
+create or replace function pg_temp.cg_seal(p_draw uuid, p_users uuid[])
+returns void
+language plpgsql
+as $$
+declare
+  u uuid;
+begin
+  foreach u in array p_users loop
+    perform pg_temp.call_as(u::text, format('select public.submit_draw_seal_v1(%L, %L)', p_draw,
+      public.sened_draw_member_seal_hash(p_draw, u, 'cg-nonce-' || u::text || '-0123456789')));
+  end loop;
+end;
+$$;
+
+create or replace function pg_temp.cg_commit_sql(p_draw uuid, p_key text, p_override text default null)
+returns text
+language plpgsql
+as $$
+declare
+  sess public.draw_sessions;
+  cyc public.draw_cycles;
+  participants jsonb;
+  sealed_set jsonb;
+  digest text;
+begin
+  select s.* into sess from public.draw_sessions s where s.draw_id = p_draw;
+  select c.* into cyc from public.draw_cycles c where c.id = sess.cycle_id;
+  participants := (
+    select jsonb_agg(jsonb_build_object(
+      'memberId', e.member_id, 'displayName', 'Member ' || left(e.member_id::text, 8),
+      'contributionAmount', cyc.contribution_amount::text,
+      'ticket', public.sened_draw_ticket(sess.group_id, sess.cycle_id, e.member_id)) order by e.member_id::text)
+    from public.sened_draw_eligible_members(sess.group_id, sess.cycle_id, sess.round) as e(member_id));
+  sealed_set := (
+    select coalesce(jsonb_agg(jsonb_build_object('memberId', se.member_id, 'sealed', se.sealed)
+                              order by se.member_id::text collate "C"), '[]'::jsonb)
+    from public.draw_seals se
+    where se.draw_id = p_draw
+      and exists (select 1 from public.sened_draw_eligible_members(sess.group_id, sess.cycle_id, sess.round) as e(member_id)
+                  where e.member_id = se.member_id));
+  digest := public.sened_draw_member_set_digest(p_draw, sealed_set);
+  return format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, null, %L, %L)',
+    p_draw, encode(sha256(convert_to('commitment-' || p_key, 'utf8')), 'hex'), 'commit-nonce-0123456789abcdef',
+    repeat('b', 64), digest, participants, p_key, 'v3', p_override);
+end;
+$$;
+
+-- A cycle at round 2 with a draw ready to commit: round 1 opened, revealed (the winner wins it),
+-- `p_payers` pay round 1 explicitly, round 2 opened (with `p_open_override` if the gate asks), and
+-- `p_sealers` sealed. Returns {cycle, draw, entries: {member: entry}}.
+create or replace function pg_temp.cg_prepare(
+  p_owner uuid, p_winner uuid, p_group uuid, p_tenant uuid, p_cash uuid, p_income uuid,
+  p_name text, p_gate text, p_payers uuid[], p_open_override text, p_sealers uuid[]
+)
+returns jsonb
+language plpgsql
+as $$
+declare
+  cyc uuid;
+  draw uuid;
+  payer uuid;
+  entries jsonb := '{}'::jsonb;
+  ent uuid;
+begin
+  cyc := (pg_temp.call_as(p_owner::text, format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 3, 1000, now() - interval ''1 day'', %L, %L)',
+    p_group, p_name, '100.00', 'key-' || p_name, p_gate)) -> 'cycle' ->> 'cycleId')::uuid;
+  perform pg_temp.call_as(p_owner::text, format('select public.open_draw_v1(%L, null, %L)', cyc, 'open1-' || p_name));
+  perform pg_sleep(0.02);
+  reset role;
+  perform pg_temp.fx_reveal(p_group, p_tenant, cyc, 1, p_winner, p_owner);
+  perform pg_sleep(0.02);
+  foreach payer in array p_payers loop
+    ent := pg_temp.fx_pay(p_owner, p_group, 'pay-' || p_name || '-' || payer::text, '100.00', p_cash, p_income, payer, cyc, 1);
+    entries := entries || jsonb_build_object(payer::text, ent);
+  end loop;
+  perform pg_sleep(0.02);
+  draw := (pg_temp.call_as(p_owner::text, case when p_open_override is null
+      then format('select public.open_draw_v1(%L, 2, %L)', cyc, 'open2-' || p_name)
+      else format('select public.open_draw_v1(%L, 2, %L, %L)', cyc, 'open2-' || p_name, p_open_override) end)
+    -> 'session' ->> 'drawId')::uuid;
+  perform pg_temp.cg_seal(draw, p_sealers);
+  return jsonb_build_object('cycle', cyc, 'draw', draw, 'entries', entries);
+end;
+$$;
+
+do $commitgate$
+declare
+  co constant uuid := 'aaaaaaaa-4000-4000-8000-000000000001'; -- owner
+  ct constant uuid := 'aaaaaaaa-4000-4000-8000-000000000002'; -- treasurer role
+  c1 constant uuid := 'aaaaaaaa-4000-4000-8000-000000000003'; -- plain member; wins round 1
+  c2 constant uuid := 'aaaaaaaa-4000-4000-8000-000000000004'; -- plain member
+  outsider constant text := '44444444-4444-4444-8444-444444444444';
+  grp uuid; tnt uuid; cash uuid; income uuid;
+  p jsonb; cyc uuid; draw uuid;
+  res jsonb; detail jsonb;
+  seals_before bigint;
+  ov record;
+  reason constant text := 'Members agreed to pay on Friday';
+begin
+  perform set_config('request.jwt.claim.sub', co::text, true);
+  grp := (public.sened_ledger_provision_group_v1('Commit gate equb') ->> 'groupId')::uuid;
+  select tenant_id into tnt from public.ledger_groups where id = grp;
+  select id into cash from public.ledger_accounts where group_id = grp and code = 'POT_CASH';
+  select id into income from public.ledger_accounts where group_id = grp and code = 'CONTRIBUTION_INCOME';
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status) values
+    (grp, tnt, ct, 'treasurer', 'active'), (grp, tnt, c1, 'member', 'active'), (grp, tnt, c2, 'member', 'active');
+
+  -- =========================================================================
+  -- COMMIT-GATE 1: a flag that appears AFTER the draw was opened (block)
+  -- =========================================================================
+  -- Everyone paid round 1, so round 2 opens with nothing flagged and no override; then C2's payment is reversed.
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'late-flag', 'block', array[co, ct, c1, c2], null, array[ct, c2]);
+  cyc := (p ->> 'cycle')::uuid; draw := (p ->> 'draw')::uuid;
+  if (select count(*) from public.draw_contribution_gate_overrides where cycle_id = cyc) <> 0 then
+    raise exception 'COMMIT-GATE 1 FAILED: an override was recorded at open with nothing flagged';
+  end if;
+  perform pg_temp.fx_reverse(co, grp, 'late-flag-fix', (p -> 'entries' ->> c2::text)::uuid, '100.00', cash, income);
+  select count(*) into seals_before from public.draw_seals where draw_id = draw;
+
+  detail := pg_temp.expect_error_detail(co::text, pg_temp.cg_commit_sql(draw, 'ck-late'), 'draw_contribution_gate_blocked', 'P0001');
+  if detail <> jsonb_build_array(jsonb_build_object('memberId', c2, 'round', 1)) then
+    raise exception 'COMMIT-GATE 1 FAILED: the refusal does not name who is flagged for which round: %', detail;
+  end if;
+  -- the treasurer role is refused the same way; nothing was written; the seals are still valid
+  perform pg_temp.expect_error_detail(ct::text, pg_temp.cg_commit_sql(draw, 'ck-late'), 'draw_contribution_gate_blocked', 'P0001');
+  if exists (select 1 from public.draw_commitments where draw_id = draw)
+     or (select count(*) from public.draw_seals where draw_id = draw) <> seals_before
+     or (select count(*) from public.draw_contribution_gate_overrides where cycle_id = cyc) <> 0 then
+    raise exception 'COMMIT-GATE 2 FAILED: a refused commit wrote something or touched the seals';
+  end if;
+  -- an override needs the role: a plain member, an outsider and an anonymous caller are refused FIRST
+  perform pg_temp.expect_error(c1::text, pg_temp.cg_commit_sql(draw, 'ck-late', reason), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error(c2::text, pg_temp.cg_commit_sql(draw, 'ck-late', reason), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error(outsider, pg_temp.cg_commit_sql(draw, 'ck-late', reason), 'draw_forbidden', '42501');
+  perform pg_temp.expect_error('', pg_temp.cg_commit_sql(draw, 'ck-late', reason), 'draw_forbidden', '28000');
+  -- and the reason must be a real one
+  perform pg_temp.expect_error(co::text, pg_temp.cg_commit_sql(draw, 'ck-late', 'too short'), 'draw_override_reason_invalid', 'P0001');
+  perform pg_temp.expect_error(co::text, pg_temp.cg_commit_sql(draw, 'ck-late', '          '), 'draw_override_reason_invalid', 'P0001');
+  perform pg_temp.expect_error(co::text, pg_temp.cg_commit_sql(draw, 'ck-late', repeat('x', 1001)), 'draw_override_reason_invalid', 'P0001');
+  if exists (select 1 from public.draw_commitments where draw_id = draw)
+     or (select count(*) from public.draw_contribution_gate_overrides where cycle_id = cyc) <> 0 then
+    raise exception 'COMMIT-GATE 3 FAILED: a refused override committed or was recorded';
+  end if;
+  -- the treasurer overrides with a reason: committed, and recorded with the stage
+  res := pg_temp.call_as(ct::text, pg_temp.cg_commit_sql(draw, 'ck-late', '  ' || reason || '  '));
+  if (res ->> 'replayed')::boolean or res -> 'contributionGate' ->> 'policy' <> 'block'
+     or not (res -> 'contributionGate' ->> 'overridden')::boolean or (res -> 'contributionGate' ->> 'carriedOver')::boolean
+     or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 1 then
+    raise exception 'COMMIT-GATE 4 FAILED: the override did not commit the draw: %', res;
+  end if;
+  select * into ov from public.draw_contribution_gate_overrides where cycle_id = cyc;
+  if not found or ov.stage <> 'commit' or ov.actor_id <> ct or ov.round <> 2 or ov.draw_id <> draw or ov.reason <> reason
+     or ov.flagged <> jsonb_build_array(jsonb_build_object('memberId', c2, 'round', 1)) or ov.group_id <> grp then
+    raise exception 'COMMIT-GATE 5 FAILED: the commit override record is wrong: %', row_to_json(ov);
+  end if;
+  if not exists (select 1 from public.draw_commitments where draw_id = draw) then
+    raise exception 'COMMIT-GATE 5 FAILED: the commitment was not written';
+  end if;
+  -- a replay (same key) commits nothing again and records nothing again, whatever reason it carries
+  res := pg_temp.call_as(co::text, pg_temp.cg_commit_sql(draw, 'ck-late', 'A different reason entirely'));
+  if not (res ->> 'replayed')::boolean or (select count(*) from public.draw_contribution_gate_overrides where cycle_id = cyc) <> 1 then
+    raise exception 'COMMIT-GATE 6 FAILED: a replay recorded another override or did not replay: %', res;
+  end if;
+  -- members read it, with its stage
+  res := pg_temp.call_as(c2::text, format('select public.get_draw_cycle_contributions_v1(%L)', cyc));
+  if jsonb_array_length(res -> 'overrides') <> 1 or res -> 'overrides' -> 0 ->> 'stage' <> 'commit'
+     or res -> 'overrides' -> 0 ->> 'reason' <> reason or (res -> 'overrides' -> 0 ->> 'drawId')::uuid <> draw then
+    raise exception 'COMMIT-GATE 7 FAILED: a member cannot read the commit override with its stage: %', res -> 'overrides';
+  end if;
+  -- one override per draw per stage, and only the two stages
+  begin
+    insert into public.draw_contribution_gate_overrides (cycle_id, group_id, tenant_id, round, draw_id, actor_id, reason, flagged, stage)
+    values (cyc, grp, tnt, 2, draw, ct, 'A second commit override', '[{"memberId":"x","round":1}]'::jsonb, 'commit');
+    raise exception 'COMMIT-GATE 8 FAILED: a second commit override for one draw was accepted';
+  exception when unique_violation then null;
+  end;
+  begin
+    insert into public.draw_contribution_gate_overrides (cycle_id, group_id, tenant_id, round, draw_id, actor_id, reason, flagged, stage)
+    values (cyc, grp, tnt, 2, draw, ct, 'An unknown stage here', '[{"memberId":"x","round":1}]'::jsonb, 'later');
+    raise exception 'COMMIT-GATE 8 FAILED: an unknown stage was accepted';
+  exception when check_violation then null;
+  end;
+
+  -- =========================================================================
+  -- COMMIT-GATE 2: an override given at OPEN is reused when the flagged set did not grow
+  -- =========================================================================
+  -- Only the owner has paid round 1: the treasurer, C1 and C2 are flagged at open, and the override names them.
+  -- same set, with a (not needed) valid reason supplied: allowed, carried over, nothing new recorded
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'reuse-same', 'block', array[co], reason, array[ct, c2]);
+  cyc := (p ->> 'cycle')::uuid; draw := (p ->> 'draw')::uuid;
+  select * into ov from public.draw_contribution_gate_overrides where draw_id = draw;
+  if ov.stage <> 'open' or jsonb_array_length(ov.flagged) <> 3 then
+    raise exception 'COMMIT-GATE 9 FAILED: the open override is wrong: %', row_to_json(ov);
+  end if;
+  res := pg_temp.call_as(co::text, pg_temp.cg_commit_sql(draw, 'ck-same', 'Not needed but a real reason'));
+  if res -> 'contributionGate' ->> 'policy' <> 'block' or (res -> 'contributionGate' ->> 'overridden')::boolean
+     or not (res -> 'contributionGate' ->> 'carriedOver')::boolean or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 3 then
+    raise exception 'COMMIT-GATE 10 FAILED: the open override was not reused for an unchanged set: %', res;
+  end if;
+  if (select count(*) from public.draw_contribution_gate_overrides where draw_id = draw) <> 1 then
+    raise exception 'COMMIT-GATE 10 FAILED: reusing the open override recorded another';
+  end if;
+
+  -- a SMALLER set (C1 paid since): reused, no reason needed
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'reuse-smaller', 'block', array[co], reason, array[ct, c2]);
+  cyc := (p ->> 'cycle')::uuid; draw := (p ->> 'draw')::uuid;
+  perform pg_temp.fx_pay(co, grp, 'pay-reuse-smaller-late', '100.00', cash, income, c1, cyc, 1);
+  res := pg_temp.call_as(ct::text, pg_temp.cg_commit_sql(draw, 'ck-smaller'));
+  if not (res -> 'contributionGate' ->> 'carriedOver')::boolean or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 2 then
+    raise exception 'COMMIT-GATE 11 FAILED: a smaller flagged set needed a new override: %', res;
+  end if;
+
+  -- the set GREW by a pair the override did not name (the owner's payment reversed): refused; an override is recorded
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'reuse-grew', 'block', array[co], reason, array[ct, c2]);
+  cyc := (p ->> 'cycle')::uuid; draw := (p ->> 'draw')::uuid;
+  perform pg_temp.fx_reverse(co, grp, 'reuse-grew-fix', (p -> 'entries' ->> co::text)::uuid, '100.00', cash, income);
+  detail := pg_temp.expect_error_detail(co::text, pg_temp.cg_commit_sql(draw, 'ck-grew'), 'draw_contribution_gate_blocked', 'P0001');
+  if jsonb_array_length(detail) <> 4 then
+    raise exception 'COMMIT-GATE 12 FAILED: the refusal after the set grew should list every flagged pair: %', detail;
+  end if;
+  res := pg_temp.call_as(co::text, pg_temp.cg_commit_sql(draw, 'ck-grew', 'A fresh reason for the new flag'));
+  if not (res -> 'contributionGate' ->> 'overridden')::boolean or (res -> 'contributionGate' ->> 'carriedOver')::boolean then
+    raise exception 'COMMIT-GATE 13 FAILED: %', res;
+  end if;
+  if (select array_agg(stage order by stage) from public.draw_contribution_gate_overrides where draw_id = draw) <> array['commit', 'open']
+     or (select jsonb_array_length(flagged) from public.draw_contribution_gate_overrides where draw_id = draw and stage = 'commit') <> 4
+     or (select jsonb_array_length(flagged) from public.draw_contribution_gate_overrides where draw_id = draw and stage = 'open') <> 3 then
+    raise exception 'COMMIT-GATE 13 FAILED: both the open and the commit override should be on record';
+  end if;
+
+  -- the set has the SAME SIZE but a different pair (one paid, another's payment reversed): refused
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'reuse-swap', 'block', array[co], reason, array[ct, c2]);
+  cyc := (p ->> 'cycle')::uuid; draw := (p ->> 'draw')::uuid;
+  perform pg_temp.fx_pay(co, grp, 'pay-reuse-swap-late', '100.00', cash, income, c1, cyc, 1);
+  perform pg_temp.fx_reverse(co, grp, 'reuse-swap-fix', (p -> 'entries' ->> co::text)::uuid, '100.00', cash, income);
+  if jsonb_array_length(public.sened_draw_cycle_gate_flags(cyc, 2)) <> 3 then
+    raise exception 'COMMIT-GATE 14 FAILED: the swap fixture is wrong: %', public.sened_draw_cycle_gate_flags(cyc, 2);
+  end if;
+  perform pg_temp.expect_error_detail(co::text, pg_temp.cg_commit_sql(draw, 'ck-swap'), 'draw_contribution_gate_blocked', 'P0001');
+  -- (the helper agrees with the function on both)
+  if public.sened_draw_flags_covered(public.sened_draw_cycle_gate_flags(cyc, 2), public.sened_draw_open_override_flags(draw)) then
+    raise exception 'COMMIT-GATE 14 FAILED: a swapped pair was treated as covered';
+  end if;
+
+  -- =========================================================================
+  -- COMMIT-GATE 3: warn reports, off computes nothing, a switch to block while sealing is caught
+  -- =========================================================================
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'warn-commit', 'warn', array[]::uuid[], null, array[ct, c2]);
+  draw := (p ->> 'draw')::uuid; cyc := (p ->> 'cycle')::uuid;
+  perform pg_temp.expect_error(co::text, pg_temp.cg_commit_sql(draw, 'ck-warn', 'short'), 'draw_override_reason_invalid', 'P0001');
+  res := pg_temp.call_as(co::text, pg_temp.cg_commit_sql(draw, 'ck-warn'));
+  if res -> 'contributionGate' ->> 'policy' <> 'warn' or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 4
+     or (res -> 'contributionGate' ->> 'overridden')::boolean then
+    raise exception 'COMMIT-GATE 15 FAILED: warn did not allow the commit and report the flagged pairs: %', res;
+  end if;
+  if (select count(*) from public.draw_contribution_gate_overrides where cycle_id = cyc) <> 0 then
+    raise exception 'COMMIT-GATE 15 FAILED: warn recorded an override';
+  end if;
+
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'off-commit', 'off', array[]::uuid[], null, array[ct, c2]);
+  draw := (p ->> 'draw')::uuid;
+  res := pg_temp.call_as(co::text, pg_temp.cg_commit_sql(draw, 'ck-off'));
+  if res -> 'contributionGate' ->> 'policy' <> 'off' or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 0 then
+    raise exception 'COMMIT-GATE 16 FAILED: off computed or reported flags at commit: %', res;
+  end if;
+
+  -- the policy is switched to block while members are sealing (the draw was opened under warn with flags)
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'switch-block', 'warn', array[co, ct], null, array[ct, c2]);
+  draw := (p ->> 'draw')::uuid; cyc := (p ->> 'cycle')::uuid;
+  perform pg_temp.call_as(co::text, format('select public.set_draw_cycle_contribution_gate_v1(%L, %L, %L)', cyc, 'block', 'Switching it on for everyone'));
+  detail := pg_temp.expect_error_detail(co::text, pg_temp.cg_commit_sql(draw, 'ck-switch'), 'draw_contribution_gate_blocked', 'P0001');
+  if jsonb_array_length(detail) <> 2 then
+    raise exception 'COMMIT-GATE 17 FAILED: a policy switched to block while sealing did not stop the commit: %', detail;
+  end if;
+  -- DON'T STRAND MEMBERS: the seals are still valid; recording the missing payments clears the flags and the
+  -- commit goes through with no override at all
+  perform pg_temp.fx_pay(co, grp, 'pay-switch-c1', '100.00', cash, income, c1, cyc, 1);
+  perform pg_temp.fx_pay(co, grp, 'pay-switch-c2', '100.00', cash, income, c2, cyc, 1);
+  res := pg_temp.call_as(ct::text, pg_temp.cg_commit_sql(draw, 'ck-switch'));
+  if res -> 'contributionGate' ->> 'policy' <> 'block' or jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 0
+     or (res -> 'contributionGate' ->> 'overridden')::boolean then
+    raise exception 'COMMIT-GATE 18 FAILED: resolving the flags did not let the commit through: %', res;
+  end if;
+  if (select count(*) from public.draw_contribution_gate_overrides where cycle_id = cyc) <> 0 then
+    raise exception 'COMMIT-GATE 18 FAILED: an override was recorded although nothing was flagged';
+  end if;
+
+  -- off -> block while sealing, then the owner overrides at commit
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'switch-off', 'off', array[]::uuid[], null, array[ct, c2]);
+  draw := (p ->> 'draw')::uuid; cyc := (p ->> 'cycle')::uuid;
+  perform pg_temp.call_as(co::text, format('select public.set_draw_cycle_contribution_gate_v1(%L, %L, %L)', cyc, 'block', 'Switching it on for everyone'));
+  perform pg_temp.expect_error_detail(co::text, pg_temp.cg_commit_sql(draw, 'ck-switch-off'), 'draw_contribution_gate_blocked', 'P0001');
+  res := pg_temp.call_as(co::text, pg_temp.cg_commit_sql(draw, 'ck-switch-off', reason));
+  select * into ov from public.draw_contribution_gate_overrides where draw_id = draw;
+  if not found or ov.stage <> 'commit' or jsonb_array_length(ov.flagged) <> 4 or ov.actor_id <> co then
+    raise exception 'COMMIT-GATE 19 FAILED: the override after a policy switch is wrong: %', row_to_json(ov);
+  end if;
+  -- and block -> off while sealing lets it through
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'switch-relax', 'block', array[co], reason, array[ct, c2]);
+  draw := (p ->> 'draw')::uuid; cyc := (p ->> 'cycle')::uuid;
+  perform pg_temp.fx_reverse(co, grp, 'switch-relax-fix', (p -> 'entries' ->> co::text)::uuid, '100.00', cash, income);
+  perform pg_temp.call_as(co::text, format('select public.set_draw_cycle_contribution_gate_v1(%L, %L, %L)', cyc, 'off', 'The group decided to relax this'));
+  res := pg_temp.call_as(co::text, pg_temp.cg_commit_sql(draw, 'ck-relax'));
+  if res -> 'contributionGate' ->> 'policy' <> 'off' then raise exception 'COMMIT-GATE 20 FAILED: %', res; end if;
+
+  -- an inactive member's flag does not hold up the commit
+  p := pg_temp.cg_prepare(co, c1, grp, tnt, cash, income, 'inactive', 'block', array[co, ct, c1, c2], null, array[ct, c2]);
+  draw := (p ->> 'draw')::uuid; cyc := (p ->> 'cycle')::uuid;
+  perform pg_temp.fx_reverse(co, grp, 'inactive-fix', (p -> 'entries' ->> ct::text)::uuid, '100.00', cash, income);
+  reset role;
+  update public.ledger_group_memberships set status = 'inactive' where group_id = grp and user_id = ct;
+  res := pg_temp.call_as(co::text, pg_temp.cg_commit_sql(draw, 'ck-inactive'));
+  update public.ledger_group_memberships set status = 'active' where group_id = grp and user_id = ct;
+  if jsonb_array_length(res -> 'contributionGate' -> 'flagged') <> 0 then
+    raise exception 'COMMIT-GATE 21 FAILED: an inactive member''s flag reached the commit gate: %', res;
+  end if;
+
+  -- =========================================================================
+  -- COMMIT-GATE 4: signatures and grants (no stale overload)
+  -- =========================================================================
+  if to_regprocedure('public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text)') is not null then
+    raise exception 'COMMIT-GATE 22 FAILED: the old nine-argument commit is still callable (PostgREST could not choose between overloads)';
+  end if;
+  if (select count(*) from pg_proc where proname = 'commit_draw_from_seals_v1' and pronamespace = 'public'::regnamespace) <> 1 then
+    raise exception 'COMMIT-GATE 22 FAILED: commit_draw_from_seals_v1 has more than one signature';
+  end if;
+  if has_function_privilege('anon', 'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text, text)', 'EXECUTE')
+     or has_function_privilege('public', 'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text, text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_draw_open_override_flags(uuid)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_draw_flags_covered(jsonb, jsonb)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_draw_cycle_member_rounds(uuid, uuid)', 'EXECUTE') then
+    raise exception 'COMMIT-GATE 23 FAILED: a function is executable by a role that must not have it';
+  end if;
+  if not has_function_privilege('authenticated', 'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text, text)', 'EXECUTE') then
+    raise exception 'COMMIT-GATE 23 FAILED: authenticated cannot execute the commit';
+  end if;
+end;
+$commitgate$;
+
 rollback;
 select 'ALL ATTRIBUTION AND COLLATERAL CHECKS PASSED' as result;
 select 'ALL CONTRIBUTION GRID AND GATE CHECKS PASSED' as result;
+select 'ALL POST-WIN FILL AND COMMIT GATE CHECKS PASSED' as result;
 
 -- ---------------------------------------------------------------------------
 -- Payment channel and note on an attribution (20261012100000_attribution_channel_and_note.sql)

@@ -351,6 +351,17 @@ export interface DrawOpenGate {
   readonly overridden: boolean;
 }
 
+/** What committing a draw found when it looked at contributions again (absent on a replay). */
+export interface DrawCommitGate {
+  readonly policy: DrawContributionGate;
+  /** The flagged (member, round) pairs before this draw's round at commit time. Empty under `off`. */
+  readonly flagged: readonly DrawGateFlag[];
+  /** An owner/treasurer's reason given AT COMMIT let the draw be committed despite `flagged`. */
+  readonly overridden: boolean;
+  /** `block`, something flagged, and the override given when the draw was opened still covered every pair. */
+  readonly carriedOver: boolean;
+}
+
 /** A draw cycle as the database defines it. Amounts are ETB strings with two decimals. */
 export interface DrawCycleRecord {
   readonly cycleId: string;

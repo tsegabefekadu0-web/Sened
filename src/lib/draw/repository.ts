@@ -7,6 +7,7 @@ import type {
   DrawContributionGate,
   DrawCycleRecord,
   DrawGateFlag,
+  DrawCommitGate,
   DrawOpenGate,
   DrawListEntry,
   DrawMemberNonce,
@@ -22,10 +23,17 @@ export interface DrawActorContext {
 }
 
 export interface DrawRepository {
+  /**
+   * Under a `block` gate the database re-checks the flagged rounds at commit and refuses
+   * (`CONTRIBUTION_GATE_BLOCKED`, carrying who is flagged for which round) unless the override given when
+   * the draw was opened still covers every flagged pair or `overrideReason` (10..1000 characters) is
+   * given, which it records. `gate` is absent on a replay.
+   */
   saveCommitment(
     commitment: DrawCommitment,
-    context: DrawActorContext
-  ): Promise<{ readonly round: DrawRound; readonly replayed: boolean }>;
+    context: DrawActorContext,
+    options?: { readonly overrideReason?: string }
+  ): Promise<{ readonly round: DrawRound; readonly replayed: boolean; readonly gate: DrawCommitGate | null }>;
   saveReveal(reveal: DrawReveal, context: DrawActorContext): Promise<DrawRound>;
   savePayout(payout: DrawPayout, context: DrawActorContext): Promise<DrawRound>;
   getRound(drawId: string, context: DrawActorContext): Promise<DrawRound | null>;
@@ -278,6 +286,18 @@ function parseOpenGate(value: unknown): DrawOpenGate | null {
   return { policy: row.policy, flagged: parseGateFlags(row.flagged), overridden: row.overridden };
 }
 
+function parseCommitGate(value: unknown): DrawCommitGate | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  if (!isDrawContributionGate(row.policy) || typeof row.overridden !== "boolean") return null;
+  return {
+    policy: row.policy,
+    flagged: parseGateFlags(row.flagged),
+    overridden: row.overridden,
+    carriedOver: row.carriedOver === true
+  };
+}
+
 function parseListEntry(value: unknown): DrawListEntry {
   if (typeof value !== "object" || value === null) throw malformed("draw");
   const row = value as Record<string, unknown>;
@@ -335,8 +355,9 @@ export class SupabaseDrawRepository implements DrawRepository {
 
   async saveCommitment(
     commitment: DrawCommitment,
-    context: DrawActorContext
-  ): Promise<{ readonly round: DrawRound; readonly replayed: boolean }> {
+    context: DrawActorContext,
+    options: { readonly overrideReason?: string } = {}
+  ): Promise<{ readonly round: DrawRound; readonly replayed: boolean; readonly gate: DrawCommitGate | null }> {
     // `commit_draw_from_seals_v1` takes ONLY what the treasurer computes: the
     // commitment and the digests it binds. The group, cycle, round, pot, reserve,
     // total rounds and the sealed set are read by the database from the draw's
@@ -354,16 +375,18 @@ export class SupabaseDrawRepository implements DrawRepository {
       p_idempotency_key: commitment.idempotencyKey,
       p_occurred_at: commitment.committedAt,
       // Pinned in the database so the derivation cannot be relabelled later.
-      p_protocol_version: commitment.protocolVersion
+      p_protocol_version: commitment.protocolVersion,
+      // The contribution gate is checked again at commit; null unless the treasurer gave a reason.
+      p_override_reason: options.overrideReason ?? null
     });
     if (error) {
       throw mapSupabaseError(error);
     }
-    const payload = data as { readonly round?: unknown; readonly replayed?: unknown } | null;
+    const payload = data as { readonly round?: unknown; readonly replayed?: unknown; readonly contributionGate?: unknown } | null;
     if (typeof payload?.replayed !== "boolean") {
       throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed commit result");
     }
-    return { round: parseRound(payload.round), replayed: payload.replayed };
+    return { round: parseRound(payload.round), replayed: payload.replayed, gate: parseCommitGate(payload.contributionGate) };
   }
 
   async saveReveal(reveal: DrawReveal, context: DrawActorContext): Promise<DrawRound> {

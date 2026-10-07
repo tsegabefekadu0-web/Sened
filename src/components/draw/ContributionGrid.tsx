@@ -209,6 +209,7 @@ export function ContributionGrid({ locale, state, myUserId, isTreasurer, labelFo
             <li>{tr("contributions.legendNotDue")}</li>
             <li>{tr("contributions.sourceNote")}</li>
             <li>{tr("contributions.noPartial")}</li>
+            <li>{tr("contributions.assignNote")}</li>
           </ul>
         </>
       )}
@@ -238,8 +239,8 @@ export function ContributionGrid({ locale, state, myUserId, isTreasurer, labelFo
                 </li>
               ))}
               {view.overrides.map((override) => (
-                <li key={override.drawId} data-testid="gate-override">
-                  {tr("contributions.gate.overrideRow", {
+                <li key={`${override.drawId}-${override.stage}`} data-testid="gate-override" data-stage={override.stage}>
+                  {tr(override.stage === "commit" ? "contributions.gate.commitOverrideRow" : "contributions.gate.overrideRow", {
                     date: day(override.at),
                     actor: who(override.actorId),
                     round: override.round,

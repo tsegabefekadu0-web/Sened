@@ -154,7 +154,7 @@ describe("where the gate bites", () => {
     expect(open).toMatch(/char_length\(clean_override\) not between 10 and 1000/);
   });
 
-  it("is not enforced at commit (the gate sits at open, which is the decision point)", () => {
+  it("does not touch commit itself: the commit-time re-check is the later 20261013100000 migration (draw.commit-gate.rpc-contract.test.ts)", () => {
     const commit = readFileSync(join(process.cwd(), DIR, "20261005100000_draw_cycles_and_member_seals.sql"), "utf8");
     expect(commit).not.toMatch(/contribution_gate/);
     expect(code).not.toMatch(/commit_draw_from_seals_v1/);
@@ -186,7 +186,7 @@ describe("nothing derived is stored, and nothing moves money", () => {
     expect(collateral).toMatch(/g\.round_no > winner_row\.win_round/);
   });
 
-  it("winners are split at their win so a post-win payment never clears a pre-win round", () => {
+  it("as shipped here, winners were split at their win (superseded by the post-win fill of 20261013100000; see draw.commit-gate.rpc-contract.test.ts)", () => {
     expect(body("sened_draw_cycle_member_rounds")).toMatch(/win_no is null or r > win_no or e_at\[i\] <= win_rev/);
   });
 });

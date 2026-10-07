@@ -187,7 +187,7 @@ describe("an override", () => {
     const opened = await built.service.openDraw({ cycleId: made.cycleId, idempotencyKey: key("open"), overrideReason: `  ${REASON}  ` }, as(TREASURER));
     expect(opened.gate).toEqual({ policy: "block", flagged: flags, overridden: true });
     expect(built.repository.gateOverrides()).toEqual([
-      { cycleId: made.cycleId, round: 2, drawId: opened.session.drawId, actorId: TREASURER, reason: REASON, flagged: flags }
+      { cycleId: made.cycleId, round: 2, drawId: opened.session.drawId, actorId: TREASURER, reason: REASON, flagged: flags, stage: "open" }
     ]);
   });
 

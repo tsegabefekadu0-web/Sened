@@ -46,7 +46,7 @@ import {
 import { loadCycleLedgerFigures, type LedgerFiguresResult } from "@/lib/draw/ledgerFigures";
 import { triggerHaptic } from "@/lib/draw/haptics";
 import { useActiveGroupPreference } from "@/lib/groups/useActiveGroup";
-import { previewGate } from "@/lib/draw/contributions";
+import { previewCommitGate, previewGate, type CommitGatePreview } from "@/lib/draw/contributions";
 import { DRAW_CONTRIBUTION_GATES } from "@/lib/draw/types";
 import type { DrawContributionGate, DrawCycleRecord, DrawGateFlag, DrawListEntry, DrawSessionView } from "@/lib/draw/types";
 import { translate, type MessageKey } from "@/lib/i18n";
@@ -200,6 +200,9 @@ function LiveDrawBody({
   const [gateConfirm, setGateConfirm] = useState(false);
   /** `block`: the reason for opening despite the flagged rounds. */
   const [overrideReason, setOverrideReason] = useState("");
+  /** The same two, for committing the sealed draw (the gate is checked again there). */
+  const [commitConfirm, setCommitConfirm] = useState(false);
+  const [commitReason, setCommitReason] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
 
@@ -422,6 +425,7 @@ function LiveDrawBody({
       : `${detail.cycle.cycleId}:${detail.draws.map((entry) => `${entry.drawId}${entry.state}`).join(",")}:${contributionsTick}`;
   useEffect(() => {
     setGateConfirm(false);
+    setCommitConfirm(false);
     if (contributionsKey === null || detail === null) {
       setContributions({ kind: "loading" });
       return;
@@ -614,16 +618,36 @@ function LiveDrawBody({
         writeDraft(session.drawId, current);
         setDraft(current);
       }
+      const gate =
+        contributions.kind === "ready" && contributions.view.cycleId === session.cycleId
+          ? previewCommitGate(contributions.view, session.drawId, session.round)
+          : null;
+      const reason = commitReason.trim();
+      if (gate !== null && gate.needsOverride && reason.length < 10) {
+        return setProblem({ key: "drawLive.gateOverrideShort" });
+      }
       const result = await commitDraw(
         {
           drawId: session.drawId,
           commitmentNonce: current.commitmentNonce,
           seed: current.seed,
-          idempotencyKey: current.commitKey
+          idempotencyKey: current.commitKey,
+          // Only sent when the gate asked for it; the database ignores a reason it does not need.
+          ...(gate !== null && gate.needsOverride ? { overrideReason: reason } : {})
         },
         deps
       );
-      if (!result.ok) return fail(result);
+      if (!result.ok) {
+        if (result.code === "contribution_gate_blocked") {
+          // The seals are still valid. The gate may have changed since the grid was read: show what the server now sees.
+          setProblem({ key: "drawLive.error.commitGateBlocked", detail: null });
+          setContributionsTick((value) => value + 1);
+          return;
+        }
+        return fail(result);
+      }
+      setCommitReason("");
+      setCommitConfirm(false);
       triggerHaptic("commitSealed");
       const committed = { ...current, committed: true };
       writeDraft(session.drawId, committed);
@@ -707,6 +731,16 @@ function LiveDrawBody({
   const gatePreview = contributions.kind === "ready" ? previewGate(contributions.view) : null;
   // The open button waits for the grid when a gate is in force, and for the owner/treasurer's
   // confirmation (warn) or reason (block) when something earlier is flagged.
+  const commitPreview =
+    contributions.kind === "ready" && session !== null && session.state === "sealing" && contributions.view.cycleId === session.cycleId
+      ? previewCommitGate(contributions.view, session.drawId, session.round)
+      : null;
+  // The commit button waits for the grid when a gate is in force, and for the owner/treasurer's
+  // confirmation (warn) or reason (block, for a pair the open override did not name).
+  const commitHeld =
+    (contributions.kind === "loading" && cycle !== null && cycle.contributionGate !== "off") ||
+    (commitPreview !== null && commitPreview.needsConfirm && !commitConfirm) ||
+    (commitPreview !== null && commitPreview.needsOverride && commitReason.trim().length < 10);
   const openHeld =
     (contributions.kind === "loading" && cycle !== null && cycle.contributionGate !== "off") ||
     (gatePreview !== null && gatePreview.needsConfirm && !gateConfirm) ||
@@ -1112,6 +1146,12 @@ function LiveDrawBody({
             onSeal={() => void sealAction()}
             onRelease={() => void releaseAction()}
             onCommit={() => void commitAction()}
+            commitGate={commitPreview}
+            commitHeld={commitHeld}
+            commitConfirm={commitConfirm}
+            onCommitConfirm={setCommitConfirm}
+            commitReason={commitReason}
+            onCommitReason={setCommitReason}
             onReveal={() => void revealAction()}
           />
         ) : drawId !== null && detail?.draws.find((entry) => entry.drawId === drawId)?.legacy ? (
@@ -1222,6 +1262,12 @@ function DrawPanel({
   onSeal,
   onRelease,
   onCommit,
+  commitGate,
+  commitHeld,
+  commitConfirm,
+  onCommitConfirm,
+  commitReason,
+  onCommitReason,
   onReveal
 }: {
   readonly t: Translate;
@@ -1235,6 +1281,13 @@ function DrawPanel({
   readonly onSeal: () => void;
   readonly onRelease: () => void;
   readonly onCommit: () => void;
+  /** What committing would meet in the contribution grid; `null` when the grid is not available or no gate applies. */
+  readonly commitGate: CommitGatePreview | null;
+  readonly commitHeld: boolean;
+  readonly commitConfirm: boolean;
+  readonly onCommitConfirm: (value: boolean) => void;
+  readonly commitReason: string;
+  readonly onCommitReason: (value: string) => void;
   readonly onReveal: () => void;
 }) {
   const eligible = session.eligible;
@@ -1356,9 +1409,72 @@ function DrawPanel({
               {t("drawLive.commitNeedOther")}
             </p>
           ) : null}
+          {commitGate !== null && commitGate.flagged.length > 0 ? (
+            <div
+              data-testid="commit-gate"
+              data-gate-policy={commitGate.policy}
+              data-gate-state={commitGate.needsOverride ? "blocked" : commitGate.carriedOver ? "carried" : "warn"}
+              role={commitGate.needsOverride ? "alert" : "status"}
+              className={NOTICE}
+            >
+              <p className="font-bold">
+                {t(
+                  commitGate.needsOverride
+                    ? "drawLive.commitGateBlockedTitle"
+                    : commitGate.carriedOver
+                      ? "drawLive.commitGateCarriedTitle"
+                      : "drawLive.gateWarnTitle"
+                )}
+              </p>
+              <p className="mt-1 font-normal">
+                {t(
+                  commitGate.needsOverride
+                    ? "drawLive.commitGateBlockedBody"
+                    : commitGate.carriedOver
+                      ? "drawLive.commitGateCarriedBody"
+                      : "drawLive.commitGateWarnBody",
+                  { count: commitGate.flagged.length }
+                )}
+              </p>
+              <ul data-testid="commit-gate-flagged" className="mt-1 list-disc pl-4 font-normal">
+                {flaggedByMember(commitGate.flagged).map(([memberId, rounds]) => (
+                  <li key={memberId}>{t("drawLive.gateFlaggedRow", { member: labelFor(memberId), rounds: rounds.join(", ") })}</li>
+                ))}
+              </ul>
+              {commitGate.needsConfirm ? (
+                <label className="mt-2 flex items-start gap-2 font-normal">
+                  <input
+                    type="checkbox"
+                    data-testid="commit-gate-confirm"
+                    checked={commitConfirm}
+                    onChange={(event) => onCommitConfirm(event.target.checked)}
+                    className="mt-0.5 h-4 w-4 accent-[#C6532B]"
+                  />
+                  <span>{t("drawLive.commitGateWarnConfirm")}</span>
+                </label>
+              ) : commitGate.needsOverride ? (
+                <label className="mt-2 block font-normal">
+                  <span className={LABEL}>{t("drawLive.commitGateReason")}</span>
+                  <textarea
+                    data-testid="commit-gate-reason"
+                    className={FIELD}
+                    rows={2}
+                    maxLength={1000}
+                    value={commitReason}
+                    onChange={(event) => onCommitReason(event.target.value)}
+                  />
+                  <span className={HINT}>{t("drawLive.gateOverrideNote")}</span>
+                </label>
+              ) : null}
+            </div>
+          ) : null}
           <p className={HINT}>{t("drawLive.seedNote")}</p>
-          <button type="button" data-testid="commit-button" className={BUTTON} disabled={busy !== null || needsOther} onClick={onCommit}>
-            {busy === "commit" ? t("drawLive.working") : t("drawLive.commitAction")}
+          <button type="button" data-testid="commit-button" className={BUTTON} disabled={busy !== null || needsOther || commitHeld} onClick={onCommit}>
+            {busy === "commit"
+              ? t("drawLive.working")
+              : commitGate?.needsOverride
+                ? t("drawLive.commitGateOverrideAction")
+                : t("drawLive.commitAction")}
           </button>
         </div>
       ) : null}

@@ -45,7 +45,12 @@ export const drawCommitRequestSchema = z
     commitmentNonce: entropySchema.optional(),
     seed: entropySchema.optional(),
     idempotencyKey: idempotencyKeySchema,
-    committedAt: timestampSchema.optional()
+    committedAt: timestampSchema.optional(),
+    /**
+     * Only meaningful under a `block` gate: an owner/treasurer's recorded reason for committing although
+     * an active member has a flagged earlier round that the override given at open did not name.
+     */
+    overrideReason: z.string().trim().min(10).max(1000).optional()
   })
   .strict()
   .superRefine((value, context) => {

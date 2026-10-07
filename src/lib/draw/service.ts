@@ -18,6 +18,7 @@ import type {
   DrawListEntry,
   DrawMember,
   DrawMemberNonce,
+  DrawCommitGate,
   DrawOpenGate,
   DrawRiskAssessment,
   DrawRound,
@@ -45,6 +46,8 @@ function defaultEntropy(): string {
 export interface DrawCommitResult {
   readonly round: DrawRound;
   readonly replayed: boolean;
+  /** What the gate found at commit; absent on a replay (nothing new was committed). */
+  readonly gate?: DrawCommitGate | null;
 }
 
 export interface DrawRevealResult {
@@ -115,6 +118,8 @@ export type CommitDrawInput = Omit<
   readonly commitmentNonce?: string;
   readonly seed?: string;
   readonly committedAt?: string;
+  /** Only meaningful under a `block` gate with something flagged at commit: the recorded reason (10..1000). */
+  readonly overrideReason?: string;
 };
 
 export class DrawService {
@@ -158,9 +163,10 @@ export class DrawService {
         }
       }
 
+      const { overrideReason, ...engineRequest } = request;
       const commitment = await createCommitment(
         {
-          ...request,
+          ...engineRequest,
           drawId: request.drawId ?? this.drawIdFactory(),
           commitmentNonce: request.commitmentNonce ?? this.entropyFactory(),
           seed: request.seed ?? this.entropyFactory(),
@@ -169,10 +175,15 @@ export class DrawService {
         },
         this.hasher
       );
-      const stored = await this.repository.saveCommitment(commitment, context);
+      const stored = await this.repository.saveCommitment(
+        commitment,
+        context,
+        overrideReason === undefined ? {} : { overrideReason }
+      );
       return {
         round: stored.round,
-        replayed: stored.replayed
+        replayed: stored.replayed,
+        gate: stored.gate
       };
     } catch (error) {
       throw mapDrawError(error);
@@ -490,6 +501,7 @@ export class DrawService {
       readonly commitmentNonce?: string;
       readonly idempotencyKey: string;
       readonly committedAt?: string;
+      readonly overrideReason?: string;
     },
     context: DrawActorContext
   ): Promise<DrawCommitResult> {
@@ -543,7 +555,8 @@ export class DrawService {
           members,
           priorWinnerIds: [],
           idempotencyKey: input.idempotencyKey,
-          committedAt: input.committedAt
+          committedAt: input.committedAt,
+          overrideReason: input.overrideReason
         },
         context
       );

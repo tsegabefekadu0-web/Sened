@@ -67,6 +67,8 @@ export interface GateOverride {
   readonly reason: string;
   /** Exactly which flagged (member, round) pairs were overridden. */
   readonly flagged: readonly DrawGateFlag[];
+  /** Where it was given: when the draw was opened, or when it was committed (§18.5). Older servers say nothing: `open`. */
+  readonly stage: "open" | "commit";
 }
 
 export interface CycleContributions {
@@ -227,7 +229,8 @@ export function parseCycleContributions(value: unknown): CycleContributions | nu
       !isUuid(override.actorId) ||
       !isRound(override.round) ||
       !isUuid(override.drawId) ||
-      typeof override.reason !== "string"
+      typeof override.reason !== "string" ||
+      (override.stage !== undefined && override.stage !== "open" && override.stage !== "commit")
     ) {
       return null;
     }
@@ -237,7 +240,8 @@ export function parseCycleContributions(value: unknown): CycleContributions | nu
       round: override.round,
       drawId: override.drawId.toLowerCase(),
       reason: override.reason,
-      flagged
+      flagged,
+      stage: override.stage === "commit" ? "commit" : "open"
     });
   }
   return {
@@ -295,6 +299,43 @@ export function previewGate(view: CycleContributions): ContributionGatePreview {
     round,
     flagged,
     needsOverride: view.contributionGate === "block" && flagged.length > 0,
+    needsConfirm: view.contributionGate === "warn" && flagged.length > 0
+  };
+}
+
+export interface CommitGatePreview {
+  readonly policy: DrawContributionGate;
+  /** The flagged (member, round) pairs before the draw's round, as the database will see them at commit. */
+  readonly flagged: readonly DrawGateFlag[];
+  /** The pairs the override given when this draw was opened named (empty when it was opened without one). */
+  readonly acknowledged: readonly DrawGateFlag[];
+  /** `block`, something flagged that the open override did not name: committing needs a reason. */
+  readonly needsOverride: boolean;
+  /** `block`, something flagged, and every pair is one the open override named: no new reason needed. */
+  readonly carriedOver: boolean;
+  /** `warn` with something flagged: committing needs a confirmation. */
+  readonly needsConfirm: boolean;
+}
+
+/**
+ * What committing the draw `drawId` (round `round`) would meet, for the screen to show before it asks
+ * the server. The same rule as the database: an override given at open still stands for the pairs it
+ * named, but not for a pair it did not (a set that merely shrank is covered; a set that gained a pair
+ * is not, even at the same size).
+ */
+export function previewCommitGate(view: CycleContributions, drawId: string, round: number): CommitGatePreview {
+  const flagged = view.contributionGate === "off" ? [] : flaggedBefore(view, round);
+  const open = view.overrides.find((override) => override.drawId === drawId.toLowerCase() && override.stage === "open");
+  const acknowledged = open === undefined ? [] : open.flagged;
+  const known = new Set(acknowledged.map((flag) => `${flag.memberId.toLowerCase()}:${flag.round}`));
+  const covered = flagged.every((flag) => known.has(`${flag.memberId.toLowerCase()}:${flag.round}`));
+  const block = view.contributionGate === "block" && flagged.length > 0;
+  return {
+    policy: view.contributionGate,
+    flagged,
+    acknowledged,
+    needsOverride: block && !covered,
+    carriedOver: block && covered,
     needsConfirm: view.contributionGate === "warn" && flagged.length > 0
   };
 }

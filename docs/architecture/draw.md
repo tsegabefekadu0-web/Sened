@@ -502,7 +502,7 @@ mode only, behind a demo banner; see §14 for the signed-in flow.
 | `GET /api/draw/draws/[drawId]` | any member | a draw in progress: seal hashes, and per member only whether a nonce was released |
 | `POST /api/draw/seals` | any eligible member, **for themselves** | `{ drawId, sealed }`; no member id |
 | `POST /api/draw/nonces` | any sealed member, **for themselves** | `{ drawId, nonce }`; only after the commit; never echoed |
-| `POST /api/draw/commits` | owner / treasurer | `{ drawId, seed?, commitmentNonce?, idempotencyKey }`; everything else is read from the database |
+| `POST /api/draw/commits` | owner / treasurer | `{ drawId, seed?, commitmentNonce?, idempotencyKey, overrideReason? }`; everything else is read from the database. The contribution gate is checked again here (§18.5): under `block` a flagged pair the override given at open did not name answers 409 `contribution_gate_blocked` with `flagged`, unless `overrideReason` (10..1000 characters) is given, which is recorded; the answer carries `contributionGate: { policy, flagged, overridden, carriedOver }` (null on a replay) |
 | `POST /api/draw/reveals` | owner / treasurer | `{ drawId, seed, idempotencyKey }`; the nonces are the stored ones |
 | `POST /api/draw/verify` | **any member** | deliberately not role-gated |
 | `GET /api/draw/rounds/[roundId]` | any member | published round + transcript |
@@ -546,7 +546,8 @@ so the method picks).
 `contribution-feed.attribution.test.tsx`, `home.attribution.test.tsx`, and for §18 `draw.contributions.test.ts`,
 `draw.contributions.client.test.ts`, `draw.contributions.rpc-contract.test.ts`,
 `draw.contributions.ui.test.tsx`, `draw.gate.service.test.ts`, `draw.gate.api.route.test.ts`, and for §17.4-17.5
-`ledger.attribution-channel.rpc-contract.test.ts`, `offline.attribution.autoretry.test.ts`,
+`ledger.attribution-channel.rpc-contract.test.ts`, and for §18.1 / §18.5 `draw.commit-gate.test.ts`,
+`draw.commit-gate.rpc-contract.test.ts`, `draw.commit-gate.ui.test.tsx`, `offline.attribution.autoretry.test.ts`,
 `offline.attribution.autoretry.console.test.tsx`, plus channel/note cases added to the attribution, record-form,
 feed, home, sync and read-route tests). The SQL itself is proven by
 `scripts/verify-migrations.sql` against a real Postgres 16, not by vitest. Counts
@@ -1167,8 +1168,11 @@ win pays nothing); one entry pays one round.
 
 **Update (§18).** This derivation is now one SQL function for every member and every
 round (`sened_draw_cycle_member_rounds`); `get_draw_cycle_collateral_v1` is built on it and
-its output is unchanged (the harness compares it with a verbatim copy of the old
-derivation). The paragraph above still describes a winner's later rounds exactly.
+its output was unchanged by that move (the harness compared it with a verbatim copy of the old
+derivation). **Update (§18.1, `20261013100000`):** a payment recorded after a win now first fills
+the earliest unmet round after the win that was open *when it was recorded*, then the earliest
+unmet round up to the win; the collateral view differs from the paragraph above only there. The
+paragraph above is otherwise still exact, including a winner's later rounds.
 
 `flagged` is a flag, not a verdict. It says the ledger cannot show the contribution,
 not that the member did not pay: they may have paid in a way not yet recorded, and the
@@ -1237,7 +1241,11 @@ database without the migration fails those reads.
 `supabase/migrations/20261011100000_contribution_grid_and_gate.sql`, proven by the
 "GRID", "COLLATERAL-GRID" and "GATE" checks in `scripts/verify-migrations.sql` (success
 marker `ALL CONTRIBUTION GRID AND GATE CHECKS PASSED`, also required by
-`scripts/verify-migrations.ps1`). New file only; existing cycles are `off`.
+`scripts/verify-migrations.ps1`). New file only; existing cycles are `off`. §18.1's assignment rule
+for a payment after a win and §18.2's "residual" (the gate was not re-checked at commit) were changed by
+`20261013100000_post_win_fill_and_commit_gate.sql` (marker `ALL POST-WIN FILL AND COMMIT GATE CHECKS
+PASSED`): see the rule in §18.1 and the commit-time gate in §18.5. The text of those two places below is
+the current behaviour.
 
 ### 18.1 The grid: every member, every round
 
@@ -1274,22 +1282,50 @@ treasurer has decided the round starts.
 provenance, else the current treasurer record; at least the cycle's contribution into `POT_CASH`;
 recorded on or after the cycle's start; not attributed to another cycle).
 
-**Assignment:** an entry whose attribution names this cycle **and** round pays that round (even one
-not yet due, which is then `met`). Otherwise, by order: the member's remaining entries, oldest first,
-each fill the earliest unmet **due** round whose previous round had been revealed *before the entry
-was recorded* (round 1 has no previous round, so only the cycle's start applies).
+**Assignment.** An entry whose attribution names this cycle **and** round pays that round (even one
+not yet due, which is then `met`): explicit attributions claim their rounds first. Every other qualifying
+entry is placed **one at a time in recorded order** (`recorded_at`, then entry id), each seeing only the
+explicit claims and the entries before it. One entry pays one round; there is no partial carry. Write `t`
+for the entry's recorded time; a round `r` is *reachable* when `r = 1` or round `r - 1` was revealed
+strictly before `t`, and *open before `t`* when its draw was opened strictly before `t`. A round that is
+claimed (explicitly, or by an earlier entry) is not available.
 
-**Winners, and why nothing about collateral changed.** For a member who won at round `w` (revealed
-at `W`) the entries are split at `W`: an entry recorded **after** `W` can only pay rounds after `w`,
-by exactly the old rule; an entry recorded **at or before** `W` can only pay rounds up to and
-including `w`. So a payment made after a member's win is never taken by one of their earlier rounds;
-a late payment for an earlier flagged round needs an explicit cycle+round attribution. The
-alternative (let it take the earliest unmet round) would have moved a winner's post-win rounds from
-`met` to `flagged` whenever an earlier round was unpaid, and would flap, because which round an entry
-pays would depend on whether a later round had been opened yet. `get_draw_cycle_collateral_v1` is
-rebuilt on the shared function and its output is unchanged: the harness compares it, for every
-winner on a multi-round timeline, with a verbatim copy of the pre-migration derivation, and the
-existing COLLATERAL 1-51 checks pass untouched.
+| the entry is | it pays |
+|---|---|
+| a non-winner's, or a winner's recorded at or before their reveal `W` | the earliest available, reachable round that is open now (a winner's only up to and including their win round `w`). **Unchanged since 20261011.** |
+| a winner's recorded **after** `W`: step 1 | the earliest available, reachable round **after `w` that was open before `t`** |
+| step 2, only if step 1 found none | the earliest available round **up to and including `w`** (all of them were revealed, hence open and reachable, before `W < t`) |
+| step 3, only if steps 1 and 2 found none (the prepayment) | the earliest available, reachable round after `w` that is open **now** but was not open before `t`. That is only ever the round that follows the last one revealed at `t`; the entry waits for it to open, as it always did |
+
+So post-win obligations keep their priority (step 1: a due, unmet round after the win is paid before an
+older missed one), and a payment that arrives when nothing after the win is due clears the member's
+earliest missed round instead of waiting for a round that may or may not come (step 2). It used to wait:
+until 20261011 a payment recorded after a win could only pay rounds after it, and a missed earlier round
+needed an explicit cycle+round attribution.
+
+**Why this does not flap.** The grid is recomputed on every read, so a rule that asked "what is open
+*now*" to choose between step 1 and step 2 would let a payment move: recorded while no post-win round
+was open it would clear the missed round, and the instant round `w + 1` opened it would jump there
+(the missed round flagged again, a round `met` that was not). The rule instead decides on the state *at
+the entry's own time*. An entry is placed by looking at (a) the explicit claims, (b) the entries before
+it, which by induction on the recorded order are already fixed, and (c) reveal times and open times that
+lie before `t`, which never change. Nothing recorded later is read, so once an entry has a round it keeps
+it whatever is opened, revealed or recorded afterwards. The single exception is the prepayment of step 3:
+it has no round until the next round opens, and then it takes exactly that one (it never moves between
+rounds; a non-winner's prepayment works the same way and always did). What *can* re-sort entries is a
+deliberate edit of the data: an explicit attribution claims its round and the entry that held it falls to
+its next choice, and a reversed payment stops counting so later entries close up. The harness
+(`FILL 1-10`) takes a snapshot of the grid after every step of a four-round timeline with three winners and
+asserts that every `met` cell keeps its entry in every later snapshot, including the step where round 2
+opens after a payment that cleared round 1.
+
+**Collateral.** `get_draw_cycle_collateral_v1` is unchanged and reads the same function. Its output now
+differs from the earlier derivation in exactly one situation: a winner who had an unmet round up to their
+win when a post-win payment was recorded with nothing after the win open and unmet. The payment used to
+wait for round `w + 1` and make it `met` when it opened; it now clears the earlier round, so `w + 1` is
+flagged when it opens unless something else pays it. The harness compares every winner's `owed` with a
+verbatim copy of the previous derivation and asserts the differing rounds exactly (empty before round 2
+opens; round 2 for the first winner after; round 3 for the second), and that everything else is identical.
 
 The result is `{ cycleId, groupId, totalRounds, contributionAmount, startedAt, contributionGate,
 nextRound, flaggedCount, rounds: [{ round, dueAt, revealedAt }], members: [{ memberId, active,
@@ -1339,10 +1375,10 @@ clock starts), when members start sealing, and when the treasurer commits to run
 Refusing at commit would let the owner open the ceremony, gather every member's seal and only then
 find the block; one override record per opened draw is also a cleaner audit than one per commit retry.
 Replays by idempotency key and the continuation of a draw that is already sealing for the round return
-the existing session and are not gated again (nothing new is opened). **Residual:** a flag that
-appears *after* a draw was opened (say a payment is reversed) is not re-checked at commit, and a
-policy switched to `block` while a draw is already sealing does not stop that draw; the grid keeps
-showing the flag. `commit_draw_from_seals_v1` is unchanged.
+the existing session and are not gated again (nothing new is opened). **Residual (closed by
+20261013, §18.5):** this migration did not re-check at commit, so a flag that appeared after the open or a
+policy switched to `block` while members were sealing did not stop the draw. `commit_draw_from_seals_v1`
+now checks again.
 
 **`/draw` opening a draw:** under `warn` or `block`, when something earlier is flagged, a notice
 (`role="alert"` for block) says how many rounds, lists each member and their flagged rounds, and holds
@@ -1358,6 +1394,7 @@ anyway, the refusal is shown in words and the grid is read again.
 | `set_draw_cycle_contribution_gate_v1` | owner or treasurer | `auth.uid()` via `sened_ledger_can_manage_group` |
 | `create_draw_cycle_v1`, `open_draw_v1` | owner or treasurer | as before; the new parameters are optional |
 | `get_draw_cycle_collateral_v1` | any active member | unchanged |
+| `commit_draw_from_seals_v1` | owner or treasurer | `auth.uid()` via `sened_ledger_can_manage_group`; the optional `p_override_reason` is considered only after that |
 
 `create_draw_cycle_v1` and `open_draw_v1` change arity, so the old signatures are **dropped** before
 the new ones are created (the same device the bank and commit migrations used; a second overload
@@ -1372,4 +1409,55 @@ ledger.
 Apply the migration together with the application release. The new application sends
 `p_contribution_gate` and `p_override_reason` and reads `/api/draw/contributions`; the previous
 application calls the old arities, which no longer exist. A client that reads a cycle from a server
-without the migration treats the missing `contributionGate` as `off`.
+without the migration treats the missing `contributionGate` as `off`. `20261013100000` is deployed the
+same way: the new application sends `p_override_reason` on every commit (null when none), and the previous
+application calls the nine-argument commit, which that migration drops.
+
+### 18.5 The gate at commit
+
+`commit_draw_from_seals_v1` gains an optional trailing `p_override_reason text default null` (the nine-argument
+signature is dropped first, as in §18.3, so PostgREST has one function of that name). After the role check,
+the reason check, the replay by idempotency key and the existing seal checks, and before the commitment is
+inserted, it takes a share lock on the cycle (serialising with policy changes), reads the *effective* policy and
+the flagged (active member, round before this draw's round) pairs **now**, and decides:
+
+| policy | at commit |
+|---|---|
+| `off` | nothing is computed |
+| `warn` | allowed; the pairs are returned in `contributionGate.flagged` and `/draw` asks for a confirmation first |
+| `block`, nothing flagged | allowed |
+| `block`, every flagged pair is one the override **given when this draw was opened** named | allowed, no new reason (`carriedOver: true`, nothing recorded) |
+| `block`, some flagged pair that override did not name (or the draw was opened without one) | refused with `draw_contribution_gate_blocked` (`P0001`, DETAIL = every flagged pair; 409 `contribution_gate_blocked` with `flagged`), unless `p_override_reason` (10..1000 characters, trimmed) is given: the commitment is written and the override is recorded with every pair flagged now and `stage = 'commit'` |
+
+"Covered" is set containment, not a count: the flagged set may be the same or smaller than the recorded one,
+but one new pair (a reversed payment) uncovers it even when the set is no larger (a payment recorded for one
+member and another's reversed leaves the size alone and is still refused). A draw opened under `off` or `warn`
+records no override, so a flag found at commit after the policy was switched to `block` always needs a
+reason. A supplied reason must be 10..1000 characters even when it turns out not to be needed
+(`draw_override_reason_invalid`); one that is not needed is not recorded; the role is checked first, so a plain
+member, an outsider and an anonymous caller are refused before the reason is read. A replay of a commit by its
+idempotency key returns the existing commitment and records nothing.
+
+**One table, a stage column, not a sibling table.** An override at commit is the same fact as one at open
+(an owner or treasurer let this draw proceed past this named set of flags, with a reason), read by the same list
+and compared with the same recorded set. A sibling table would copy the table, its triggers, its read policy and
+the union that answers "the override in force for this draw". So `draw_contribution_gate_overrides` gains
+`stage text not null default 'open' check (stage in ('open', 'commit'))`, and the unique constraint on `draw_id`
+becomes unique `(draw_id, stage)`: at most one override per draw per stage. Existing rows are `open`. The grid
+response (`overrides`) gains `stage` on each entry (an older server omits it and a client reads that as `open`),
+and `/draw` lists a commit override as "committed round R despite ..." beside the ones at open.
+
+**Members are not stranded.** A refused commit writes nothing, so the seals stay stored and valid; members need
+do nothing again. The treasurer can record the missing payment (the flag clears by itself) and commit with no
+override, or commit with a reason. The Commit control on `/draw` reads the same grid and the draw's open override
+(`previewCommitGate`) and shows, before the request, the flagged members and rounds: an alert and a reason box
+when a new pair needs a reason (the button then reads "Commit the draw with this reason" and waits for 10
+characters), a status with a confirmation tick under `warn`, and a quiet note that the open override still
+covers the rounds when it does. If the grid was stale and the server refuses anyway, the refusal is shown in words
+("the seals stay valid"), and the grid is read again. English and Amharic: `drawLive.commitGate*`,
+`drawLive.error.commitGateBlocked`, `contributions.gate.commitOverrideRow`.
+
+**Residual, stated plainly.** The gate is read when the commit is made; a payment reversed between the commit
+and the reveal does not undo a commit that was allowed, and neither reveal nor payout re-reads it. The
+derivation is a snapshot at the moment of the call, not a lock on the ledger, so a payment recorded in the same
+instant may or may not be seen. The default stays `off`.

@@ -25,6 +25,7 @@ import {
   isDrawProtocolVersion,
   type DrawContributionGate,
   type DrawCycleRecord,
+  type DrawCommitGate,
   type DrawGateFlag,
   type DrawOpenGate,
   type DrawListEntry,
@@ -310,6 +311,12 @@ export interface CommitInput {
   readonly commitmentNonce: string;
   readonly seed: string;
   readonly idempotencyKey: string;
+  /**
+   * Under a `block` gate with a flagged earlier round that the override given at open did not name, the
+   * server answers 409 `contribution_gate_blocked` (with `flagged`) unless this reason (10..1000
+   * characters) is given, which it records.
+   */
+  readonly overrideReason?: string;
 }
 
 /**
@@ -320,11 +327,23 @@ export interface CommitInput {
 export async function commitDraw(
   input: CommitInput,
   deps: AuthedFetchDeps = {}
-): Promise<DrawResult<{ readonly round: WireRound; readonly replayed: boolean }>> {
+): Promise<DrawResult<{ readonly round: WireRound; readonly replayed: boolean; readonly gate: DrawCommitGate | null }>> {
   const result = await call("/api/draw/commits", { method: "POST", body: JSON.stringify(input) }, deps);
   if (!result.ok) return result;
   if (!isWireRound(result.data.round)) return badResponse(result.status);
-  return { ok: true, status: result.status, data: { round: result.data.round, replayed: result.data.replayed === true } };
+  return {
+    ok: true,
+    status: result.status,
+    data: { round: result.data.round, replayed: result.data.replayed === true, gate: readCommitGate(result.data.contributionGate) }
+  };
+}
+
+function readCommitGate(value: unknown): DrawCommitGate | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  const flagged = parseFlags(row.flagged);
+  if (!isDrawContributionGate(row.policy) || typeof row.overridden !== "boolean" || flagged === null) return null;
+  return { policy: row.policy, flagged, overridden: row.overridden, carriedOver: row.carriedOver === true };
 }
 
 /**

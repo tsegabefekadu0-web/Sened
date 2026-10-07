@@ -1189,9 +1189,9 @@ export const en = {
   "contributions.gate.policy.off": "Off",
   "contributions.gate.policy.warn": "Warn",
   "contributions.gate.policy.block": "Block",
-  "contributions.gate.explain.off": "Opening a draw does not look at contributions.",
-  "contributions.gate.explain.warn": "Opening a draw lists the flagged earlier rounds and asks for a confirmation.",
-  "contributions.gate.explain.block": "A draw cannot be opened while an active member has a flagged earlier round, unless the owner or treasurer gives a reason, which is recorded.",
+  "contributions.gate.explain.off": "Opening or committing a draw does not look at contributions.",
+  "contributions.gate.explain.warn": "Opening or committing a draw lists the flagged earlier rounds and asks for a confirmation.",
+  "contributions.gate.explain.block": "A draw cannot be opened or committed while an active member has a flagged earlier round, unless the owner or treasurer gives a reason, which is recorded. A reason given when the draw was opened still covers the same rounds when it is committed, but not a round that has been flagged since.",
   "contributions.gate.change": "Change the policy",
   "contributions.gate.changeTo": "New policy",
   "contributions.gate.reason": "Reason (at least 10 characters)",
@@ -1202,6 +1202,8 @@ export const en = {
   "contributions.gate.historyEmpty": "No policy change or override has been recorded.",
   "contributions.gate.eventRow": "{date}: {actor} changed the gate from {from} to {to}. Reason: {reason}",
   "contributions.gate.overrideRow": "{date}: {actor} opened round {round} despite {count} flagged round(s) ({who}). Reason: {reason}",
+  "contributions.gate.commitOverrideRow": "{date}: {actor} committed round {round} despite {count} flagged round(s) ({who}). Reason: {reason}",
+  "contributions.assignNote": "A payment pays the earliest unmet round that was already due when it was recorded. After a member's win it pays the rounds after the win first, and otherwise clears the earliest round they missed. Once placed, it does not move when later rounds open; only a deliberate correction (attributing a round, reversing a payment) can change it.",
   "contributions.working": "Working…",
   "drawLive.gateLabel": "Contribution gate",
   "drawLive.gateHint": "Decides whether opening a draw looks at unmet earlier rounds. The owner or treasurer can change it later, with a recorded reason.",
@@ -1219,7 +1221,16 @@ export const en = {
   "drawLive.gateOverrideAction": "Open round {round} with this reason",
   "drawLive.gateOverrideNote": "The reason, your name and the flagged rounds are recorded where every member can read them.",
   "drawLive.gateOverrideShort": "Please give a reason of at least 10 characters.",
-  "drawLive.error.gateBlocked": "This draw cannot be opened yet: an active member has a flagged earlier round. Give a reason to open it anyway."
+  "drawLive.error.gateBlocked": "This draw cannot be opened yet: an active member has a flagged earlier round. Give a reason to open it anyway.",
+  "drawLive.commitGateBlockedTitle": "Committing this draw is blocked",
+  "drawLive.commitGateBlockedBody": "{count} earlier round(s) are flagged and were not covered by the reason given when this draw was opened. The seals members have already made stay valid: record the missing payment, or give a reason, which is recorded for the whole group, to commit anyway.",
+  "drawLive.commitGateWarnBody": "{count} earlier round(s) have no qualifying contribution attributed. You can still commit this draw.",
+  "drawLive.commitGateCarriedTitle": "Already accepted when the draw was opened",
+  "drawLive.commitGateCarriedBody": "{count} earlier round(s) are still flagged, but each was named in the reason recorded when this draw was opened, so no new reason is needed.",
+  "drawLive.commitGateWarnConfirm": "I have seen the flagged rounds and still want to commit this draw.",
+  "drawLive.commitGateReason": "Reason for committing anyway (at least 10 characters)",
+  "drawLive.commitGateOverrideAction": "Commit the draw with this reason",
+  "drawLive.error.commitGateBlocked": "This draw cannot be committed yet: an active member has a flagged earlier round that was not covered when it was opened. The seals stay valid. Record the payment, or give a reason to commit anyway."
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -2400,9 +2411,9 @@ const am: Record<MessageKey, string> = {
   "contributions.gate.policy.off": "ጠፍቷል",
   "contributions.gate.policy.warn": "ማስጠንቀቂያ",
   "contributions.gate.policy.block": "ማገድ",
-  "contributions.gate.explain.off": "እጣ ሲከፈት መዋጮ አይመረመርም።",
-  "contributions.gate.explain.warn": "እጣ ሲከፈት ምልክት የተደረገባቸው ቀደምት ዙሮች ይዘረዘራሉ፤ ማረጋገጫም ይጠየቃል።",
-  "contributions.gate.explain.block": "ንቁ አባል ምልክት የተደረገበት ቀደም ያለ ዙር እስካለው ድረስ እጣ መክፈት አይቻልም፤ ባለቤቱ ወይም ገንዘብ ያዡ ምክንያት ካልሰጡ በቀር፤ ምክንያቱም ይመዘገባል።",
+  "contributions.gate.explain.off": "እጣ ሲከፈት ወይም ሲቆለፍ መዋጮ አይመረመርም።",
+  "contributions.gate.explain.warn": "እጣ ሲከፈት ወይም ሲቆለፍ ምልክት የተደረገባቸው ቀደምት ዙሮች ይዘረዘራሉ፤ ማረጋገጫም ይጠየቃል።",
+  "contributions.gate.explain.block": "ንቁ አባል ምልክት የተደረገበት ቀደም ያለ ዙር እስካለው ድረስ እጣ መክፈት ወይም መቆለፍ አይቻልም፤ ባለቤቱ ወይም ገንዘብ ያዡ ምክንያት ካልሰጡ በቀር፤ ምክንያቱም ይመዘገባል። እጣው ሲከፈት የተሰጠ ምክንያት እጣው ሲቆለፍ ተመሳሳዮቹን ዙሮች ይሸፍናል፤ ከዚያ በኋላ ምልክት የተደረገበትን ዙር ግን አይሸፍንም።",
   "contributions.gate.change": "ፖሊሲውን ቀይር",
   "contributions.gate.changeTo": "አዲስ ፖሊሲ",
   "contributions.gate.reason": "ምክንያት (ቢያንስ 10 ቁምፊ)",
@@ -2413,6 +2424,8 @@ const am: Record<MessageKey, string> = {
   "contributions.gate.historyEmpty": "ምንም የፖሊሲ ለውጥ ወይም ማለፊያ አልተመዘገበም።",
   "contributions.gate.eventRow": "{date}፦ {actor} በሩን ከ{from} ወደ {to} ቀይሯል። ምክንያት፦ {reason}",
   "contributions.gate.overrideRow": "{date}፦ {actor} ምልክት የተደረገባቸው {count} ዙር(ሮች) ({who}) ቢኖሩም ዙር {round}ን ከፍቷል። ምክንያት፦ {reason}",
+  "contributions.gate.commitOverrideRow": "{date}፦ {actor} ምልክት የተደረገባቸው {count} ዙር(ሮች) ({who}) ቢኖሩም ዙር {round}ን ቆልፏል። ምክንያት፦ {reason}",
+  "contributions.assignNote": "ክፍያ ሲመዘገብ ጊዜው የደረሰውን ቀዳሚውን ያልተሟላ ዙር ይከፍላል። አባሉ ካሸነፈ በኋላ መጀመሪያ ከድሉ በኋላ ያሉትን ዙሮች ይከፍላል፤ አለበለዚያ ያመለጠውን ቀዳሚ ዙር ያጠራል። አንዴ ከተመደበ በኋላ ሌሎች ዙሮች ሲከፈቱ አይንቀሳቀስም፤ ሊቀይረው የሚችለው ሆን ተብሎ የሚደረግ ማስተካከያ ብቻ ነው (ዙር መመደብ ወይም ክፍያ መሻር)።",
   "contributions.working": "በመስራት ላይ…",
   "drawLive.gateLabel": "የመዋጮ በር",
   "drawLive.gateHint": "እጣ ሲከፈት ያልተሟሉ ቀደምት ዙሮች ይመረመሩ እንደሆነ ይወስናል። ባለቤቱ ወይም ገንዘብ ያዡ በኋላ ሊቀይረው ይችላል፤ ምክንያቱም ይመዘገባል።",
@@ -2430,7 +2443,16 @@ const am: Record<MessageKey, string> = {
   "drawLive.gateOverrideAction": "በዚህ ምክንያት ዙር {round}ን ክፈት",
   "drawLive.gateOverrideNote": "ምክንያቱ፣ ስምዎና ምልክት የተደረገባቸው ዙሮች ማንኛውም አባል ሊያነበው በሚችልበት ቦታ ይመዘገባሉ።",
   "drawLive.gateOverrideShort": "ቢያንስ 10 ቁምፊ ያለው ምክንያት ይስጡ።",
-  "drawLive.error.gateBlocked": "ይህ እጣ ገና ሊከፈት አይችልም፦ ንቁ አባል ምልክት የተደረገበት ቀደም ያለ ዙር አለው። ለማንኛውም ለመክፈት ምክንያት ይስጡ።"
+  "drawLive.error.gateBlocked": "ይህ እጣ ገና ሊከፈት አይችልም፦ ንቁ አባል ምልክት የተደረገበት ቀደም ያለ ዙር አለው። ለማንኛውም ለመክፈት ምክንያት ይስጡ።",
+  "drawLive.commitGateBlockedTitle": "ይህን እጣ መቆለፍ ታግዷል",
+  "drawLive.commitGateBlockedBody": "{count} ቀደምት ዙር(ሮች) ምልክት ተደርጎባቸዋል፤ ይህ እጣ ሲከፈት በተሰጠው ምክንያትም አልተሸፈኑም። አባላት ያደረጓቸው ማሸጊያዎች የሚሰሩ ሆነው ይቆያሉ፦ የጎደለውን ክፍያ ይመዝግቡ፤ ወይም ለማንኛውም ለመቆለፍ ምክንያት ይስጡ፤ ምክንያቱ ለቡድኑ በሙሉ ይመዘገባል።",
+  "drawLive.commitGateWarnBody": "{count} ቀደምት ዙር(ሮች) ብቁ መዋጮ አልተሰጣቸውም። አሁንም ይህን እጣ መቆለፍ ይችላሉ።",
+  "drawLive.commitGateCarriedTitle": "እጣው ሲከፈት ተቀባይነት አግኝተዋል",
+  "drawLive.commitGateCarriedBody": "{count} ቀደምት ዙር(ሮች) አሁንም ምልክት ተደርጎባቸዋል፤ ነገር ግን እያንዳንዳቸው ይህ እጣ ሲከፈት በተመዘገበው ምክንያት ውስጥ ተጠቅሰዋል፤ ስለዚህ አዲስ ምክንያት አያስፈልግም።",
+  "drawLive.commitGateWarnConfirm": "ምልክት የተደረገባቸውን ዙሮች አይቻለሁ፤ አሁንም ይህን እጣ መቆለፍ እፈልጋለሁ።",
+  "drawLive.commitGateReason": "ለማንኛውም ለመቆለፍ ምክንያት (ቢያንስ 10 ቁምፊ)",
+  "drawLive.commitGateOverrideAction": "በዚህ ምክንያት እጣውን ቆልፍ",
+  "drawLive.error.commitGateBlocked": "ይህ እጣ ገና ሊቆለፍ አይችልም፦ ንቁ አባል እጣው ሲከፈት ያልተሸፈነ ምልክት የተደረገበት ቀደም ያለ ዙር አለው። ማሸጊያዎቹ የሚሰሩ ሆነው ይቆያሉ። ክፍያውን ይመዝግቡ፤ ወይም ለማንኛውም ለመቆለፍ ምክንያት ይስጡ።"
 };
 
 export type TranslationVariables = Record<string, string | number | boolean | null | undefined>;

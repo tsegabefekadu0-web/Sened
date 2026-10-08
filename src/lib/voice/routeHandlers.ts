@@ -9,8 +9,8 @@ import {
   provisionalContributionSchema,
   transcriptionRequestSchema
 } from "./schemas";
-import { isSttConfigured, type SpeechToTextProvider } from "./stt";
-import { isTtsConfigured, isTtsSpeed, type TextToSpeechProvider } from "./tts";
+import type { SpeechToTextProvider } from "./stt";
+import { isTtsSpeed, type TextToSpeechProvider } from "./tts";
 import { VOICE_LANGUAGES } from "./types";
 
 /**
@@ -253,9 +253,9 @@ export function createCapabilitiesHandler(
     return Response.json(
       {
         sttProvider: stt.name,
-        sttConfigured: stt.isConfigured && isSttConfigured(),
+        sttConfigured: stt.isConfigured,
         ttsProvider: tts.name,
-        ttsConfigured: tts.isConfigured && isTtsConfigured(),
+        ttsConfigured: tts.isConfigured,
         languages: [...VOICE_LANGUAGES]
       },
       { status: 200, headers: { "Cache-Control": "no-store" } }

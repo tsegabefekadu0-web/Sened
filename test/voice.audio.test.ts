@@ -13,7 +13,7 @@ import {
   MAX_CAPTURE_MS,
   MIN_CAPTURE_MS
 } from "@/lib/voice/waveform";
-import { AUDIO_MIME_TYPES, isSupportedAudioMimeType, isSttConfigured, UnconfiguredSpeechToTextProvider, VoxideSpeechToTextProvider, createSpeechToTextProvider } from "@/lib/voice/stt";
+import { AUDIO_MIME_TYPES, isSupportedAudioMimeType } from "@/lib/voice/stt";
 import { TTS_SPEEDS, UnconfiguredTextToSpeechProvider, createTextToSpeechProvider, isTtsConfigured, isTtsSpeed } from "@/lib/voice/tts";
 import { VoiceProviderError, isVoiceProviderError, retryAfterHeader } from "@/lib/voice/errors";
 
@@ -192,138 +192,6 @@ describe("negotiateMimeType", () => {
 
   it("returns null when nothing is supported, so the caller can say so", () => {
     expect(negotiateMimeType(AUDIO_MIME_TYPES, () => false)).toBeNull();
-  });
-});
-
-describe("the fail-closed STT provider", () => {
-  it("is the default when nothing is configured", () => {
-    const provider = createSpeechToTextProvider({});
-    expect(provider.isConfigured).toBe(false);
-    expect(provider.name).toBe("unconfigured-stt");
-  });
-
-  it("THROWS PROVIDER_NOT_CONFIGURED instead of returning a transcript", async () => {
-    await expect(new UnconfiguredSpeechToTextProvider().transcribe()).rejects.toMatchObject({
-      code: "PROVIDER_NOT_CONFIGURED"
-    });
-  });
-
-  it("does not construct a real client from a partial credential", () => {
-    expect(createSpeechToTextProvider({ VOXIDE_API_URL: "https://voxide.test/stt" }).isConfigured).toBe(
-      false
-    );
-    expect(createSpeechToTextProvider({ VOXIDE_API_KEY: "secret" }).isConfigured).toBe(false);
-  });
-
-  it("constructs a real client only when both halves are present", () => {
-    const provider = createSpeechToTextProvider({
-      VOXIDE_API_URL: "https://voxide.test/stt",
-      VOXIDE_API_KEY: "secret"
-    });
-    expect(provider.isConfigured).toBe(true);
-    expect(provider.name).toBe("voxide-stt");
-  });
-
-  it("reports configuration without leaking the key", () => {
-    expect(isSttConfigured({})).toBe(false);
-    expect(isSttConfigured({ VOXIDE_API_URL: "x", VOXIDE_API_KEY: "y" })).toBe(true);
-  });
-});
-
-describe("the real Voxide STT client fails closed on every fault", () => {
-  const config = { endpoint: "https://voxide.test/stt", apiKey: "k" };
-
-  it("rejects an unsupported language", async () => {
-    const provider = new VoxideSpeechToTextProvider(config);
-    await expect(
-      provider.transcribe({
-        audioBase64: "QUJD",
-        mimeType: "audio/webm",
-        language: "fr" as never
-      })
-    ).rejects.toMatchObject({ code: "UNSUPPORTED_LANGUAGE" });
-  });
-
-  it("rejects an empty or oversized audio payload", async () => {
-    const provider = new VoxideSpeechToTextProvider(config);
-    await expect(
-      provider.transcribe({ audioBase64: "", mimeType: "audio/webm", language: "am" })
-    ).rejects.toMatchObject({ code: "INVALID_AUDIO" });
-  });
-
-  it("maps a network fault to PROVIDER_TIMEOUT, never to an empty transcript", async () => {
-    const provider = new VoxideSpeechToTextProvider({
-      ...config,
-      fetchImpl: () => Promise.reject(new Error("ECONNREFUSED"))
-    });
-    await expect(
-      provider.transcribe({ audioBase64: "QUJD", mimeType: "audio/webm", language: "am" })
-    ).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT" });
-  });
-
-  it("surfaces a 429 with a Retry-After", async () => {
-    const provider = new VoxideSpeechToTextProvider({
-      ...config,
-      fetchImpl: () =>
-        Promise.resolve(
-          new Response("{}", { status: 429, headers: { "retry-after": "30" } })
-        )
-    });
-    await expect(
-      provider.transcribe({ audioBase64: "QUJD", mimeType: "audio/webm", language: "am" })
-    ).rejects.toMatchObject({ code: "PROVIDER_RATE_LIMITED", retryAfterSeconds: 30 });
-  });
-
-  it("rejects a malformed body rather than half-parsing it", async () => {
-    const provider = new VoxideSpeechToTextProvider({
-      ...config,
-      fetchImpl: () => Promise.resolve(new Response("not json", { status: 200 }))
-    });
-    await expect(
-      provider.transcribe({ audioBase64: "QUJD", mimeType: "audio/webm", language: "am" })
-    ).rejects.toMatchObject({ code: "PROVIDER_REJECTED" });
-  });
-
-  it("rejects a 200 with no transcript — silence is not a transcript", async () => {
-    const provider = new VoxideSpeechToTextProvider({
-      ...config,
-      fetchImpl: () => Promise.resolve(Response.json({ confidence: 0.9 }))
-    });
-    await expect(
-      provider.transcribe({ audioBase64: "QUJD", mimeType: "audio/webm", language: "am" })
-    ).rejects.toMatchObject({ code: "PROVIDER_REJECTED" });
-  });
-
-  it("returns a real transcript when the provider genuinely answers", async () => {
-    const provider = new VoxideSpeechToTextProvider({
-      ...config,
-      fetchImpl: () =>
-        Promise.resolve(Response.json({ transcript: "equb dugum birr", confidence: 0.82, language: "om" }))
-    });
-    const result = await provider.transcribe({
-      audioBase64: "QUJD",
-      mimeType: "audio/webm",
-      language: "om"
-    });
-    expect(result).toEqual({
-      transcript: "equb dugum birr",
-      confidence: 0.82,
-      provider: "voxide-stt",
-      detectedLanguage: "om"
-    });
-  });
-
-  it("clamps an out-of-range confidence instead of trusting it", async () => {
-    const provider = new VoxideSpeechToTextProvider({
-      ...config,
-      fetchImpl: () => Promise.resolve(Response.json({ transcript: "x", confidence: 7 }))
-    });
-    const result = await provider.transcribe({
-      audioBase64: "QUJD",
-      mimeType: "audio/webm",
-      language: "am"
-    });
-    expect(result.confidence).toBe(1);
   });
 });
 

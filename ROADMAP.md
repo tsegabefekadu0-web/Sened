@@ -22,7 +22,7 @@
 ```mermaid
 graph TD
     M1["Milestone 1<br/>🎨 Indigenous Design System & Shell"] --> M2["Milestone 2<br/>🛡️ Double-Entry Ledger & Bank Verification (Links.et)"]
-    M2 --> M3["Milestone 3<br/>🎙️ Zero-Trust Voice Pipeline (Voxide STT/TTS)"]
+    M2 --> M3["Milestone 3<br/>🎙️ Zero-Trust Voice Pipeline (Addis AI Amharic STT/TTS, Voxide English assistant)"]
     M3 --> M4["Milestone 4<br/>🎲 Verifiably Fair Lottery Draw Engine (Abebe et al.)"]
     M4 --> M5["Milestone 5<br/>📚 ScholarXIV Governance Copilot"]
     M5 --> M6["Milestone 6<br/>🚀 PWA Offline Sync, Testing & EthioDeploy"]
@@ -75,20 +75,20 @@ graph TD
 
 ---
 
-### Milestone 3: Zero-Trust Voice Pipeline (Voxide STT & TTS)
+### Milestone 3: Zero-Trust Voice Pipeline (Addis AI STT & TTS, Voxide English assistant)
 **Target:** Enable seamless Amharic and Afaan Oromoo spoken contribution logging and spoken audio financial balance sheets.
 
-- [ ] **3.1 Spoken Contribution Logging (Voxide STT)**:
-  - Status: the `getUserMedia`/`MediaRecorder` recorder with a live `AnalyserNode` waveform (in the mic-dock modal), the Amharic / Afaan Oromoo parser and the zero-trust hand-off are implemented and tested. Voxide STT (`/api/voice/transcribe`) is inert until `VOXIDE_API_URL` / `VOXIDE_API_KEY` are set; otherwise the modal relies on browser speech recognition where the device supports it, or a typed transcript. Afaan Oromoo support is real in the parser (Oromo numerals, Gecal month names, Latin-script provider/verb forms; `test/voice.numerals.test.ts`, `test/voice.parser.test.ts`), but the app UI and spoken digest are English/Amharic only, and Oromo speech recognition depends on the browser or Voxide.
+- [ ] **3.1 Spoken Contribution Logging (Addis AI STT)**:
+  - Status: the `getUserMedia`/`MediaRecorder` recorder with a live `AnalyserNode` waveform (in the mic-dock modal), the Amharic / Afaan Oromoo parser and the zero-trust hand-off are implemented and tested. Addis AI STT (`/api/voice/transcribe`, Amharic, 60 s per clip) is inert until `ADDIS_AI_API_KEY` is set; otherwise the modal relies on browser speech recognition where the device supports it, or a typed transcript. Afaan Oromoo support is real in the parser (Oromo numerals, Gecal month names, Latin-script provider/verb forms; `test/voice.numerals.test.ts`, `test/voice.parser.test.ts`), but the app UI and spoken digest are English/Amharic only, and Oromo speech recognition depends on the browser (Addis AI documents no Oromo STT code). Voxide is the English voice assistant, a client-side widget.
   - Web Audio API microphone recorder with real-time waveform visualizer inside the bottom microphone dock.
   - Entity extraction parser for Ethiopian monetary phrasing:
     - *"ለመስከረም ወር እቁብ 5,000 ብር በቴሌብር አስገብቻለሁ፣ ቁጥሩ 9BF42 ነው"* $\rightarrow$ `{ month: "Meskerem", amount: 5000, channel: "telebirr", tx_ref: "9BF42" }`.
   - **Zero-Trust Rule**: Voice extracted data is strictly provisional until Milestone 2 Links.et verification succeeds.
-- [ ] **3.2 Spoken Audio Balance Sheet (*አድምጥ* - Listen via Voxide TTS)**:
+- [ ] **3.2 Spoken Audio Balance Sheet (*አድምጥ* - Listen via Addis AI TTS)**:
   - Top *አድምጥ* button synthesizes an Amharic audio digest of the current Equb/Iddir treasury status:
     - *"የቦሌ መድኃኔዓለም እቁብ ዛሬ 17 አባላት አስገብተዋል። ጠቅላላ ሒሳብ 175,000 ብር ነው። 3 አባላት ይቀራሉ። ቀጣይ እጣ እሁድ ይወጣል።"*
   - Native browser audio playback with play, pause, and speed controls.
-  - Status: the digest modal (play / pause / speed, progress from real `speechSynthesis` boundary events) reads the signed-in group's real ledger totals, or labelled sample figures when signed out. It speaks through the browser's `speechSynthesis` and is disabled when the device has no voice for the language; the Voxide TTS route (`/api/voice/speak`) exists but the modal does not call it, and it is inert until `VOXIDE_TTS_*` / `VOXIDE_API_*` keys are set. The digest is spoken in Amharic only.
+  - Status: the digest modal (play / pause / speed, progress from real `speechSynthesis` boundary events) reads the signed-in group's real ledger totals, or labelled sample figures when signed out. It speaks through the browser's `speechSynthesis` and is disabled when the device has no voice for the language; the Voxide TTS route (`/api/voice/speak`) exists but the modal does not call it, and it is inert until `ADDIS_AI_API_KEY` is set. The digest is spoken in Amharic only.
 
 ---
 
@@ -144,7 +144,7 @@ graph TD
 |---|---|
 | **Framework & UI** | Next.js 14 / React 18, Tailwind CSS, Lucide Icons, Ge'ez Web Fonts (Noto Sans Ethiopic, Plus Jakarta Sans) |
 | **Backend & Auth** | Supabase (Postgres with RLS, email sign-in), Next.js route handlers under `src/app/api` |
-| **Voice & Speech** | Voxide STT/TTS routes (inert until keys are set), browser Web Speech / `speechSynthesis`, Web Audio API; Amharic / Afaan Oromoo parser |
+| **Voice & Speech** | Addis AI STT/TTS routes (inert until the key is set), Voxide client widget (English assistant), browser Web Speech / `speechSynthesis`, Web Audio API; Amharic / Afaan Oromoo parser |
 | **Bank Verification** | Links.et / v.odit.et Verification API (adapter covers Telebirr, CBE and Awash; inert until `LINKS_ET_API_KEY` is set) |
 | **Ledger & Math** | Immutable SHA-256 Double-Entry Ledger, Abebe et al. Fair Draw Engine |
 | **Academic Grounding**| Bundled citation catalogue; optional ScholarXIV API (`sxv_...`) check (inert until configured) & Live Collection |

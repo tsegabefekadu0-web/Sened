@@ -97,7 +97,7 @@ export {
 export {
   AUDIO_MIME_TYPES,
   UnconfiguredSpeechToTextProvider,
-  VoxideSpeechToTextProvider,
+  AddisAiSpeechToTextProvider,
   createSpeechToTextProvider,
   isSttConfigured,
   isSupportedAudioMimeType,
@@ -110,7 +110,7 @@ export {
   DEFAULT_TTS_SPEED,
   TTS_SPEEDS,
   UnconfiguredTextToSpeechProvider,
-  VoxideTextToSpeechProvider,
+  AddisAiTextToSpeechProvider,
   createTextToSpeechProvider,
   isTtsConfigured,
   isTtsSpeed,

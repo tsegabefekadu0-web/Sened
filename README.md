@@ -5,7 +5,7 @@
 
 [![STARK Official Hackathon](https://img.shields.io/badge/STARK-Hackathon_2026-hyper?style=flat-square)](https://hackathon.stark.et/)
 [![ScholarXIV Collection](https://img.shields.io/badge/ScholarXIV-Collection%20(Live)-blue?style=flat-square)](https://www.scholarxiv.com/collections/6aaf5269f7a1121dbd049897?token=293b33f942e29f15a7bc9b4fd82b33bf88eb252a190ebbdb05c5ded00cf36896)
-[![Voxide Voice](https://img.shields.io/badge/Voxide-Amharic%20%2F%20Oromiffa-purple?style=flat-square)](https://voxide.app)
+[![Voxide Voice](https://img.shields.io/badge/Voxide-English%20voice%20assistant-purple?style=flat-square)](https://voxide.app)
 [![Links.et Payments](https://img.shields.io/badge/Links.et-17_Banks_Verified-emerald?style=flat-square)](https://links.et)
 [![EthioDeploy](https://img.shields.io/badge/EthioDeploy-Live_Hosting-orange?style=flat-square)](https://ethiodeploy.com)
 
@@ -46,7 +46,7 @@ Our ideation journey—including why we evaluated and rejected Telegram bots, st
 
 What is built today (see [ROADMAP.md](./ROADMAP.md) for per-item status). External providers are optional: each one is inert, and fails closed, until its keys are set (see [Configuration](#-configuration)).
 
-* 🎙️ **Spoken Contribution Logging:** a mic-dock recorder with a live waveform, and a parser that reads Amharic and Afaan Oromoo numerals, Ethiopian month names, providers and references (*"ለመስከረም ወር እቁብ 5000 ብር በቴሌብር አስገብቻለሁ፣ ቁጥሩ 9BF42 ነው"*). Speech is always provisional. Server transcription needs Voxide keys; otherwise the modal uses browser speech recognition where available, or a typed transcript. The app UI is English and Amharic.
+* 🎙️ **Spoken Contribution Logging:** a mic-dock recorder with a live waveform, and a parser that reads Amharic and Afaan Oromoo numerals, Ethiopian month names, providers and references (*"ለመስከረም ወር እቁብ 5000 ብር በቴሌብር አስገብቻለሁ፣ ቁጥሩ 9BF42 ነው"*). Speech is always provisional. Amharic server transcription and spoken digests use Addis AI and need `ADDIS_AI_API_KEY`; the English voice assistant is the Voxide widget. Otherwise the modal uses browser speech recognition where available, or a typed transcript. The app UI is English and Amharic.
 * 🛡️ **Receipt Verification (Links.et):** a signed-in treasurer's voice entry is sent to `/api/bank-verifications`, which checks the receipt against Telebirr, CBE or Awash through Links.et. Needs a Links.et key; with none, nothing is ever shown as verified. Unresolved receipts are queued as `PENDING_RECONCILIATION` (the queue is not yet drained automatically).
 * 📒 **Append-only Double-Entry Ledger:** SHA-256 hash-chained entries in Supabase Postgres, balance and immutability enforced in the database, corrections as reversals, group roles and invite links. The home screen reads the signed-in group's real ledger (labelled sample data when signed out).
 * 🔊 **Spoken Audio Balance Sheets:** one button reads a treasury digest aloud in Amharic using the browser's speech synthesis, with play, pause and speed controls.
@@ -70,7 +70,7 @@ Without any keys the app runs: the home screen shows labelled sample data, and t
 
 ### Configuration
 
-Every environment variable (Supabase, bank-reference keys, Links.et, ScholarXIV, Voxide) is documented in [`.env.example`](./.env.example). Database migrations, the container build (the two `NEXT_PUBLIC_SUPABASE_*` values are build args) and hosting are covered in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
+Every environment variable (Supabase, bank-reference keys, Links.et, ScholarXIV, Addis AI, Voxide) is documented in [`.env.example`](./.env.example). Database migrations, the container build (the two `NEXT_PUBLIC_SUPABASE_*` values are build args) and hosting are covered in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
 
 ### Tests
 
@@ -90,7 +90,7 @@ npm run test:all    # lint, typecheck, unit tests, build, then e2e
            │                                            ▲
            ▼                                            │
    ┌───────────────┐                            ┌───────────────┐
-   │  Voxide STT   │                            │  Voxide TTS   │
+   │ Addis AI STT  │                            │ Addis AI TTS  │
    └───────┬───────┘                            └───────▲───────┘
            │ (Intent & Ref)                             │ (Spoken Audio)
            ▼                                            │

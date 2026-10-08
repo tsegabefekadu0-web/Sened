@@ -7,7 +7,7 @@ import type { VoiceLanguage } from "./types";
  *
  * This is a **real** transcription path, not a mock: on a phone with Chrome it
  * transcribes on-device with no credential at all. That is why it is
- * preferred over the Voxide endpoint when the browser offers it.
+ * preferred over the Addis AI server route when the browser offers it.
  *
  * Where it is *not* available, `isSpeechRecognitionSupported()` returns
  * `false` and the caller shows an honest "not supported in this browser"

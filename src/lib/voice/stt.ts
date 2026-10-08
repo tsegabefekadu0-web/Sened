@@ -1,28 +1,45 @@
+import {
+  ADDIS_MAX_STT_BYTES,
+  ADDIS_MAX_STT_DURATION_MS,
+  ADDIS_PROVIDER_NAME,
+  ADDIS_STT_TIMEOUT_MS,
+  ADDIS_STT_URL,
+  addisLanguageFor,
+  addisRequest,
+  asRecord,
+  readAddisApiKey,
+  selectedProvider,
+  type VoiceEnv
+} from "./addisAi";
 import { VoiceProviderError } from "./errors";
 import { VOICE_LANGUAGES, type VoiceLanguage } from "./types";
 
 /**
- * Speech-to-text and text-to-speech provider interfaces.
+ * Speech-to-text provider interface.
  *
  * ## Why this file exists instead of a `setTimeout`
  *
- * The Voxide credential is not available in this environment. The tempting
- * shortcut — a timer that resolves a hard-coded transcript — is a *lie* in the
- * UI: it would let a treasurer record a contribution that no bank ever
- * confirmed, which is precisely the failure mode `docs/IDEATION.md` §5.1 says
- * this product exists to remove.
+ * No speech credential may be assumed to exist. The tempting shortcut — a timer
+ * that resolves a hard-coded transcript — is a *lie* in the UI: it would let a
+ * treasurer record a contribution that no bank ever confirmed, which is
+ * precisely the failure mode `docs/IDEATION.md` §5.1 says this product exists
+ * to remove.
  *
- * So the network call sits behind an interface with **two** implementations:
+ * So the network call sits behind an interface with two kinds of
+ * implementation:
  *
- * 1. `VoxideSpeechToTextProvider` — a real HTTP client, inert until
- *    `VOXIDE_API_KEY` and `VOXIDE_API_URL` are present.
+ * 1. `AddisAiSpeechToTextProvider` — a real HTTP client for Addis AI, the
+ *    Amharic server lane, inert until `ADDIS_AI_API_KEY` is present.
+ *    `VOICE_STT_PROVIDER` selects the implementation, so another vendor can be
+ *    slotted into `createSpeechToTextProvider()` later.
  * 2. `UnconfiguredSpeechToTextProvider` — the default. It **throws**
  *    `PROVIDER_NOT_CONFIGURED`, exactly like A1's
  *    `UnconfiguredBankProviderAdapter`.
  *
- * `createSpeechToTextProvider()` returns the second one unless the first is
- * genuinely configured. There is no third option and no code path that
- * fabricates a transcript.
+ * There is no third option and no code path that fabricates a transcript.
+ *
+ * Voxide is not here: it is the English voice assistant, a client-side widget
+ * with no server adapter.
  *
  * The browser-native Web Speech path lives in `recognition.ts` and is a
  * *different* thing: `SpeechRecognition` really does transcribe, on device,
@@ -30,8 +47,9 @@ import { VOICE_LANGUAGES, type VoiceLanguage } from "./types";
  */
 
 /** Milliseconds before a provider call is abandoned. */
-export const STT_TIMEOUT_MS = 8_000;
-export const TTS_TIMEOUT_MS = 10_000;
+export const STT_TIMEOUT_MS = ADDIS_STT_TIMEOUT_MS;
+/** Longest clip Addis AI accepts (60 s); equals the recorder's `MAX_CAPTURE_MS`. */
+export const MAX_STT_DURATION_MS = ADDIS_MAX_STT_DURATION_MS;
 
 export const AUDIO_MIME_TYPES = [
   "audio/webm;codecs=opus",
@@ -50,7 +68,7 @@ export interface SpeechToTextRequest {
   /** The MIME type the recorder actually negotiated. */
   readonly mimeType: string;
   readonly language: VoiceLanguage;
-  /** A rough duration hint, used to size provider timeouts. */
+  /** A rough duration hint; a value above `MAX_STT_DURATION_MS` is refused. */
   readonly durationMs?: number;
 }
 
@@ -83,7 +101,7 @@ export class UnconfiguredSpeechToTextProvider implements SpeechToTextProvider {
     throw new VoiceProviderError(
       "PROVIDER_NOT_CONFIGURED",
       this.name,
-      "No speech-to-text provider is configured. Set VOXIDE_API_URL and VOXIDE_API_KEY to enable transcription."
+      "No speech-to-text provider is configured. Set ADDIS_AI_API_KEY to enable Amharic transcription."
     );
   }
 }
@@ -99,51 +117,44 @@ export function isSupportedAudioMimeType(value: string): boolean {
 }
 
 /**
- * A real HTTP speech-to-text client.
+ * Addis AI speech-to-text client (`POST /api/v2/stt`, multipart upload).
  *
- * Uses only native `fetch` + `AbortSignal` — **zero new dependencies**, per
- * AGENTWORK.md §4.3. Like A1's Links.et adapter it has an 800 ms-class
- * `fail-closed` posture: an absent credential, a timeout, a 429 or a malformed
- * body all raise a named error. It never returns a partial transcript.
+ * The browser's recording is sent exactly as captured (WebM/Opus from Chrome
+ * and Firefox, M4A from Safari); Addis AI documents WAV, MP3, M4A and WebM,
+ * 60 s and 10 MB at most. There is no server-side transcoding.
+ *
+ * Native `fetch` + `AbortSignal` only. Fail-closed: a missing credential, a
+ * timeout, a 4xx/5xx, a malformed body or an empty transcript each raise a
+ * named error. It never returns a partial or invented transcript.
  */
-export class VoxideSpeechToTextProvider implements SpeechToTextProvider {
-  readonly name = "voxide-stt";
+export class AddisAiSpeechToTextProvider implements SpeechToTextProvider {
+  readonly name = ADDIS_PROVIDER_NAME;
   readonly isConfigured = true;
-  private readonly endpoint: string;
   private readonly apiKey: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
-  constructor(config: {
-    readonly endpoint: string;
-    readonly apiKey: string;
-    readonly timeoutMs?: number;
-    readonly fetchImpl?: typeof fetch;
-  }) {
-    this.endpoint = config.endpoint;
+  constructor(config: { readonly apiKey: string; readonly timeoutMs?: number; readonly fetchImpl?: typeof fetch }) {
     this.apiKey = config.apiKey;
     this.timeoutMs = config.timeoutMs ?? STT_TIMEOUT_MS;
     this.fetchImpl = config.fetchImpl ?? globalThis.fetch;
   }
 
   /** Build from the environment, or `null` when it is not configured. */
-  static fromEnv(
-    env: Record<string, string | undefined> = process.env,
-    fetchImpl?: typeof fetch
-  ): VoxideSpeechToTextProvider | null {
-    const endpoint = env.VOXIDE_API_URL?.trim();
-    const apiKey = env.VOXIDE_API_KEY?.trim();
-    if (!endpoint || !apiKey) {
+  static fromEnv(env: VoiceEnv = process.env, fetchImpl?: typeof fetch): AddisAiSpeechToTextProvider | null {
+    if (selectedProvider(env, "VOICE_STT_PROVIDER") !== "addis-ai") {
       return null;
     }
-    return new VoxideSpeechToTextProvider({ endpoint, apiKey, fetchImpl });
+    const apiKey = readAddisApiKey(env);
+    return apiKey === null ? null : new AddisAiSpeechToTextProvider({ apiKey, fetchImpl });
   }
 
   async transcribe(
     request: SpeechToTextRequest,
     options: { readonly signal?: AbortSignal } = {}
   ): Promise<SpeechToTextResult> {
-    if (!isVoiceLanguage(request.language)) {
+    const languageCode = addisLanguageFor(request.language);
+    if (!isVoiceLanguage(request.language) || languageCode === null) {
       throw new VoiceProviderError(
         "UNSUPPORTED_LANGUAGE",
         this.name,
@@ -153,161 +164,102 @@ export class VoxideSpeechToTextProvider implements SpeechToTextProvider {
     if (request.audioBase64.length === 0 || request.audioBase64.length > MAX_AUDIO_BASE64_CHARS) {
       throw new VoiceProviderError("INVALID_AUDIO", this.name, "Audio payload is empty or too large");
     }
+    if (request.durationMs !== undefined && request.durationMs > MAX_STT_DURATION_MS) {
+      throw new VoiceProviderError("INVALID_AUDIO", this.name, "Recording is longer than the supported maximum");
+    }
+    if (!isSupportedAudioMimeType(request.mimeType)) {
+      throw new VoiceProviderError("INVALID_AUDIO", this.name, "Unsupported audio container");
+    }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    const onAbort = (): void => controller.abort();
-    options.signal?.addEventListener("abort", onAbort, { once: true });
+    const bytes = Buffer.from(request.audioBase64, "base64");
+    if (bytes.byteLength === 0 || bytes.byteLength > ADDIS_MAX_STT_BYTES) {
+      throw new VoiceProviderError("INVALID_AUDIO", this.name, "Audio payload is empty or too large");
+    }
 
-    let response: Response;
-    try {
-      response = await this.fetchImpl(this.endpoint, {
+    const baseType = request.mimeType.split(";")[0].trim().toLowerCase();
+    const form = new FormData();
+    form.append("audio", new Blob([bytes], { type: baseType }), `audio.${extensionFor(baseType)}`);
+    form.append(
+      "request_data",
+      new Blob([JSON.stringify({ language_code: languageCode })], { type: "application/json" })
+    );
+
+    // No `content-type` header: fetch derives it, with the multipart boundary.
+    const response = await addisRequest({
+      provider: this.name,
+      fetchImpl: this.fetchImpl,
+      url: ADDIS_STT_URL,
+      init: {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-          authorization: `Bearer ${this.apiKey}`
-        },
-        body: JSON.stringify({
-          audio: request.audioBase64,
-          mime_type: request.mimeType,
-          language: request.language
-        }),
-        signal: controller.signal,
-        cache: "no-store"
-      });
-    } catch {
-      // A network fault and a timeout are the same thing to a treasurer
-      // mid-meeting: the recording did not become text.
-      throw new VoiceProviderError(
-        options.signal?.aborted ? "PROVIDER_UNAVAILABLE" : "PROVIDER_TIMEOUT",
-        this.name,
-        "The speech provider did not respond."
-      );
-    } finally {
-      clearTimeout(timer);
-      options.signal?.removeEventListener("abort", onAbort);
-    }
-
-    if (response.status === 429) {
-      const retryAfter = Number(response.headers.get("retry-after") ?? "1");
-      throw new VoiceProviderError(
-        "PROVIDER_RATE_LIMITED",
-        this.name,
-        "The speech provider is rate limited.",
-        Number.isFinite(retryAfter) ? retryAfter : 1
-      );
-    }
-    if (!response.ok) {
-      throw new VoiceProviderError(
-        "PROVIDER_UNAVAILABLE",
-        this.name,
-        `The speech provider returned HTTP ${response.status}.`
-      );
-    }
+        headers: { "x-api-key": this.apiKey, accept: "application/json" },
+        body: form
+      },
+      timeoutMs: this.timeoutMs,
+      signal: options.signal
+    });
 
     let payload: unknown;
     try {
       payload = await response.json();
     } catch {
-      throw new VoiceProviderError(
-        "PROVIDER_REJECTED",
-        this.name,
-        "The speech provider returned a malformed body."
-      );
+      throw new VoiceProviderError("PROVIDER_REJECTED", this.name, "The speech provider returned a malformed body.");
     }
 
-    const transcript = readString(payload, TRANSCRIPT_PATHS);
-    if (transcript === null || transcript.length === 0) {
-      throw new VoiceProviderError(
-        "PROVIDER_REJECTED",
-        this.name,
-        "The speech provider returned no transcript."
-      );
+    const transcript = readTranscript(payload);
+    if (transcript === null) {
+      // Silence, noise, or a language mismatch all land here: no words, no result.
+      throw new VoiceProviderError("PROVIDER_REJECTED", this.name, "The speech provider recognised no speech.");
     }
-
-    const confidence = readNumber(payload, CONFIDENCE_PATHS);
-    const detected = readString(payload, LANGUAGE_PATHS);
     return {
       transcript: transcript.slice(0, MAX_TRANSCRIPT_CHARS),
-      confidence: confidence === null ? null : Math.min(1, Math.max(0, confidence)),
+      confidence: readConfidence(payload),
       provider: this.name,
-      detectedLanguage: isVoiceLanguage(detected) ? detected : null
+      detectedLanguage: "am"
     };
   }
 }
 
-/** The fail-closed default, returned whenever Voxide is not configured. */
+/** The fail-closed default, returned whenever no real provider is configured. */
 export function createSpeechToTextProvider(
-  env: Record<string, string | undefined> = process.env,
+  env: VoiceEnv = process.env,
   fetchImpl?: typeof fetch
 ): SpeechToTextProvider {
-  return VoxideSpeechToTextProvider.fromEnv(env, fetchImpl) ?? new UnconfiguredSpeechToTextProvider();
+  return AddisAiSpeechToTextProvider.fromEnv(env, fetchImpl) ?? new UnconfiguredSpeechToTextProvider();
 }
 
 /** Is a *real* STT backend reachable? Used for honest empty states. */
-export function isSttConfigured(env: Record<string, string | undefined> = process.env): boolean {
-  return Boolean(env.VOXIDE_API_URL?.trim() && env.VOXIDE_API_KEY?.trim());
+export function isSttConfigured(env: VoiceEnv = process.env): boolean {
+  return createSpeechToTextProvider(env).isConfigured;
 }
 
-/**
- * Providers disagree about field names. Each entry is a *candidate path*,
- * tried in order; a path may be nested (`result.text`). Guessing one shape
- * and failing on the rest would turn a working provider into a 502.
- */
-function readString(payload: unknown, paths: readonly (readonly string[])[]): string | null {
-  for (const path of paths) {
-    let cursor: unknown = payload;
-    let found = true;
-    for (const segment of path) {
-      if (typeof cursor !== "object" || cursor === null) {
-        found = false;
-        break;
-      }
-      cursor = (cursor as Record<string, unknown>)[segment];
-    }
-    if (found && typeof cursor === "string" && cursor.length > 0) {
-      return cursor;
+function extensionFor(baseType: string): string {
+  switch (baseType) {
+    case "audio/ogg":
+      return "ogg";
+    case "audio/mp4":
+      return "m4a";
+    default:
+      return "webm";
+  }
+}
+
+/** `data.transcription`; an error envelope or blank text is "no transcript". */
+function readTranscript(payload: unknown): string | null {
+  const root = asRecord(payload);
+  if (root === null || root.status === "error") {
+    return null;
+  }
+  const text = asRecord(root.data)?.transcription;
+  return typeof text === "string" && text.trim().length > 0 ? text.trim() : null;
+}
+
+/** Top-level `confidence`, else `data.confidence`, clamped to [0, 1]. */
+function readConfidence(payload: unknown): number | null {
+  const root = asRecord(payload);
+  for (const value of [root?.confidence, asRecord(root?.data)?.confidence]) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return Math.min(1, Math.max(0, value));
     }
   }
   return null;
 }
-
-function readNumber(payload: unknown, paths: readonly (readonly string[])[]): number | null {
-  for (const path of paths) {
-    let cursor: unknown = payload;
-    let found = true;
-    for (const segment of path) {
-      if (typeof cursor !== "object" || cursor === null) {
-        found = false;
-        break;
-      }
-      cursor = (cursor as Record<string, unknown>)[segment];
-    }
-    if (found && typeof cursor === "number" && Number.isFinite(cursor)) {
-      return cursor;
-    }
-  }
-  return null;
-}
-
-const TRANSCRIPT_PATHS: readonly (readonly string[])[] = [
-  ["transcript"],
-  ["text"],
-  ["result", "text"],
-  ["data", "transcript"],
-  ["results", "0", "transcript"]
-];
-
-const CONFIDENCE_PATHS: readonly (readonly string[])[] = [
-  ["confidence"],
-  ["score"],
-  ["result", "confidence"]
-];
-
-const LANGUAGE_PATHS: readonly (readonly string[])[] = [
-  ["language"],
-  ["detected_language"],
-  ["detectedLanguage"],
-  ["result", "language"]
-];

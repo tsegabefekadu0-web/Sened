@@ -27,8 +27,8 @@ Design notes for `src/lib/voice/**`, `src/app/api/voice/**`,
 ```
 CREDENTIAL-FREE, PROVABLE NOW          CREDENTIAL-GATED, FAILS CLOSED
 ─────────────────────────────────       ──────────────────────────────────
-normalize.ts   Ge'ez digits, punct      stt.ts   VoxideSpeechToTextProvider
-numerals.ts    Amharic + Oromo numbers  tts.ts   VoxideTextToSpeechProvider
+normalize.ts   Ge'ez digits, punct      stt.ts   AddisAiSpeechToTextProvider
+numerals.ts    Amharic + Oromo numbers  tts.ts   AddisAiTextToSpeechProvider
 months.ts      13 Ethiopian months      routeHandlers.ts
 lexicon.ts     providers, verbs, refs   api/voice/{transcribe,speak}
 parser.ts      the extraction           api/voice/capabilities
@@ -38,7 +38,7 @@ intent.ts      the hand-off to A1
 
 The left column is why M3 is worth anything at all: **no network,
 no credential, no `AudioContext`** (the voice suite is 212 tests, §9). The right column is inert until someone
-sets `VOXIDE_API_URL` / `VOXIDE_API_KEY`, and until then every call raises
+sets `ADDIS_AI_API_KEY` (Amharic only, clips capped at 60 s and 10 MB; see [`voice-response.md`](./voice-response.md)), and until then every call raises
 `PROVIDER_NOT_CONFIGURED`.
 
 `GET /api/voice/capabilities` exists so the UI can say *not configured* before
@@ -245,7 +245,7 @@ visible en/am switch, so a reviewer can read it.
 |---|---|
 | Amharic `SpeechRecognition` support is browser-dependent; Oromo has no shipped BCP-47 tag in any major engine | `canSpeak()` / `isSpeechRecognitionSupported()` report the truth and the UI disables the control |
 | No language auto-detect from a BCP-47 tag | the caller picks; guessing a language for a *financial* draft is not acceptable |
-| Provider field names are assumed from a small candidate set (`transcript` / `text` / `result.text` / …) | a real integration must confirm Voxide's actual shape; a miss raises `PROVIDER_REJECTED`, never a partial parse |
+| The Addis AI response shape is taken from its docs and SDK, not from a live call | a miss raises `PROVIDER_REJECTED`, never a partial parse |
 | `/api/voice/extract` is unauthenticated and not rate limited | pure function, no persistence, no credential, 8 KiB cap. `/api/voice/transcribe` and `/api/voice/speak` are in `RATE_LIMITED` (`src/middleware.ts`); `extract` and `capabilities` are not |
 | Voice notes store the transcript, not the audio | the signed-out local path (`recordVoiceNoteLocally` in `src/app/page.tsx`) saves a spoken note without audio; the store has an `audioMimeType` column, unused by this flow |
 | Oromo speech recognition and an Oromo UI | the parser reads Oromo text, but `i18n.ts` has only `en` and `am`, and the audio digest speaks Amharic |
@@ -264,3 +264,52 @@ visible en/am switch, so a reviewer can read it.
 | `test/voice.numerals.regression.test.ts` | 19 | numeral-composition regressions found after the first pass |
 | `test/voice.local-record.test.tsx` | 9 | the modal with no verifier wired: records a provisional note on the device |
 | **total** | **212** | as of 2026-10-03 (`npx vitest run test/voice`) |
+
+## 10. Voxide assistant
+
+Every Sened screen has a voice assistant built on [Voxide](https://voxide.app), a
+client-side SDK (`@voxide/react`): a widget backed by a live model that calls
+JavaScript functions the app registers. It is the English voice surface. Amharic
+speech goes through the app's own Amharic voice button (the Addis AI lane); the
+assistant says so when someone asks for Amharic.
+
+Pieces:
+
+- `src/lib/voice/capabilities.ts` is the single, framework-free list of what the
+  assistant may do. Voxide registers it today; the Amharic lane can call the same
+  list.
+- `src/components/voice/VoxideAssistant.tsx` builds the `VoxideClient` from
+  `NEXT_PUBLIC_VOXIDE_KEY`, registers the capabilities, binds a small safe state
+  (route, UI language, active group name) and mounts `VoxideWidget`. It is loaded
+  lazily by `VoxideAssistantLazy` and mounted once in `src/app/layout.tsx`, so it
+  survives navigation. With no key it renders nothing and sends no request.
+- `src/lib/voice/assistantBridge.ts` lets a capability ask the home screen to open
+  the existing audio digest or the existing draft modal.
+
+| Capability | Kind | What it does |
+|---|---|---|
+| `getContributionStatus` | read | Rounds met, flagged and not yet due for the signed-in member in the running cycle. |
+| `whoIsNextInDraw` | read | Next round, draw state, and when sealing closes. Never names a winner before the reveal. |
+| `listPendingItems` | read | Counts of queued offline items and provisional spoken notes on this device. |
+| `readAudioDigest` | read | Opens the audio digest and states the pot balance from the ledger. |
+| `navigateTo` | read | Opens a screen from a fixed allowlist (`NAVIGATION_ALLOWLIST`); anything else is refused. |
+| `switchLanguage` | read | Switches the screens between `am` and `en` and points to the Amharic voice button. |
+| `draftContribution` | draft, `dangerous` | Parses what was said with `parseContributionUtterance` and opens the existing draft modal for review. |
+
+Reads use the existing Bearer-authenticated client helpers and the active group;
+a signed-out caller gets a "please sign in" status and no request is sent.
+
+**The never-commit rule.** Nothing the assistant does reaches the ledger.
+`draftContribution` is marked `dangerous` (the widget asks the person to confirm
+first) and only produces a PROVISIONAL draft, shown on screen. It does not submit
+and never calls `/api/bank-verifications`; the person finishes with a tap in the
+modal they can see. Verifying a payment, crediting the ledger, payouts, sealing or
+revealing a draw, and membership or role changes are not capabilities and must not
+be added. `test/voice.capabilities.test.ts` enforces the name list and the
+no-network behaviour of the draft.
+
+**Setup.** Put the publishable key in `NEXT_PUBLIC_VOXIDE_KEY` (see
+`.env.example`), whitelist the live domain in the Voxide dashboard, and set the
+agent's system prompt there. The widget talks to `https://voxide.onrender.com`
+(HTTPS and a WebSocket); the service worker ignores cross-origin requests, and
+the app sets no Content-Security-Policy, so nothing else needs changing.

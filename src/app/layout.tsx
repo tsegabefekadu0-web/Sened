@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Ethiopic, Plus_Jakarta_Sans } from "next/font/google";
 import "./globals.css";
 import { ServiceWorkerRegistration } from "@/components/pwa/ServiceWorkerRegistration";
+import { VoxideAssistantLazy } from "@/components/voice/VoxideAssistantLazy";
 import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
 
 // Self-hosted at build time by next/font, so no runtime request goes to Google.
@@ -62,7 +63,11 @@ export default function RootLayout({
       <body className="min-h-screen bg-[#F4EEE5] font-ethiopic antialiased selection:bg-terracotta-500 selection:text-white">
         <ServiceWorkerRegistration />
         {/* One active group for the whole app: a client provider inside this server layout. */}
-        <ActiveGroupProvider>{children}</ActiveGroupProvider>
+        <ActiveGroupProvider>
+          {children}
+          {/* Once, here, so the voice widget survives navigation. Renders nothing without NEXT_PUBLIC_VOXIDE_KEY. */}
+          <VoxideAssistantLazy />
+        </ActiveGroupProvider>
       </body>
     </html>
   );

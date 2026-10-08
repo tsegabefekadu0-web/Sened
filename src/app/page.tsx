@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Header } from "@/components/shell/Header";
@@ -17,6 +17,8 @@ import { AudioDigestModal } from "@/components/voice/AudioDigestModal";
 import { ProfilePanel } from "@/components/shell/ProfilePanel";
 import { TabPanel } from "@/components/shell/TabPanel";
 import { createTranslator, type Locale, type MessageKey } from "@/lib/i18n";
+import { useAppLocale } from "@/lib/appLocale";
+import { OPEN_DIGEST_EVENT, OPEN_DRAFT_EVENT, type OpenDraftDetail } from "@/lib/voice/assistantBridge";
 import { useSession } from "@/lib/auth/useSession";
 import { attributePayer, supersedePayer } from "@/lib/ledger/clientAttribution";
 import type { HomeLedgerResult } from "@/lib/ledger/clientHome";
@@ -123,7 +125,7 @@ export default function SenedHome() {
   // The shell is Ge'ez-primary, so it opens in Amharic. It is also the first
   // surface to call `t()` rather than hard-coding literals, which the rest of
   // the Gen A tree still does.
-  const [locale] = useState<Locale>("am");
+  const [locale] = useAppLocale("am");
   const t = useMemo(() => createTranslator(locale), [locale]);
   // Signed in -> the voice flow POSTs to /api/bank-verifications. Anything else
   // (loading, unconfigured, signed out) keeps the on-device provisional path.
@@ -132,6 +134,27 @@ export default function SenedHome() {
   const [activeTab, setActiveTab] = useState<"home" | "ledger" | "members" | "profile">("home");
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isDigestModalOpen, setIsDigestModalOpen] = useState(false);
+  // Text the voice assistant handed over for review in the existing draft modal.
+  const [assistantDraft, setAssistantDraft] = useState<string | undefined>(undefined);
+
+  // The voice assistant can ask this screen to open the digest or a draft for
+  // review. It only opens existing UI; the person finishes with a tap.
+  useEffect(() => {
+    const openDigest = () => setIsDigestModalOpen(true);
+    const openDraft = (event: Event) => {
+      const detail = (event as CustomEvent<OpenDraftDetail>).detail;
+      if (typeof detail?.utterance === "string" && detail.utterance.trim().length > 0) {
+        setAssistantDraft(detail.utterance);
+        setIsVoiceModalOpen(true);
+      }
+    };
+    window.addEventListener(OPEN_DIGEST_EVENT, openDigest);
+    window.addEventListener(OPEN_DRAFT_EVENT, openDraft);
+    return () => {
+      window.removeEventListener(OPEN_DIGEST_EVENT, openDigest);
+      window.removeEventListener(OPEN_DRAFT_EVENT, openDraft);
+    };
+  }, []);
 
   // On-device spoken notes. They are provisional rows beside the feed and are
   // never added to the pot balance, which comes from the ledger (or the sample).
@@ -395,16 +418,22 @@ export default function SenedHome() {
             during a meeting actually has. See board task #14 / O-1. */}
         <VoiceModal
           isOpen={isVoiceModalOpen}
-          onClose={() => setIsVoiceModalOpen(false)}
+          onClose={() => {
+            setIsVoiceModalOpen(false);
+            setAssistantDraft(undefined);
+          }}
+          initialTyped={assistantDraft}
+          locale={locale}
           onRequestVerification={signedIn ? requestBankVerification : undefined}
           onRecordLocally={signedIn ? undefined : recordVoiceNoteLocally}
         />
 
-        {/* Spoken Audio Balance Sheet Modal (Voxide TTS Digest) */}
+        {/* Spoken Audio Balance Sheet Modal (spoken digest) */}
         <AudioDigestModal
           isOpen={isDigestModalOpen}
           onClose={() => setIsDigestModalOpen(false)}
           potBalance={potBalance}
+          locale={locale}
           isSample={home.kind === "sample"}
           contributedCount={home.kind === "sample" ? SAMPLE_CONTRIBUTED_COUNT : undefined}
           totalMembers={home.kind === "sample" ? SAMPLE_TOTAL_MEMBERS : undefined}

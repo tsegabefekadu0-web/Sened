@@ -1,18 +1,18 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 
 import { DrawBoard } from "@/components/draw/DrawBoard";
 import { HapticsToggle } from "@/components/draw/HapticsToggle";
 import { LiveDraw } from "@/components/draw/LiveDraw";
 import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
 import { MeskelCross } from "@/components/cultural/CulturalIcons";
-import type { Locale } from "@/components/draw/copy";
 import { useSession } from "@/lib/auth/useSession";
+import { useAppLocale } from "@/lib/appLocale";
 import { translate } from "@/lib/i18n";
 
 export default function DrawPage() {
-  const [locale, setLocale] = useState<Locale>("am");
+  const [locale, setLocale] = useAppLocale("am");
   const session = useSession();
 
   return (

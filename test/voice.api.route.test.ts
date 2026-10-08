@@ -22,7 +22,7 @@ vi.mock("@supabase/supabase-js", () => ({
 import { POST as extractPost } from "@/app/api/voice/extract/route";
 import { GET as capabilitiesGet } from "@/app/api/voice/capabilities/route";
 import { createSpeakHandler, createTranscribeHandler } from "@/lib/voice/routeHandlers";
-import { UnconfiguredSpeechToTextProvider, VoxideSpeechToTextProvider } from "@/lib/voice/stt";
+import { UnconfiguredSpeechToTextProvider, AddisAiSpeechToTextProvider } from "@/lib/voice/stt";
 import { UnconfiguredTextToSpeechProvider } from "@/lib/voice/tts";
 import { VoiceProviderError } from "@/lib/voice/errors";
 import { provisionalContributionSchema } from "@/lib/voice/schemas";
@@ -152,6 +152,7 @@ describe("POST /api/voice/extract — the credential-free parser", () => {
 
 describe("GET /api/voice/capabilities — the honest empty state", () => {
   it("reports not-configured rather than pretending", async () => {
+    vi.stubEnv("ADDIS_AI_API_KEY", "");
     const response = await capabilitiesGet(new Request(`${URL}/capabilities`));
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
@@ -165,6 +166,19 @@ describe("GET /api/voice/capabilities — the honest empty state", () => {
     expect(body.ttsConfigured).toBe(false);
     expect(body.sttProvider).toBe("unconfigured-stt");
     expect(body.languages).toEqual(["am", "om"]);
+  });
+
+  it("reports provider addis-ai and each direction independently once configured", async () => {
+    vi.stubEnv("ADDIS_AI_API_KEY", "k");
+    vi.stubEnv("VOICE_TTS_PROVIDER", "other");
+    const body = (await (await capabilitiesGet(new Request(`${URL}/capabilities`))).json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      sttProvider: "addis-ai",
+      sttConfigured: true,
+      ttsProvider: "unconfigured-tts",
+      ttsConfigured: false
+    });
+    expect(JSON.stringify(body)).not.toContain('"k"');
   });
 
   it("needs no session — a guessed 'configured' fails in front of a treasurer", async () => {
@@ -219,10 +233,9 @@ describe("POST /api/voice/transcribe — requires a session, fails closed", () =
   });
 
   it("200s with a real transcript when a real provider answers", async () => {
-    const provider = new VoxideSpeechToTextProvider({
-      endpoint: "https://voxide.test/stt",
+    const provider = new AddisAiSpeechToTextProvider({
       apiKey: "k",
-      fetchImpl: () => Promise.resolve(Response.json({ transcript: "እቁብ 5,000 ብር" }))
+      fetchImpl: () => Promise.resolve(Response.json({ status: "success", data: { transcription: "እቁብ 5,000 ብር" } }))
     });
     const response = await createTranscribeHandler(() => provider)(jsonRequest("/transcribe", body));
     expect(response.status).toBe(200);
@@ -230,19 +243,17 @@ describe("POST /api/voice/transcribe — requires a session, fails closed", () =
   });
 
   it("502s when the provider faults, naming the provider", async () => {
-    const provider = new VoxideSpeechToTextProvider({
-      endpoint: "https://voxide.test/stt",
+    const provider = new AddisAiSpeechToTextProvider({
       apiKey: "k",
       fetchImpl: () => Promise.reject(new Error("ECONNRESET"))
     });
     const response = await createTranscribeHandler(() => provider)(jsonRequest("/transcribe", body));
     expect(response.status).toBe(504);
-    expect(await response.json()).toMatchObject({ error: "provider_timeout", provider: "voxide-stt" });
+    expect(await response.json()).toMatchObject({ error: "provider_timeout", provider: "addis-ai" });
   });
 
   it("429s with a Retry-After when the provider rate limits us", async () => {
-    const provider = new VoxideSpeechToTextProvider({
-      endpoint: "https://voxide.test/stt",
+    const provider = new AddisAiSpeechToTextProvider({
       apiKey: "k",
       fetchImpl: () => Promise.resolve(new Response("{}", { status: 429, headers: { "retry-after": "42" } }))
     });

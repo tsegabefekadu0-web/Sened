@@ -34,7 +34,7 @@ export const transcriptionRequestSchema = z
     audioBase64: z.string().min(1).max(MAX_AUDIO_BASE64_CHARS).regex(/^[A-Za-z0-9+/]+={0,2}$/, "Audio payload is not base64"),
     mimeType: mimeTypeSchema,
     language: languageSchema,
-    durationMs: z.number().int().min(0).max(120_000).optional()
+    durationMs: z.number().int().min(0).max(60_000).optional()
   })
   .strict();
 

@@ -29,3 +29,6 @@ coverage/
 # Locally installed agent skills
 .agents/
 skills-lock.json
+
+# Claude Code worktrees
+.claude/worktrees/

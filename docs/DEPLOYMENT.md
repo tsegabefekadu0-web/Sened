@@ -73,10 +73,9 @@ The full, commented list is [`.env.example`](../.env.example). Summary:
 | `SCHOLARXIV_API_URL` | server | optional | `src/lib/governance/scholarxiv.ts` | bundled citations only |
 | `SCHOLARXIV_API_KEY` | server secret (`sxv_...`) | optional | same | same |
 | `SCHOLARXIV_TIMEOUT_MS` | server | optional (default 8000) | same | default |
-| `VOXIDE_API_URL` | server | optional | `src/lib/voice/stt.ts`, `tts.ts` | server STT/TTS unconfigured |
-| `VOXIDE_API_KEY` | server secret | optional | same | same |
-| `VOXIDE_TTS_API_URL` | server | optional | `src/lib/voice/tts.ts` | falls back to `VOXIDE_API_URL` |
-| `VOXIDE_TTS_API_KEY` | server secret | optional | same | falls back to `VOXIDE_API_KEY` |
+| `ADDIS_AI_API_KEY` | server secret | optional | `src/lib/voice/addisAi.ts` (via `stt.ts`, `tts.ts`) | Amharic server STT/TTS unconfigured |
+| `ADDIS_AI_TTS_VOICE` | server | optional (default `am-hamen`) | `src/lib/voice/addisAi.ts` | default voice |
+| `VOICE_STT_PROVIDER`, `VOICE_TTS_PROVIDER` | server | optional (`addis-ai`) | same | Addis AI; any other value disables that direction |
 | `PORT`, `HOSTNAME` | platform | set by image | Next standalone server, Dockerfile healthcheck | `3000`, `0.0.0.0` |
 | `NODE_ENV` | platform | set by image | banking guards | must be `production` in production |
 | `CI` | tooling | no | `playwright.config.ts` | local defaults |
@@ -151,7 +150,7 @@ is an unauthenticated JSON endpoint that also proves API routes are live.
 - [ ] `GET /` returns 200 and the shell renders; `/manifest.json` and `/sw.js` return 200.
 - [ ] **Sign-in:** `/sign-in` works with a real Supabase user; signing out returns to the signed-out home.
 - [ ] **Ledger read:** signed in, `/ledger` loads the group's entries (not a 503; 503 `not_configured` means the Supabase vars are missing at runtime). Unauthenticated `GET /api/my-groups` returns 401.
-- [ ] **Voice capabilities:** `GET /api/voice/capabilities` returns JSON; `sttConfigured`/`ttsConfigured` are `true` only if the Voxide variables are set.
+- [ ] **Voice capabilities:** `GET /api/voice/capabilities` returns JSON; `sttConfigured`/`ttsConfigured` are `true` only if `ADDIS_AI_API_KEY` is set. (Voxide, the English voice assistant, is a client-side widget with its own public key; it is not reported here.)
 - [ ] **Draw:** on `/draw`, commit and reveal a round and check the verify step passes.
 - [ ] **Offline sync:** on `/offline`, go offline, queue a draft, reconnect and confirm it syncs via `/api/sync` and is recorded once.
 - [ ] **Governance:** `/governance` renders recommendations; citation chips show the bundled list, and "confirmed" appears only when the ScholarXIV variables are set.

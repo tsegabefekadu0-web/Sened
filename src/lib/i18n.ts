@@ -272,7 +272,7 @@ export const en = {
   "voice.noDeviceBody": "No audio input device is available on this device.",
   "voice.captureTooShort": "That was too short to contain a contribution. Hold the button and speak a full sentence.",
   "voice.captureSilent": "Nothing audible was captured. Check the microphone, then record again.",
-  "voice.captureTooLong": "That recording is too long. Keep a contribution note under two minutes.",
+  "voice.captureTooLong": "That recording is too long. Keep a contribution note under one minute.",
   "voice.transcribing": "Turning speech into text…",
   "voice.transcribeFailedTitle": "Speech-to-text is not available",
   "voice.transcribeFailedBody": "No speech provider is configured, so the recording was not transcribed. The audio was not lost — type the sentence below instead.",
@@ -1277,7 +1277,16 @@ export const en = {
   "drawLive.commitGateWarnConfirm": "I have seen the flagged rounds and still want to commit this draw.",
   "drawLive.commitGateReason": "Reason for committing anyway (at least 10 characters)",
   "drawLive.commitGateOverrideAction": "Commit the draw with this reason",
-  "drawLive.error.commitGateBlocked": "This draw cannot be committed yet: an active member has a flagged earlier round that was not covered when it was opened. The seals stay valid. Record the payment, or give a reason to commit anyway."
+  "drawLive.error.commitGateBlocked": "This draw cannot be committed yet: an active member has a flagged earlier round that was not covered when it was opened. The seals stay valid. Record the payment, or give a reason to commit anyway.",
+  "assistant.title": "Sened assistant",
+  "assistant.subtitle": "Ask by voice or text",
+  "assistant.greeting": "Hi. I can tell you your contribution status, who is next in the draw, or open a screen. For Amharic voice, use the Amharic voice button.",
+  "assistant.placeholder": "Ask Sened…",
+  "assistant.launcherLabel": "Ask Sened",
+  "assistant.starter.status": "Have I paid this round?",
+  "assistant.starter.next": "When is the next draw?",
+  "assistant.starter.pending": "What is waiting to sync?",
+  "assistant.confirmDraft": "Prepare a draft contribution from what you said? Nothing is recorded until you confirm it on screen."
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -1552,7 +1561,7 @@ const am: Record<MessageKey, string> = {
   "voice.noDeviceBody": "በዚህ መሣሪያ ላይ የድምፅ ግብይት መሣሪያ የለም።",
   "voice.captureTooShort": "በጣም አጭር ሆኖ ስጠታ ሊሆን አይችልም። አዝራሩን ይይዙ እና ሙሉ ዓረፍት ይናገሩ።",
   "voice.captureSilent": "የሚሰማ ድምፅ አልታገኘም። ማይክሮፎኑን ያረጋግጡ እና እንደገና ይቅረጹ።",
-  "voice.captureTooLong": "የቅረጻው ጨምሮ በጣም ረዘመ። የስጠታ ማስታወሻ ከሁለት ደቂቃ በታች ያድርጉ።",
+  "voice.captureTooLong": "የቅረጻው ጨምሮ በጣም ረዘመ። የስጠታ ማስታወሻ ከአንድ ደቂቃ በታች ያድርጉ።",
   "voice.transcribing": "ድምጅን ወደ ጽሑፍ በመለየት ላይ…",
   "voice.transcribeFailedTitle": "የድምጅ ወደ ጽሑፍ መለወጫ የለም",
   "voice.transcribeFailedBody": "የድምጽ አገልግሎካሪ አልተዋቀረም፤ በስለዚህ ቅረጻው ወደ ጽሑፍ አልቀየረም። የድምጹ አልጠፋም — ከታች ዓረፍቱን ይተይቡ።",
@@ -2546,7 +2555,16 @@ const am: Record<MessageKey, string> = {
   "drawLive.commitGateWarnConfirm": "ምልክት የተደረገባቸውን ዙሮች አይቻለሁ፤ አሁንም ይህን እጣ መቆለፍ እፈልጋለሁ።",
   "drawLive.commitGateReason": "ለማንኛውም ለመቆለፍ ምክንያት (ቢያንስ 10 ቁምፊ)",
   "drawLive.commitGateOverrideAction": "በዚህ ምክንያት እጣውን ቆልፍ",
-  "drawLive.error.commitGateBlocked": "ይህ እጣ ገና ሊቆለፍ አይችልም፦ ንቁ አባል እጣው ሲከፈት ያልተሸፈነ ምልክት የተደረገበት ቀደም ያለ ዙር አለው። ማሸጊያዎቹ የሚሰሩ ሆነው ይቆያሉ። ክፍያውን ይመዝግቡ፤ ወይም ለማንኛውም ለመቆለፍ ምክንያት ይስጡ።"
+  "drawLive.error.commitGateBlocked": "ይህ እጣ ገና ሊቆለፍ አይችልም፦ ንቁ አባል እጣው ሲከፈት ያልተሸፈነ ምልክት የተደረገበት ቀደም ያለ ዙር አለው። ማሸጊያዎቹ የሚሰሩ ሆነው ይቆያሉ። ክፍያውን ይመዝግቡ፤ ወይም ለማንኛውም ለመቆለፍ ምክንያት ይስጡ።",
+  "assistant.title": "የሰነድ ረዳት",
+  "assistant.subtitle": "በድምፅ ወይም በጽሑፍ ይጠይቁ",
+  "assistant.greeting": "ሰላም። የመዋጮዎን ሁኔታ፣ በእጣው ቀጥሎ ማን እንደሆነ መንገር ወይም አንድ ገጽ መክፈት እችላለሁ። በአማርኛ ለመናገር የአማርኛ የድምፅ ቁልፍን ይጠቀሙ።",
+  "assistant.placeholder": "ሰነድን ይጠይቁ…",
+  "assistant.launcherLabel": "ሰነድን ይጠይቁ",
+  "assistant.starter.status": "በዚህ ዙር ከፍያለሁ?",
+  "assistant.starter.next": "ቀጣዩ እጣ መቼ ነው?",
+  "assistant.starter.pending": "ለማመሳሰል የሚጠባበቅ ምን አለ?",
+  "assistant.confirmDraft": "ከተናገሩት የመዋጮ ረቂቅ ላዘጋጅ? በማያ ገጹ ላይ እስኪያረጋግጡ ድረስ ምንም አይመዘገብም።"
 };
 
 export type TranslationVariables = Record<string, string | number | boolean | null | undefined>;

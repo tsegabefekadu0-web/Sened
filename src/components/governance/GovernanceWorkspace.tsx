@@ -1,14 +1,15 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 
 import { MeskelCross } from "@/components/cultural/CulturalIcons";
-import { createTranslator, type Locale } from "@/lib/i18n";
+import { createTranslator } from "@/lib/i18n";
+import { useAppLocale } from "@/lib/appLocale";
 
 import { GovernanceCopilot } from "./GovernanceCopilot";
 
 export function GovernanceWorkspace() {
-  const [locale, setLocale] = useState<Locale>("am");
+  const [locale, setLocale] = useAppLocale("am");
   const t = createTranslator(locale);
 
   return (

@@ -1,283 +1,153 @@
 # Getting Amharic in, and Amharic out
 
 > **Scope:** how a Sened treasurer *speaks* Amharic into the app, and how the app
-> *speaks Amharic back*. This is a companion to
-> [`voice.md`](./voice.md), not a replacement. `voice.md` is owned by AGENT-2
-> (`AGENTWORK.md` §3); this file is additive and edits nothing it owns.
+> *speaks Amharic back*. A companion to [`voice.md`](./voice.md), which owns the
+> parser and the fail-closed contract.
 
-> **Status:** research + design. Nothing in here is implemented. Read §1 before
-> you touch `src/lib/voice/stt.ts` or `src/lib/voice/tts.ts` — the current
-> adapters in those files are built on a Voxide endpoint that does not exist.
+> **Status:** the Amharic server lane is implemented with Addis AI, unverified
+> against a live key. Voxide is the English voice assistant (a client-side
+> widget, a hackathon requirement) and is built separately. Browser speech and
+> "type instead" remain the fallbacks. Voice output stays **provisional**:
+> nothing a model hears or says is a verified fact.
 
 ---
 
-## 1. The finding that changes the plan
+## 1. Two voice products, two jobs
 
-Sened's STT and TTS adapters both assume Voxide exposes an HTTP endpoint that
-accepts audio/text and returns audio/text. It does not.
-
-From Voxide's own privacy policy (`voxide.app/privacy`), under service providers:
-
-> **Google** — Runs the Gemini models that understand speech and generate
-> replies. Voice and text are sent to Google during a conversation.
->
-> Audio is not stored. Speech is transcribed to text during the conversation and
-> the audio itself is not written to our systems.
-
-From `voxide.app/docs`:
-
-> Voxide allows you to expose your existing client-side JavaScript functions to a
-> **Gemini-powered Live AI**.
-
-**What Voxide actually is:** a browser SDK (`@voxide/react`) that maps a spoken or
-typed request to *your* JavaScript function. It owns the microphone handling, the
-waveform, the orb, live state binding (`ai.bindState`), action dispatch, and a
-`dangerous: true` confirmation step.
-
-**What Voxide is not:** a speech provider. It exposes no STT endpoint, no TTS
-endpoint, and no language setting. `voxide.app/docs/languages` returns **404**;
-there is no language configuration surface to find. Language coverage is exactly
-Gemini's — which is the whole reason it does not respond in an Ethiopian voice.
-
-### 1.1 What this breaks in the tree today
-
-| File | Current premise | Status |
+| | Voxide | Addis AI |
 |---|---|---|
-| `src/lib/voice/stt.ts` | `VOXIDE_API_URL` + `VOXIDE_API_KEY`, `POST` audio, `Authorization: Bearer` | Endpoint does not exist. Fails closed at 503 — correct behaviour, permanently unsatisfiable. |
-| `src/lib/voice/tts.ts` | `VOXIDE_TTS_API_URL` + `VOXIDE_TTS_API_KEY`, expects `{ audio \| audio_base64 \| data.audio \| result.audio }` | Same. The `AUDIO_PATHS`/`MIME_PATHS` candidate sets are guesses at a response shape that was never documented. |
+| Role | The **English** voice assistant | The **Amharic** voice-in / voice-out lane |
+| Where it runs | In the browser: the `@voxide/react` widget | On our server, behind `/api/voice/transcribe` and `/api/voice/speak` |
+| Key | Public, client-side (`NEXT_PUBLIC_VOXIDE_KEY`) | Server secret (`ADDIS_AI_API_KEY`) |
+| Required by | The hackathon | Amharic entry and the spoken balance sheet |
 
-Both fail closed, which is the right instinct and should not change. What must
-change is *which* provider they are aiming at. Keeping the current premise would
-be worse than useless: a judge reading `stt.ts` sees a credential-gated client
-for an API that isn't real, and that discounts the honesty built everywhere else
-in this repository.
+**Why there is no server-side Voxide adapter.** The first adapters assumed
+Voxide exposed an HTTP endpoint that takes audio or text and returns text or
+audio. It does not. `voxide.app/docs` describes a browser SDK that lets a
+**Gemini-powered Live AI** call your client-side JavaScript functions; its
+privacy policy names Google as the processor of voice and text. There is no STT
+endpoint, no TTS endpoint and no language setting, and its language coverage is
+Gemini's. The `VOXIDE_API_URL` / `VOXIDE_API_KEY` variables and the
+`Voxide*Provider` classes never reached a real endpoint and were removed. That
+removal says nothing against the widget, which stays.
 
-**Keep:** the interfaces (`SpeechToTextProvider`, `TextToSpeechProvider`), the
-`VoiceProviderError` status map, and every test in `test/voice.audio.test.ts`
-that asserts fail-closed behaviour.
-**Replace:** the two `Voxide*Provider` implementations and their env-var names.
-
----
-
-## 2. The architecture: three seams, only one of them ours
-
-The mistake to avoid is treating "voice" as one vendor. It is three
-independently swappable problems, and only the middle one is a moat.
+## 2. Architecture: three seams, only one of them ours
 
 ```
 [Mic] ──ASR──▶ [ text ] ──▶ parseContributionUtterance() ──▶ [ intent ] ──▶ [ bank ] ──▶ TTS ──▶ [ Speaker ]
             swappable        src/lib/voice/parser.ts        swappable    Links.et       swappable
-                              + numerals / months / lexicon   (A1)
 ```
 
-| Seam | Job | Who owns it | Who should own it |
-|---|---|---|---|
-| **ASR** | turn sound into characters | a vendor | a vendor — buy it |
-| **Parse** | turn Amharic characters into a typed intent | **Sened** | **nobody else, ever** |
-| **TTS** | turn a typed sentence back into sound | a vendor | a vendor — buy it |
+ASR and TTS are bought; the parse seam (Amharic numerals, months, channels,
+refusing ambiguity) is Sened's and is never delegated to a model. Output stays
+`status: "PROVISIONAL"`, `verified: false` until Links.et confirms
+(`AGENTWORK.md` §12.4: voice proposes, the bank disposes).
 
-`AGENTWORK.md` §12.4 says *voice is never a committer*. This diagram is that rule
-made architectural: **a model may produce the sentence. It may never produce the
-truth.** The parse seam is where the product's integrity lives, and it is
-credential-free, pure, and already tested — see `voice.md` §2 and §3.
+## 3. Amharic lane: Addis AI
 
-### 2.1 Why the parse seam must not be delegated
+Verified against `docs.addisassistant.com` and the official `addisai@0.5.0` npm
+SDK source on 2026-10-08. Both directions are server-side only; the key is never
+sent to the browser. Base URL `https://api.addisassistant.com`, auth header
+`x-api-key: <key>`.
 
-A general model will not reliably produce `አምስት ሃምሳ` (55) rather than 50,
-`shan digdama` (50) rather than 100, or `መስከረም` as a month. `src/lib/voice/numerals.ts`
-handles the prefix/suffix ambiguity that a model will guess at, and
-`voice.md` §3.4 lists the eleven inputs it *refuses* — `AMBIGUOUS_AMOUNT`,
-`CURRENCY_MISMATCH`, `AMBIGUOUS_CHANNEL` — each for a reason that is about
-someone's money.
+| Item | STT | TTS |
+|---|---|---|
+| Endpoint | `POST /api/v2/stt` | `POST /api/v1/voice/generations` |
+| Request | multipart: `audio` (a file with name and extension) and `request_data` = JSON `{"language_code":"am"}` | JSON: `text`, `voice_id`, `language: "am"`, `output_format: "mp3_44100"`, `voice_settings.speed`, `stream: false` |
+| Formats / limits | WAV, MP3, M4A, WebM; **60 s and 10 MB** | MP3 output; we cap text at 4,000 characters |
+| Response | `{status, data:{transcription, usage_metadata}, confidence}` | **metadata**, not audio: `{status, data:{id, audio_url, mime_type, duration_seconds, ...}}` |
+| Languages | `am` only is documented | Amharic voices (default `am-hamen`, female); Oromo exists but we keep TTS Amharic-only |
+| Errors | `{status:"error", error:{code,message}}` with 400, 401, 402 (insufficient credits), 403, 404, 429, 500, 503 | same |
+| Price | 3.5 ETB per 1K characters | 5 ETB per minute |
 
-A model that guesses 55 → 50 is a 500-bir error credited to a real member. So the
-utterance is routed into `parseContributionUtterance()` and its output stays
-`status: "PROVISIONAL"`, `verified: false` — a literal type no code path widens —
-until Links.et confirms.
+Free plan: 60 requests per minute.
 
----
+**TTS is two calls.** The generation reply carries a signed `audio_url`; the
+server then GETs it and returns base64 audio to our client. That URL is
+untrusted data from an upstream body, so it is fetched only if it is `https:`
+with a hostname of `addisassistant.com` or a subdomain of it (parsed host, so
+`https://addisassistant.com@evil.com`, `evil-addisassistant.com` and a custom
+port all fail). The fetch carries no API key, follows no redirects, is capped
+at 10 MB and shares the timeout. Anything else fails closed as
+`PROVIDER_REJECTED`. Neither the SDK nor the docs name Addis AI's storage host,
+so a storage domain outside `addisassistant.com` would be refused until it is
+confirmed and added.
 
-## 3. Amharic IN — speech to text
+**Mapping.** App `am` becomes `am`. Afaan Oromoo (`om`) has no documented STT
+code; it is refused with `UNSUPPORTED_LANGUAGE` instead of being run through an
+Amharic model. `TtsSpeed` maps directly to `voice_settings.speed` (1 is normal).
+The transcript is read from `data.transcription`; confidence from the top-level
+`confidence`, else `data.confidence`.
 
-| Option | Amharic quality | Cost | Credential | Verdict |
-|---|---|---|---|---|
-| **Gemini, via Voxide** | decent on code-switched `am`/English (`አምስት ሃምሶ ብር አስገባለሁ`) | 5 free sessions, then $29/mo or $0.03/session | `vox_pub_…` (publishable, safe in frontend) | **Use it.** Free, already mandatory, and good enough to hand a sentence to the parser. |
-| **Addis AI** (`addisassistant.com`, PyPI `addisai`) | purpose-built Amharic + Afaan Oromo STT; their copy claims most providers "go silent on Amharic" | ~1.40 ETB/min, billed on **transcribed text only — audio input is free** | `ADDIS_API_KEY` | **The fallback.** ~20 ETB covers a 15-minute demo. Node + Python SDKs, `am`/`om`/`en`/`ha`/`sw`. |
-| **EthiopicAI** (`ethiopic.ai` / `.io`) | ASR for `am`, `om`, `ti`, `so`, built for low bandwidth and code-mixing | not published | account | Fallback if Addis AI is unavailable. |
-| **Browser `SpeechRecognition`** | browser-dependent; **no shipped BCP-47 tag for Oromo in any major engine** | free | none | `recognition.ts` already reports the truth and disables the control. Keep as a fallback only, never as the plan. |
+**Limits we enforce.** Recording up to **60 s** (the recorder's `MAX_CAPTURE_MS`,
+the request schema and `MAX_STT_DURATION_MS` agree; longer is `INVALID_AUDIO`),
+decoded audio up to 10 MB, base64 payload up to 8 MiB, digest text up to 4,000
+characters, STT timeout 30 s, TTS timeout 60 s (the SDK's own floor is 95 s).
+Status mapping: 429 is `PROVIDER_RATE_LIMITED` (with `Retry-After`); 400, 413,
+415 and 422 are `PROVIDER_REJECTED`; 401, 402, 403 and 5xx are
+`PROVIDER_UNAVAILABLE` (a bad key or empty credit is ours to fix, not the
+user's); a network fault or timeout is `PROVIDER_TIMEOUT`. Upstream bodies are
+never copied into errors. Middleware still rate-limits both routes as
+`WRITE_RULE`; those buckets are unchanged.
 
-**Recommendation:** Voxide/Gemini primary, Addis AI fallback, `recognition.ts`
-last. A `SpeechToTextProvider` chain with a documented order — first configured
-wins, and a miss is `PROVIDER_UNAVAILABLE`, never a partial parse.
+**Configuration** (see `.env.example`): `ADDIS_AI_API_KEY`, optional
+`ADDIS_AI_TTS_VOICE` (a plain id token such as `am-hamen`; anything else leaves
+TTS unconfigured), optional `VOICE_STT_PROVIDER` / `VOICE_TTS_PROVIDER`
+(`addis-ai` or unset; any other value disables that direction).
+`GET /api/voice/capabilities` reports `addis-ai` and a configured flag per
+direction.
 
-### 3.1 The one thing that makes this work
+**Azure considered and dropped.** Azure AI Speech (`am-ET`, fast transcription,
+neural voices) was implemented first and works on paper, but it has no Afaan
+Oromoo model, needs a cloud region and a subscription, and Addis AI is built for
+Ethiopian languages. It was removed rather than kept as dead code.
 
-Voxide hands you **the utterance**, not the intent. So the capability registered
-with `ai.register()` must take the raw string and pass it to the parser:
-
-```ts
-ai.register({
-  logContribution: {
-    description:
-      "Record a member contribution to the Equb. The treasurer speaks in Amharic " +
-      "or Afaan Oromoo. Pass the sentence through exactly as spoken.",
-    params: { utterance: { type: "string", required: true } },
-    // §12.4: voice proposes, the bank disposes. This is the UI half of that.
-    dangerous: true,
-    handler: ({ utterance }) => {
-      const parsed = parseContributionUtterance(utterance);
-      // Parsed output is provisional. Hand it to the UI for read-back, then to
-      // A1's /api/bank-verifications. Never to the ledger directly.
-      return { status: parsed.status, ...parsed };
-    },
-  },
-});
-```
-
-`dangerous: true` forces a UI confirmation before the handler runs. That
-confirmation *is* the `እሁን ነው?` read-back a treasurer needs before someone else's
-money is credited — Voxide's safety feature and this repository's central
-non-negotiable are the same mechanism.
-
-### 3.2 Integration notes, from the docs
-
-- Mount `<VoxideWidget client={ai} />` **once, in the root layout** — anywhere
-  else it remounts on navigation and any in-flight call is cut off.
-- Whitelist the production domain in the dashboard (project → Settings), or the
-  WebSocket is refused by CORS. `localhost` always works. **Add the EthioDeploy
-  hostname before deploying** or the demo fails only in production.
-- The key is `vox_pub_…` from the project's **Integration** tab, and is safe to
-  ship in frontend code. Whitelisting is what makes that safe.
-- `npx voxide-mcp` exists: it serves the integration guide, SDK reference, and
-  copy-paste examples to a coding assistant.
-
-**On credentials:** hackathon promo codes are account-bound and issued per event,
-and Voxide's privacy policy records redemption against a named account specifically
-so an event code cannot be scripted. **We do not have a code and must not guess
-one.** Sign up at `voxide.app/signup` for 5 free sessions, no card required —
-enough for a demo. After that it is $29/mo or $0.03/session, which is not a
-constraint at this scale.
-
----
-
-## 4. Amharic OUT — text to speech
-
-This is the actual gap, and it is the cheaper of the two to close.
-
-| Option | Languages | Cost | Verdict |
-|---|---|---|---|
-| **Addis AI** | `am`, `om` — **28 production voices** | **$0.032/min (300 ETB/hr)** | **Recommended.** REST + SDK, `mp3_44100` / `wav_44100` / `pcm_16000`, and a `voice_settings.speed` parameter. |
-| **EthiopicAI** | `am`, `om`, `ti`, `so` | not published | Fallback. |
-| **Browser `speechSynthesis`** | only if the OS has an `am`/`om` voice pack installed | free | Keep. It already works and it is the offline path. |
-| **Voxide / Gemini** | Gemini's set — not Amharic | — | Not a TTS option for this product. |
-
-### 4.1 The free win in `voice_settings.speed`
-
-`tts.ts` already defines `TTS_SPEEDS = [0.75, 1, 1.25, 1.5, 2]` and
-`synthesis.ts` already implements real play/pause/speed against `utterance.rate`.
-Addis AI's `voice_settings.speed` maps onto `TtsSpeed` directly, so ROADMAP §3.2's
-play/pause/speed requirement is satisfied by swapping the provider — no UI work.
-
-### 4.2 The digest is text first, audio second
-
-The digest must never depend on audio to exist. `synthesis.ts` already holds the
-right rule: if no voice is installed, `canSpeak()` is false, the caption stays,
-and it says why. Extend that unchanged to the new provider — a provider fault
-renders the digest as text with an honest reason, and never as a beep, a timer,
-or silence that reads as success.
-
----
-
-## 5. Degradation ladder
-
-Every rung is honest. No rung fabricates a transcript, an amount, or an audio
-file.
+## 4. Degradation ladder
 
 | # | Condition | Behaviour |
 |---|---|---|
-| 1 | Voxide configured, network fine | Gemini → `parseContributionUtterance()` → read-back → Links.et → Addis AI confirmation |
-| 2 | Voxide absent or session exhausted | Browser `SpeechRecognition` if an `am` voice exists; otherwise the *Type instead* path that is already built and tested (`test/voice.local-record.test.tsx`) |
-| 3 | Links.et unreachable | `PENDING_RECONCILIATION` + backoff. The draft stays provisional. Spoken confirmation says so — "ተረጋግጧል, ግን አልተረጋገጠም" — never a plain success |
-| 4 | No network at all | Dexie draft, `content-hashed`, shown as pending. Already implemented and tested |
-| 5 | No Amharic TTS anywhere | Digest renders as text with a caption and a stated reason |
+| 1 | Addis AI configured, network fine | recording, then Addis AI transcript, then parser, then read-back, then Links.et |
+| 2 | Addis AI absent, out of credit, rate limited or failing | browser `SpeechRecognition` where an `am` engine exists, otherwise the *Type instead* path |
+| 3 | Links.et unreachable | `PENDING_RECONCILIATION`; the draft stays provisional and is spoken as such |
+| 4 | No network | Dexie draft, content-hashed, shown as pending |
+| 5 | No Amharic voice (server or device) | the digest renders as text with a stated reason |
 
-Rung 3 is the one that matters most for the demo: a spoken message that says
-*"unverified"* when the bank did not answer is the product working, not failing.
+A provider fault is a named error code, never silence that reads as success.
 
----
+## 5. Benchmark before relying on it
 
-## 6. Work list
+1. Record 30 clips on real phones: 10 numeric contributions ("5000 ብር በቴሌብር"),
+   10 with a month and a reference code, 10 noisy or accented.
+2. Hand-transcribe each as ground truth.
+3. Score character error rate **and** the field that matters: did
+   `parseContributionUtterance()` extract the right amount, rail and reference
+   (exact match, no partial credit).
+4. Record latency and cost per clip.
+5. Listen to 10 digests with two native speakers (clarity, number reading,
+   speed settings).
 
-| # | Change | Files | Est. |
-|---|---|---|---|
-| 1 | Sign up, mint `vox_pub_…`, add EthioDeploy host to the domain whitelist | — | 15 min |
-| 2 | Install the SDK — **requires the AGENT-4 install protocol** (`AGENTWORK.md` §4.3) | `package.json` | — |
-| 3 | Register Sened's capabilities; mount the widget once in the root layout | new `src/components/voice/VoxideDock.tsx`, `src/app/layout.tsx` **(A1-owned)** | 2 h |
-| 4 | Route the utterance into the parser; never into the ledger | `src/components/voice/**`, `src/lib/voice/parser.ts` | 1 h |
-| 5 | Add `dangerous: true` to the commit action | as above | 15 min |
-| 6 | Replace `VoxideSpeechToTextProvider` with an Addis AI implementation; keep the interface and every fail-closed test | `src/lib/voice/stt.ts` | 1.5 h |
-| 7 | Replace `VoxideTextToSpeechProvider` with an Addis AI implementation; map `TtsSpeed` → `voice_settings.speed` | `src/lib/voice/tts.ts` | 1.5 h |
-| 8 | Tests for both new providers, mirroring `test/voice.audio.test.ts`: success, timeout, 429, malformed body, unconfigured, wrong currency | `test/voice.*.test.ts` | 1 h |
-| 9 | Self-host the Amharic voice note in `.env.example` | `.env.example` **(A1-owned)** | 10 min |
+A wrong amount is a real member credited wrongly, so amount and reference
+accuracy decide whether the server lane is trusted.
 
-Total ≈ **7 h**, under **1,000 ETB** including demo-length usage.
+## 6. Not verified
 
-**`AGENTWORK.md` §4.3:** only AGENT-4 may run `npm install`. Every agent was told
-it needed zero new dependencies, and this is the one case that breaks that
-promise — so it needs a filed request, not a unilateral install.
-
----
+- No live Addis AI call has been made from this repo.
+- **WebM/Opus acceptance.** Addis AI lists WebM, but whether the exact
+  `audio/webm;codecs=opus` that Chrome and Firefox record is accepted needs a
+  live test. Safari's `audio/mp4` is covered by the M4A entry. Old Firefox
+  `audio/ogg` is not on the documented list and may be rejected.
+- The lifetime of the signed `audio_url`, and the storage host it points at (we
+  accept only `addisassistant.com` and subdomains).
+- Privacy, hosting and retention terms for voice and text sent to Addis AI.
+- Real Amharic accuracy on Ethiopian phone audio (§5 exists for this).
+- What the service returns for pure silence is undocumented; any result without
+  text is treated as no speech (`PROVIDER_REJECTED`).
+- Whether `voice_settings.speed` accepts every `TtsSpeed` value (0.75 to 2).
 
 ## 7. Do not do these
 
-- **Do not let a model extract the amount.** `parseContributionUtterance` already
-  does it correctly and refuses the ambiguous cases. Delegating it to Gemini is
-  how a 500-bir error gets credited.
-- **Do not invent a `VOXIDE_TTS_API_URL`.** Documented nowhere; it does not exist.
-  An adapter aimed at a fictional endpoint is the exact lie this repository
-  refuses to tell elsewhere.
-- **Do not add a second browser STT engine** hoping one of them speaks Oromo. None
-  ships an Oromo BCP-47 tag; that is a vendor problem, not a code problem.
-- **Do not translate Amharic to English to feed a model.** The ledger is ETB-only
-  and the parser is built on Ge'ez. `CURRENCY_MISMATCH` exists for a reason.
-- **Do not commit a key.** `vox_pub_…` is publishable by design but still belongs
-  in the dashboard, not the repo, and the demo key should be revocable after the
-  event.
-
----
-
-## 8. What I could not verify
-
-Stated rather than hidden, per `voice.md` §8.
-
-- **Addis AI's exact REST request/response shape.** Pricing, language coverage and
-  the `voice_settings.speed` parameter come from their own marketing material and
-  SDK listings, not from an authenticated call. Confirm against a live key before
-  the adapter is written — `voice.md` §8 already flags the identical risk for the
-  current Voxide field guesses.
-- **EthiopicAI pricing and API shape.** Unpublished.
-- **Voxide promo codes.** Not public, not requested, not guessed. §3.2.
-- **Gemini's actual Amharic transcription accuracy on Ethiopian accents.** Stated
-  as "decent on code-switching" on the strength of provider positioning, not
-  measurement. **This is the one assumption worth testing first**, because the
-  whole rung-1 path rests on it: record thirty seconds of a treasurer on a real
-  phone and see what comes back.
-
----
-
-## 9. References
-
-**Voxide** (read 2026-10-07)
-`voxide.app` · `/docs` · `/docs/quickstart` · `/docs/actions` · `/docs/state` ·
-`/docs/privacy` — the privacy policy is the load-bearing citation for §1.
-
-**Voice providers**
-Addis AI `addisassistant.com`, PyPI `addisai` · EthiopicAI `ethiopic.ai`
-
-**This repository**
-[`voice.md`](./voice.md) · `AGENTWORK.md` §3, §4.3, §12 · `ROADMAP.md` §3.1, §3.2 ·
-`docs/IDEATION.md` §5.1 · `src/lib/voice/{parser,numerals,months,lexicon,normalize,stt,tts,synthesis,recognition}.ts`
-
-**Regulatory context, for later**
-NBE `Draft-Sandbox-Directive` · NBE *National Digital Payments Strategy 2026-2030*
-· ECMA *Collective Investment Schemes Directive No. 1150/2026*
+- Do not let a model extract the amount; the parser exists to refuse ambiguity.
+- Do not transcode on the server to satisfy an API; pick the API that accepts the browser's format.
+- Do not translate Amharic to English to feed a model; the ledger is ETB-only and the parser is built on Ge'ez.
+- Do not expose the Addis AI key as `NEXT_PUBLIC_*`, log it, or log audio or text.
+- Do not fetch an `audio_url` without the host check.

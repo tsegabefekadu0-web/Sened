@@ -91,6 +91,12 @@ export interface VoiceModalProps {
   /** Defaults to `am` so the M1 shell's existing Amharic copy is unchanged. */
   locale?: Locale;
   language?: VoiceLanguage;
+  /**
+   * Text to show in the typed box when the modal opens, for review. The voice
+   * assistant uses it to hand over what it heard; it is a draft like any typed
+   * note, and nothing is recorded until the person taps the existing button.
+   */
+  initialTyped?: string;
 }
 
 type Stage =
@@ -108,7 +114,8 @@ export function VoiceModal({
   onRequestVerification,
   onRecordLocally,
   locale = "am",
-  language = "am"
+  language = "am",
+  initialTyped
 }: VoiceModalProps) {
   const t = useMemo(() => createTranslator(locale), [locale]);
 
@@ -153,12 +160,18 @@ export function VoiceModal({
   useEffect(() => {
     if (isOpen) {
       reset();
-      setMode("voice");
+      if (initialTyped && initialTyped.trim().length > 0) {
+        setMode("type");
+        setTyped(initialTyped);
+        setStage("review");
+      } else {
+        setMode("voice");
+      }
     } else {
       recorderRef.current?.cancel();
       recorderRef.current = null;
     }
-  }, [isOpen, reset]);
+  }, [isOpen, reset, initialTyped]);
 
   // Elapsed clock, driven off the recorder's real start time.
   useEffect(() => {

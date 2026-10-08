@@ -140,7 +140,7 @@ export interface CaptureQuality {
 
 export const MIN_USABLE_PEAK = 0.0016; // ≈ -56 dBFS
 export const MIN_CAPTURE_MS = 600;
-export const MAX_CAPTURE_MS = 120_000;
+export const MAX_CAPTURE_MS = 60_000;
 
 export function assessCapture(quality: {
   readonly peak: number;

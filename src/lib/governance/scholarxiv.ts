@@ -39,7 +39,7 @@ import { GovernanceProviderError } from "./errors";
  *   ScholarXIV Papers search", NOT "the paper is a member of collection
  *   6aaf5269f7a1121dbd049897". The UI wording reflects that.
  *
- * Like `VoxideSpeechToTextProvider` this client is inert until both
+ * Like `AddisAiSpeechToTextProvider` this client is inert until both
  * `SCHOLARXIV_API_URL` and `SCHOLARXIV_API_KEY` are set, and it never
  * fabricates a result: no key, a timeout, a 4xx/5xx or an unparseable body all
  * raise a named `GovernanceProviderError`.

@@ -9,6 +9,7 @@ import {
 import { nodeDrawHasher } from "@/lib/draw/nodeHasher";
 import { InMemoryDrawRepository } from "@/lib/draw/repository";
 import { sealMemberContribution } from "@/lib/draw/engine";
+import { DrawError } from "@/lib/draw/errors";
 import { DrawService, payoutIdempotencyKey } from "@/lib/draw/service";
 import type { DrawMember } from "@/lib/draw/types";
 
@@ -17,6 +18,7 @@ const groupId = "22222222-2222-4222-8222-222222222222";
 const tenantId = "99999999-9999-4999-8999-999999999999";
 const cycleId = "77777777-7777-4777-8777-777777777777";
 const treasurer = "11111111-1111-4111-8111-111111111111";
+const otherManager = "12121212-1212-4212-8212-121212121212";
 const cashAccount = "33333333-3333-4333-8333-333333333333";
 const payoutAccount = "44444444-4444-4444-8444-444444444444";
 
@@ -325,8 +327,8 @@ describe("DrawService — payout posts a balanced hash-chained ledger entry", ()
     );
 
     expect(result.round.state).toBe("paid");
-    expect(result.ledgerEntry.entryType).toBe("disbursement");
-    expect(result.ledgerEntry.idempotencyKey).toBe(payoutIdempotencyKey(result.round.commitment));
+    expect(result.ledgerEntry!.entryType).toBe("disbursement");
+    expect(result.ledgerEntry!.idempotencyKey).toBe(payoutIdempotencyKey(result.round.commitment));
     expect(entries(h.ledger)).toHaveLength(1);
   });
 
@@ -358,7 +360,7 @@ describe("DrawService — payout posts a balanced hash-chained ledger entry", ()
       { userId: treasurer }
     );
 
-    const postings = result.ledgerEntry.postings;
+    const postings = result.ledgerEntry!.postings;
     expect(postings.find((p) => p.accountId === cashAccount)?.direction).toBe("credit");
     expect(postings.find((p) => p.accountId === payoutAccount)?.direction).toBe("debit");
   });
@@ -376,16 +378,47 @@ describe("DrawService — payout posts a balanced hash-chained ledger entry", ()
     expect(entries(h.ledger)).toHaveLength(0);
   });
 
-  it("REJECTS a second payout for the same draw instead of paying twice", async () => {
+  it("replays a retry by the same caller: the original payout, flagged replayed, nothing posted twice", async () => {
     const h = harness();
     const drawId = await revealed(h);
     const request = { drawId, cashAccountId: cashAccount, payoutAccountId: payoutAccount };
-    await h.service.postPayout(request, { userId: treasurer });
+    const first = await h.service.postPayout(request, { userId: treasurer });
+    expect(first.replayed).toBe(false);
+    expect(first.alreadyPaid).toBe(false);
 
-    await expect(h.service.postPayout(request, { userId: treasurer })).rejects.toMatchObject({
-      code: "IDEMPOTENCY_CONFLICT"
-    });
+    const again = await h.service.postPayout(request, { userId: treasurer });
+    expect(again.replayed).toBe(true);
+    expect(again.alreadyPaid).toBe(false);
+    expect(again.round.payout).toEqual(first.round.payout);
     expect(entries(h.ledger)).toHaveLength(1);
+  });
+
+  it("tells a different manager the draw is already paid, as a result and not an error", async () => {
+    const h = harness();
+    const drawId = await revealed(h);
+    const request = { drawId, cashAccountId: cashAccount, payoutAccountId: payoutAccount };
+    const first = await h.service.postPayout(request, { userId: treasurer });
+
+    const other = await h.service.postPayout(request, { userId: otherManager });
+    expect(other.alreadyPaid).toBe(true);
+    expect(other.replayed).toBe(false);
+    expect(other.round.payout?.ledgerEntryId).toBe(first.round.payout?.ledgerEntryId);
+    expect(entries(h.ledger)).toHaveLength(1);
+  });
+
+  it("treats losing a race to another manager's payout row as already paid", async () => {
+    const h = harness();
+    const drawId = await revealed(h);
+    const request = { drawId, cashAccountId: cashAccount, payoutAccountId: payoutAccount };
+    const real = h.drawRepo.savePayout.bind(h.drawRepo);
+    // The other manager's payout lands first; ours then collides on the unique draw.
+    h.drawRepo.savePayout = async (payout, context) => {
+      await real({ ...payout, postedBy: otherManager }, context);
+      throw new DrawError("IDEMPOTENCY_CONFLICT", "draw_idempotency_conflict");
+    };
+    const result = await h.service.postPayout(request, { userId: treasurer });
+    expect(result.alreadyPaid).toBe(true);
+    expect(result.round.state).toBe("paid");
   });
 
   it("REFUSES to pay when the stored reveal disagrees with the arithmetic", async () => {
@@ -411,13 +444,13 @@ describe("DrawService — payout posts a balanced hash-chained ledger entry", ()
       { userId: treasurer }
     );
 
-    // The payout is already recorded, so re-posting is refused outright.
-    await expect(
-      h.service.postPayout(
-        { drawId, cashAccountId: cashAccount, payoutAccountId: payoutAccount },
-        { userId: treasurer }
-      )
-    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    // The payout is already recorded, so re-posting answers with it and posts nothing new.
+    const again = await h.service.postPayout(
+      { drawId, cashAccountId: cashAccount, payoutAccountId: payoutAccount },
+      { userId: treasurer }
+    );
+    expect(again.replayed).toBe(true);
+    expect(entries(h.ledger)).toHaveLength(0);
   });
 
   it("surfaces a missing ledger account as NOT_FOUND rather than a fake payout", async () => {

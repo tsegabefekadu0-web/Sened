@@ -380,12 +380,13 @@ export function createPayoutHandler(
         {
           round: publicRound(result.round),
           payout: result.round.payout,
-          ledgerEntryId: result.ledgerEntry.id,
-          ledgerSequence: result.ledgerEntry.sequence,
-          ledgerEntryHash: result.ledgerEntry.entryHash,
-          replayed: result.replayed
+          ledgerEntryId: result.ledgerEntry?.id ?? result.round.payout?.ledgerEntryId ?? null,
+          ledgerSequence: result.ledgerEntry?.sequence ?? null,
+          ledgerEntryHash: result.ledgerEntry?.entryHash ?? null,
+          replayed: result.replayed,
+          alreadyPaid: result.alreadyPaid
         },
-        result.replayed ? 200 : 201
+        result.replayed || result.alreadyPaid ? 200 : 201
       );
     } catch (error) {
       return mapError(error);

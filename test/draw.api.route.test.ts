@@ -101,7 +101,8 @@ function fakeService() {
     postPayout: vi.fn().mockResolvedValue({
       round,
       ledgerEntry: { id: "e".repeat(8) + "-5555-4555-8555-555555555555", sequence: "1", entryHash: "f".repeat(64) },
-      replayed: false
+      replayed: false,
+      alreadyPaid: false
     })
   } as unknown as DrawService;
 }
@@ -493,6 +494,42 @@ describe("POST /api/draw/payouts", () => {
       ledgerEntryHash: "f".repeat(64),
       replayed: false
     });
+  });
+});
+
+describe("POST /api/draw/payouts — retries", () => {
+  const payoutBody = { drawId, cashAccountId: cashAccount, payoutAccountId: payoutAccount };
+
+  it("answers 200 with the original payout and replayed:true when the same caller retries", async () => {
+    const service = fakeService();
+    const base = await (service.postPayout as unknown as () => Promise<Record<string, unknown>>)();
+    (service.postPayout as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      ...base,
+      ledgerEntry: null,
+      replayed: true,
+      alreadyPaid: false
+    });
+
+    const response = await createPayoutHandler(() => service)(request(payoutBody));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ replayed: true, alreadyPaid: false, ledgerSequence: null });
+  });
+
+  it("answers 200 alreadyPaid:true, not an error, when a different manager asks", async () => {
+    const service = fakeService();
+    const base = await (service.postPayout as unknown as () => Promise<Record<string, unknown>>)();
+    (service.postPayout as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      ...base,
+      ledgerEntry: null,
+      replayed: false,
+      alreadyPaid: true
+    });
+
+    const response = await createPayoutHandler(() => service)(request(payoutBody));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ replayed: false, alreadyPaid: true });
   });
 });
 

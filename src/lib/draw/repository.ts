@@ -194,6 +194,7 @@ function mapSupabaseError(
   if (message === "draw_round_has_live_draw") return new DrawError("ROUND_HAS_LIVE_DRAW", message);
   if (message === "draw_round_already_revealed") return new DrawError("ALREADY_REVEALED", message);
   if (message === "draw_cancelled") return new DrawError("DRAW_CANCELLED", message);
+  if (message === "draw_seal_deadline_passed") return new DrawError("SEAL_DEADLINE_PASSED", message);
   if (message === "draw_cancel_too_early") return new DrawError("CANCEL_TOO_EARLY", message);
   if (message === "draw_reveal_opened") return new DrawError("CANCEL_REVEAL_OPENED", message);
   if (message === "draw_cancel_nothing_missed") return new DrawError("CANCEL_NOTHING_MISSED", message);
@@ -750,6 +751,7 @@ export function drawErrorStatus(code: DrawErrorCode): number {
     case "ROUND_HAS_LIVE_DRAW":
     case "DRAW_CANCELLED":
     // Cancel is a request the draw's state refuses: too early, reveal opened, nobody missed, limit.
+    case "SEAL_DEADLINE_PASSED":
     case "CANCEL_TOO_EARLY":
     case "CANCEL_REVEAL_OPENED":
     case "CANCEL_NOTHING_MISSED":

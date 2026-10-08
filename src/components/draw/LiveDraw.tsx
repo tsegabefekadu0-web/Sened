@@ -122,6 +122,14 @@ function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
+/** A whole number of hours from 1 to 720 (the API and the RPC accept nothing else), or null. */
+function parseWindowHours(raw: string): number | null {
+  const text = raw.trim();
+  if (!/^[0-9]{1,3}$/.test(text)) return null;
+  const hours = Number(text);
+  return hours >= 1 && hours <= 720 ? hours : null;
+}
+
 function newKey(prefix: string): string {
   return `${prefix}.${globalThis.crypto.randomUUID()}`;
 }
@@ -225,6 +233,10 @@ function LiveDrawBody({
   const [excludeMissed, setExcludeMissed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
+  /** A success message the person should see (for example, that a cancel was recorded). */
+  const [notice, setNotice] = useState<Problem | null>(null);
+  const [sealWindow, setSealWindow] = useState("48");
+  const [nonceWindow, setNonceWindow] = useState("48");
 
   const [cycleName, setCycleName] = useState("");
   const [contribution, setContribution] = useState("");
@@ -264,6 +276,7 @@ function LiveDrawBody({
   const run = useCallback(async (name: string, action: () => Promise<void>) => {
     setBusy(name);
     setProblem(null);
+    setNotice(null);
     try {
       await action();
     } finally {
@@ -517,6 +530,11 @@ function LiveDrawBody({
       const each = normaliseAmount(contribution);
       const rounds = Number(totalRounds);
       const bps = Math.round(Number(reservePercent) * 100);
+      const sealHours = parseWindowHours(sealWindow);
+      const nonceHours = parseWindowHours(nonceWindow);
+      if (sealHours === null || nonceHours === null) {
+        return setProblem({ key: "drawLive.windowsInvalid" });
+      }
       if (
         cycleName.trim() === "" ||
         each === null ||
@@ -537,7 +555,9 @@ function LiveDrawBody({
           totalRounds: rounds,
           reserveRatioBps: bps,
           idempotencyKey: cycleKey.current,
-          contributionGate: cycleGate
+          contributionGate: cycleGate,
+          sealWindowHours: sealHours,
+          nonceWindowHours: nonceHours
         },
         deps
       );
@@ -547,6 +567,8 @@ function LiveDrawBody({
       setContribution("");
       setTotalRounds("");
       setCycleGate("off");
+      setSealWindow("48");
+      setNonceWindow("48");
       await loadCycles(group.groupId, result.data.cycle.cycleId);
     });
 
@@ -730,6 +752,7 @@ function LiveDrawBody({
       if (!result.ok) return fail(result);
       setCancelReason("");
       await reloadSelected();
+      setNotice({ key: "drawLive.cancelDone" });
     });
 
   // -- payout --------------------------------------------------------------------
@@ -836,6 +859,12 @@ function LiveDrawBody({
         >
           {t("drawLive.liveBadge")}
         </p>
+
+        {notice ? (
+          <div role="status" data-testid="draw-notice" className="rounded-xl border border-[#A7F3D0] bg-[#ECFDF5] px-3 py-2 text-[12px] font-semibold text-[#065F46]">
+            <p>{t(notice.key as DrawLiveKey, notice.vars)}</p>
+          </div>
+        ) : null}
 
         {problem ? (
           <div role="alert" className="rounded-xl border border-[#C6532B] bg-[#FDEDE6] px-3 py-2 text-[12px] font-semibold text-[#863214]">
@@ -978,6 +1007,40 @@ function LiveDrawBody({
                     />
                   </label>
                 </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="block">
+                    <span className={LABEL}>{t("drawLive.sealWindowLabel")}</span>
+                    <input
+                      className={FIELD}
+                      inputMode="numeric"
+                      data-testid="cycle-seal-window"
+                      value={sealWindow}
+                      aria-invalid={parseWindowHours(sealWindow) === null}
+                      onChange={(event) => {
+                        touchCycleForm();
+                        setSealWindow(event.target.value);
+                      }}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className={LABEL}>{t("drawLive.nonceWindowLabel")}</span>
+                    <input
+                      className={FIELD}
+                      inputMode="numeric"
+                      data-testid="cycle-nonce-window"
+                      value={nonceWindow}
+                      aria-invalid={parseWindowHours(nonceWindow) === null}
+                      onChange={(event) => {
+                        touchCycleForm();
+                        setNonceWindow(event.target.value);
+                      }}
+                    />
+                  </label>
+                </div>
+                <p data-testid="cycle-windows-hint" className={HINT}>{t("drawLive.windowsHint")}</p>
+                {parseWindowHours(sealWindow) === null || parseWindowHours(nonceWindow) === null ? (
+                  <p role="alert" data-testid="cycle-windows-invalid" className={BAD}>{t("drawLive.windowsInvalid")}</p>
+                ) : null}
                 <label className="block">
                   <span className={LABEL}>{t("drawLive.gateLabel")}</span>
                   <select
@@ -1288,7 +1351,7 @@ function LiveDrawBody({
           <section className={CARD} data-draw-panel="paid">
             <h3 className={HEADING}>{t("drawLive.payoutTitle")}</h3>
             <p data-testid="payout-done" className="mt-2 text-[12px] font-semibold text-[#065F46]">
-              {receipt !== null
+              {receipt !== null && !receipt.alreadyPaid && receipt.ledgerSequence !== null
                 ? t(receipt.replayed ? "drawLive.payoutReplayed" : "drawLive.payoutDone", {
                     sequence: receipt.ledgerSequence ?? "?"
                   })
@@ -1436,6 +1499,7 @@ function DrawPanel({
   // Cancel: only after the deadline, only for members who missed it, never once the reveal is opened.
   const sealDeadlineAt = Date.parse(session.sealDeadline);
   const nonceDeadlineAt = session.nonceDeadline === null ? Number.NaN : Date.parse(session.nonceDeadline);
+  const sealingClosed = sealing && now >= sealDeadlineAt;
   const sealingCancelWaits = sealing && needsAll && now < sealDeadlineAt;
   const sealingCancelOpen = sealing && needsAll && now >= sealDeadlineAt;
   const committedCancelWaits = committed && !session.revealRequested && pending > 0 && now < nonceDeadlineAt;
@@ -1476,9 +1540,14 @@ function DrawPanel({
         ))}
       </ul>
 
-      {sealing ? (
+      {sealing && !sealingClosed ? (
         <p data-testid="seal-deadline" className={HINT}>
           {t("drawLive.sealDeadline", { date: when(session.sealDeadline) })}
+        </p>
+      ) : null}
+      {sealingClosed ? (
+        <p data-testid="sealing-closed" role="status" className={NOTICE}>
+          {t("drawLive.sealingClosedNote", { date: when(session.sealDeadline) })}
         </p>
       ) : null}
       {committed && !session.revealRequested && session.nonceDeadline !== null ? (
@@ -1512,7 +1581,9 @@ function DrawPanel({
             </p>
           ) : null
         ) : sealing ? (
-          standing === "none" ? (
+          sealingClosed && standing !== "mine" ? (
+            <p data-testid="seal-closed-mine" className={NOTICE}>{t("drawLive.sealingClosedMine")}</p>
+          ) : standing === "none" ? (
             <button type="button" data-testid="seal-button" className={`${BUTTON} mt-2`} disabled={busy !== null} onClick={onSeal}>
               {busy === "seal" ? t("drawLive.working") : t("drawLive.sealAction")}
             </button>

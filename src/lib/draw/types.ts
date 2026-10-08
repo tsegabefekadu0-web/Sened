@@ -67,6 +67,8 @@ export const DRAW_ERROR_CODES = [
   "ROUND_HAS_LIVE_DRAW",
   /** The draw was cancelled; it takes no seal, nonce, commit or reveal. */
   "DRAW_CANCELLED",
+  /** A seal after the session's seal deadline: sealing is closed. */
+  "SEAL_DEADLINE_PASSED",
   /** Cancel before the seal or nonce-release deadline. */
   "CANCEL_TOO_EARLY",
   /** The reveal was opened, so the draw must be finished and cannot be cancelled. */

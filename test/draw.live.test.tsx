@@ -242,6 +242,9 @@ function renderAs(server: Server, userId: string, locale: "en" | "am" = "en") {
 }
 
 beforeEach(() => {
+  // The server double runs on NOW; the screen reads Date.now() for the seal deadline, so both agree.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(NOW));
   triggerHaptic.mockClear();
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://demo.supabase.co");
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon-key");
@@ -253,6 +256,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 type User = ReturnType<typeof userEvent.setup>;
@@ -299,11 +303,58 @@ describe("signed in: cycles", () => {
       "groupId",
       "idempotencyKey",
       "name",
+      "nonceWindowHours",
       "reserveRatioBps",
+      "sealWindowHours",
       "totalRounds"
     ]);
     // The form's default policy is `off`: nothing changes for a group that does not choose.
-    expect(sent).toMatchObject({ contributionAmount: "1000.00", totalRounds: 3, reserveRatioBps: 1000, contributionGate: "off" });
+    expect(sent).toMatchObject({ contributionAmount: "1000.00", totalRounds: 3, reserveRatioBps: 1000, contributionGate: "off", sealWindowHours: 48, nonceWindowHours: 48 });
+  });
+
+  it("sends the seal and nonce-release windows the treasurer typed, and says they are fixed once created", async () => {
+    const user = userEvent.setup();
+    const server = createServer("treasurer");
+    renderAs(server, TREASURER);
+    await screen.findByTestId("draw-live");
+
+    expect(screen.getByTestId("cycle-windows-hint")).toHaveTextContent("fixed once the cycle is created");
+    const seal = screen.getByTestId("cycle-seal-window");
+    const nonce = screen.getByTestId("cycle-nonce-window");
+    expect(seal).toHaveValue("48");
+    expect(nonce).toHaveValue("48");
+    await user.clear(seal);
+    await user.type(seal, "24");
+    await user.clear(nonce);
+    await user.type(nonce, "72");
+    await user.type(screen.getByLabelText("Cycle name"), "Windows");
+    await user.type(screen.getByLabelText("Contribution per member (ETB)"), "1000");
+    await user.type(screen.getByLabelText("Rounds in the cycle"), "3");
+    await user.click(screen.getByRole("button", { name: "Create the cycle" }));
+
+    await waitFor(() => expect(screen.getByTestId("cycle-pot")).toHaveTextContent("Br 3,000.00"));
+    const sent = server.bodies.find((entry) => entry.path === "/api/draw/cycles")!.body;
+    expect(sent).toMatchObject({ sealWindowHours: 24, nonceWindowHours: 72 });
+  });
+
+  it("REJECTS (before asking the server) a window outside 1 to 720 hours or not a whole number", async () => {
+    const user = userEvent.setup();
+    const server = createServer("treasurer");
+    renderAs(server, TREASURER);
+    await screen.findByTestId("draw-live");
+
+    await user.type(screen.getByLabelText("Cycle name"), "Bad windows");
+    await user.type(screen.getByLabelText("Contribution per member (ETB)"), "1000");
+    await user.type(screen.getByLabelText("Rounds in the cycle"), "3");
+    for (const bad of ["0", "721", "1.5", "abc", ""]) {
+      const seal = screen.getByTestId("cycle-seal-window");
+      await user.clear(seal);
+      if (bad !== "") await user.type(seal, bad);
+      expect(screen.getByTestId("cycle-windows-invalid")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Create the cycle" }));
+      expect((await screen.findAllByRole("alert")).length).toBeGreaterThan(0);
+      expect(server.calls).not.toContain("POST /api/draw/cycles");
+    }
   });
 
   it("refuses rounds beyond the number of members before asking the server", async () => {
@@ -1224,6 +1275,7 @@ describe("cancelling for members who did not respond", () => {
     await openTheDraw(user);
 
     expect(screen.getByTestId("seal-deadline")).toBeInTheDocument();
+    expect(screen.queryByTestId("sealing-closed")).toBeNull();
     expect(screen.getByTestId("cancel-early")).toBeInTheDocument();
     expect(screen.queryByTestId("cancel-button")).toBeNull();
     expect(screen.queryByTestId("cancel-reason")).toBeNull();
@@ -1244,6 +1296,10 @@ describe("cancelling for members who did not respond", () => {
     await user.click(screen.getByRole("button", { name: "Refresh" }));
     await screen.findByTestId("cancel-button");
     expect(screen.queryByTestId("cancel-early")).toBeNull();
+    // Past the seal deadline the draw says sealing is closed and offers no seal button.
+    expect(screen.getByTestId("sealing-closed")).toHaveTextContent("Sealing closed on");
+    expect(screen.queryByTestId("seal-deadline")).toBeNull();
+    expect(screen.queryByTestId("seal-button")).toBeNull();
     const button = await screen.findByTestId("cancel-button");
     expect(button).toBeDisabled();
     await user.type(screen.getByTestId("cancel-reason"), "short");
@@ -1259,6 +1315,8 @@ describe("cancelling for members who did not respond", () => {
     const request = server.bodies.find((entry) => entry.path === "/api/draw/cancel")!.body;
     expect(Object.keys(request).sort()).toEqual(["drawId", "reason"]);
     expect(screen.getByTestId("cancelled-note")).toHaveTextContent("Two members never sealed within the window");
+    // The canceller is told it was recorded.
+    expect(screen.getByTestId("draw-notice")).toHaveTextContent("The draw was cancelled and recorded.");
 
     // A plain member sees the same record and is offered nothing to cancel.
     renderAs(server, MEMBER_B);

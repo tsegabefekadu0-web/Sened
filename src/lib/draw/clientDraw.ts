@@ -145,6 +145,7 @@ const ERROR_KEYS: Readonly<Record<string, MessageKey>> = {
   not_eligible: "drawLive.error.notEligible",
   round_has_live_draw: "drawLive.error.roundHasLiveDraw",
   draw_cancelled: "drawLive.error.drawCancelled",
+  seal_deadline_passed: "drawLive.error.sealDeadlinePassed",
   cancel_too_early: "drawLive.error.cancelTooEarly",
   cancel_reveal_opened: "drawLive.error.cancelRevealOpened",
   cancel_nothing_missed: "drawLive.error.cancelNothingMissed",
@@ -726,6 +727,8 @@ export interface PayoutReceipt {
   readonly ledgerSequence: string | null;
   readonly ledgerEntryHash: string | null;
   readonly replayed: boolean;
+  /** Another manager had already posted this payout: show it as done. */
+  readonly alreadyPaid: boolean;
 }
 
 /** `POST /api/draw/payouts` — owner or treasurer. Posts a real ledger disbursement. */
@@ -735,7 +738,7 @@ export async function postPayout(
 ): Promise<DrawResult<PayoutReceipt>> {
   const result = await call("/api/draw/payouts", { method: "POST", body: JSON.stringify(input) }, deps);
   if (!result.ok) return result;
-  const { round, ledgerEntryId, ledgerSequence, ledgerEntryHash, replayed } = result.data;
+  const { round, ledgerEntryId, ledgerSequence, ledgerEntryHash, replayed, alreadyPaid } = result.data;
   if (!isWireRound(round) || !isString(ledgerEntryId)) return badResponse(result.status);
   return {
     ok: true,
@@ -745,7 +748,8 @@ export async function postPayout(
       ledgerEntryId,
       ledgerSequence: ledgerSequence === undefined || ledgerSequence === null ? null : String(ledgerSequence),
       ledgerEntryHash: isString(ledgerEntryHash) ? ledgerEntryHash : null,
-      replayed: replayed === true
+      replayed: replayed === true,
+      alreadyPaid: alreadyPaid === true
     }
   };
 }

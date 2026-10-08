@@ -7366,6 +7366,16 @@ begin
   perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
     'select public.cancel_draw_v1(%L, %L)::text', d2, 'Waiting for the last member to answer')),
     'draw_forbidden', 'DRAW-INTEGRITY 5 cancel by a plain member');
+  -- SEAL DEADLINE: after it nobody can seal (the missing member, or a sealed one changing their seal)
+  perform pg_temp.expect_err(pg_temp.call_as(lazy, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', d2, repeat('b', 64))),
+    'draw_seal_deadline_passed', 'DRAW-SEAL-DEADLINE 1 a missing member seals after the deadline');
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', d2, repeat('c', 64))),
+    'draw_seal_deadline_passed', 'DRAW-SEAL-DEADLINE 2 a sealed member re-seals after the deadline');
+  if (select count(*) from public.draw_seals where draw_id = d2 and member_id = lazy) <> 0 then
+    raise exception 'DRAW-SEAL-DEADLINE FAILED: a late seal was stored';
+  end if;
   perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
     'select public.cancel_draw_v1(%L, %L)::text', d2, 'Waiting for the last member to answer')),
     'draw_forbidden', 'DRAW-INTEGRITY 5 cancel by an outsider');
@@ -7483,7 +7493,13 @@ begin
   j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format('select public.open_draw_v1(%L, null, %L, null, true)::text', cyc2, 'ix2-open-2')), 'INT reopen c2');
   d2 := (j -> 'session' ->> 'drawId')::uuid;
   perform pg_temp.ix_seal(d2, array[own, tre, mb1]);
-  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', pg_temp.ix_commit_stmt(d2, 'ix2-commit-2')), 'INT commit again');
+  -- NOT STRANDED: every eligible member sealed in time, the deadline then passes, commit still works
+  perform pg_temp.ix_expire_seal(d2);
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', d2, repeat('d', 64))),
+    'draw_seal_deadline_passed', 'DRAW-SEAL-DEADLINE 3 re-seal on a fully sealed session after the deadline');
+  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', pg_temp.ix_commit_stmt(d2, 'ix2-commit-2')), 'DRAW-SEAL-DEADLINE 4 commit after the deadline when all sealed');
+  raise notice 'DRAW-SEAL-DEADLINE OK: late seals refused; cancel path and all-sealed commit still work';
   if (select count(*) from public.draw_commitments where cycle_id = cyc2 and round = 1) <> 2 then
     raise exception 'DRAW-INTEGRITY 5 FAILED: the abandoned commitment is not on the record';
   end if;

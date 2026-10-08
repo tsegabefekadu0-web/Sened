@@ -259,7 +259,8 @@ describe("4. the cancel path", () => {
     const built = build();
     const made = await cycle(built);
     const session = (await open(built, made.cycleId)).session;
-    await seal(built, session.drawId, [OWNER, TREASURER, M1]);
+    // Everyone seals in time: after the deadline nobody could seal any more (see "7b").
+    await seal(built, session.drawId, [OWNER, TREASURER, M1, M2]);
 
     expect(await refusal(built.service.cancelDraw({ drawId: session.drawId, reason }, as(TREASURER)))).toBe("CANCEL_TOO_EARLY");
     built.advanceHours(47);
@@ -268,8 +269,36 @@ describe("4. the cancel path", () => {
     expect(await refusal(built.service.cancelDraw({ drawId: session.drawId, reason }, as(M1)))).toBe("FORBIDDEN");
     expect(await refusal(built.service.cancelDraw({ drawId: session.drawId, reason: "short" }, as(TREASURER)))).toBe("INVALID_REQUEST");
 
-    await seal(built, session.drawId, [M2]);
     expect(await refusal(built.service.cancelDraw({ drawId: session.drawId, reason }, as(TREASURER)))).toBe("CANCEL_NOTHING_MISSED");
+  });
+
+  it("7b. refuses seals after the seal deadline, and cannot strand the round either way", async () => {
+    // Somebody is missing: nobody can seal after the deadline, commit is refused, cancel works.
+    const late = build();
+    const lateMade = await cycle(late);
+    const lateSession = (await open(late, lateMade.cycleId)).session;
+    await seal(late, lateSession.drawId, [OWNER, TREASURER, M1]);
+    late.advanceHours(49);
+    const sealed = async (who: string) => (await secret(lateSession.drawId, who)).sealed;
+    // the missing member, and a sealed member changing their seal, are both refused
+    expect(await refusal(late.service.submitSeal({ drawId: lateSession.drawId, sealed: await sealed(M2) }, as(M2)))).toBe("SEAL_DEADLINE_PASSED");
+    expect(await refusal(late.service.submitSeal({ drawId: lateSession.drawId, sealed: "e".repeat(64) }, as(OWNER)))).toBe("SEAL_DEADLINE_PASSED");
+    // M2 is therefore still MISSED, and the cancel path ends the round's session
+    expect(await refusal(commit(late, lateSession.drawId))).toBe("MEMBER_COMMITMENT_MISSING");
+    const { cancellation } = await late.service.cancelDraw({ drawId: lateSession.drawId, reason }, as(TREASURER));
+    expect(cancellation.missedMembers).toEqual([M2]);
+    // a new session may leave out exactly the member who missed, so the round goes on
+    const reopened = (await open(late, lateMade.cycleId, TREASURER, { excludeMissed: true })).session;
+    expect(reopened.excluded).toEqual([M2]);
+
+    // Everyone sealed in time and the deadline then passes: commit still works.
+    const full = build();
+    const fullMade = await cycle(full);
+    const fullSession = (await open(full, fullMade.cycleId)).session;
+    await seal(full, fullSession.drawId, [OWNER, TREASURER, M1, M2]);
+    full.advanceHours(49);
+    expect(await refusal(full.service.submitSeal({ drawId: fullSession.drawId, sealed: "e".repeat(64) }, as(M1)))).toBe("SEAL_DEADLINE_PASSED");
+    await expect(commit(full, fullSession.drawId)).resolves.toBeDefined();
   });
 
   it("records who, when, why, the stage, the deadline and who missed; a repeat is a replay; the draw takes nothing more", async () => {
@@ -519,6 +548,6 @@ describe("7. a payout retry after a partial failure is a replay, not a conflict"
     expect(retried.round.state).toBe("paid");
     expect(await built.ledger.getEntries(GROUP, { actorId: TREASURER })).toHaveLength(1);
     // The ledger entry is dated by the reveal, never by whenever the payout was attempted.
-    expect(retried.ledgerEntry.occurredAt).toBe(retried.round.reveal!.revealedAt);
+    expect(retried.ledgerEntry!.occurredAt).toBe(retried.round.reveal!.revealedAt);
   });
 });

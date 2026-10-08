@@ -650,6 +650,9 @@ export class InMemoryDrawRepository implements DrawRepository {
     if (!/^[0-9a-f]{64}$/.test(input.sealed)) throw new DrawError("INVALID_REQUEST", "draw_invalid_request");
     if (this.cancellationOf(session.drawId) !== undefined) throw new DrawError("DRAW_CANCELLED", "draw_cancelled");
     if (this.commitments.has(session.drawId)) throw new DrawError("ALREADY_COMMITTED", "draw_already_committed");
+    if (this.clock().getTime() >= new Date(session.sealDeadline).getTime()) {
+      throw new DrawError("SEAL_DEADLINE_PASSED", "draw_seal_deadline_passed");
+    }
     if (!this.sessionEligible(session).includes(context.userId)) {
       throw new DrawError("NOT_ELIGIBLE", "draw_not_eligible");
     }

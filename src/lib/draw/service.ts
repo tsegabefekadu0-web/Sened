@@ -63,8 +63,12 @@ export interface DrawPayoutRequest {
 
 export interface DrawPayoutResult {
   readonly round: DrawRound;
-  readonly ledgerEntry: LedgerEntry;
+  /** The entry this call posted; `null` when the payout was already on record and nothing was posted. */
+  readonly ledgerEntry: LedgerEntry | null;
+  /** The same caller retried a payout that already succeeded: the original payout, nothing new posted. */
   readonly replayed: boolean;
+  /** A different manager asked for a payout somebody else already posted: it is done, not an error. */
+  readonly alreadyPaid: boolean;
 }
 
 export interface DrawCycleSummary {
@@ -283,10 +287,10 @@ export class DrawService {
         );
       }
       if (round.payout !== null) {
-        throw new DrawError(
-          "IDEMPOTENCY_CONFLICT",
-          "A payout has already been posted for this draw"
-        );
+        // The payout is on record and is never posted again, so no ledger call is made: the
+        // original payout is the answer. The caller who posted it gets a clean replay; any
+        // other manager is told it is already paid.
+        return this.recordedPayout(round, context);
       }
 
       const verification = await this.verifyRoundInternal(round, context);
@@ -326,20 +330,30 @@ export class DrawService {
         { actorId: context.userId }
       );
 
-      const saved = await this.repository.savePayout(
-        {
-          drawId: round.drawId,
-          ledgerEntryId: result.entry.id,
-          winnerMemberId: round.reveal.winnerMemberId,
-          amount,
-          reserveAmount: round.reveal.reserveAmount,
-          postedAt: result.entry.recordedAt,
-          postedBy: context.userId
-        },
-        context
-      );
+      let saved: DrawRound;
+      try {
+        saved = await this.repository.savePayout(
+          {
+            drawId: round.drawId,
+            ledgerEntryId: result.entry.id,
+            winnerMemberId: round.reveal.winnerMemberId,
+            amount,
+            reserveAmount: round.reveal.reserveAmount,
+            postedAt: result.entry.recordedAt,
+            postedBy: context.userId
+          },
+          context
+        );
+      } catch (error) {
+        // Two managers raced and the other payout row won: read it back and answer as a retry.
+        if (error instanceof DrawError && error.code === "IDEMPOTENCY_CONFLICT") {
+          const current = await this.requireRound(request.drawId, context);
+          if (current.payout !== null) return this.recordedPayout(current, context);
+        }
+        throw error;
+      }
 
-      return { round: saved, ledgerEntry: result.entry, replayed: result.replayed };
+      return { round: saved, ledgerEntry: result.entry, replayed: result.replayed, alreadyPaid: false };
     } catch (error) {
       if (isLedgerError(error)) {
         // Preserve the ledger's own guarantees rather than flattening them into
@@ -360,6 +374,11 @@ export class DrawService {
       }
       throw mapDrawError(error);
     }
+  }
+
+  private recordedPayout(round: DrawRound, context: DrawActorContext): DrawPayoutResult {
+    const mine = round.payout?.postedBy === context.userId;
+    return { round, ledgerEntry: null, replayed: mine, alreadyPaid: !mine };
   }
 
   // -- cycles and draws ------------------------------------------------------------

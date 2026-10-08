@@ -765,6 +765,26 @@ describe("HttpSyncTransport", () => {
     return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" }, ...init });
   }
 
+  it("calls fetch as a plain function, not as a method of the transport (a browser's fetch throws Illegal invocation otherwise)", async () => {
+    // A real browser's window.fetch throws when it is called with any `this` but the window.
+    // Test doubles never do, which is how the transport once shipped calling `this.fetchImpl(...)`
+    // and could not send a single request outside the tests.
+    const browserLikeFetch = function (this: unknown): Promise<Response> {
+      return Promise.resolve(jsonResponse({ results: [] }));
+    } as unknown as typeof fetch;
+    const viaDefault = vi.fn(browserLikeFetch);
+    vi.stubGlobal("fetch", function (this: unknown, ...args: unknown[]) {
+      if (this !== undefined && this !== globalThis) {
+        return Promise.reject(new TypeError("Illegal invocation"));
+      }
+      return viaDefault(...(args as Parameters<typeof fetch>));
+    });
+    const defaultTransport = new HttpSyncTransport();
+    await expect(
+      defaultTransport.pull(token, { groupId, sinceSequence: "0", limit: 10 })
+    ).rejects.not.toMatchObject({ code: "SYNC_NETWORK" });
+  });
+
   it("maps a 404 to SYNC_NOT_CONFIGURED, because a missing route is not an outage", async () => {
     const transport = new HttpSyncTransport({
       fetchImpl: async () => new Response("not found", { status: 404 })

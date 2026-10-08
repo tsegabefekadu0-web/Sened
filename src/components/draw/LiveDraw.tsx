@@ -849,6 +849,7 @@ function LiveDrawBody({
         phase={phase}
         reducedMotion={reducedMotion}
         roundLabel={roundLabel}
+        sealLabel={locale === "am" ? "ታሽጓል" : "SEALED"}
         winnerName={winnerId === null ? undefined : labelFor(winnerId)}
       />
 

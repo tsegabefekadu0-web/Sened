@@ -104,7 +104,10 @@ export class HttpSyncTransport implements SyncTransport {
     if (!impl) {
       throw new SyncError("SYNC_NOT_CONFIGURED", "This runtime has no fetch implementation.");
     }
-    this.fetchImpl = impl;
+    // Called as a bare function on purpose. `this.fetchImpl(...)` would run the browser's native
+    // fetch with `this` set to the transport, and the browser throws "Illegal invocation": every
+    // request would fail as SYNC_NETWORK in a real browser while any injected test double worked.
+    this.fetchImpl = ((input, init) => impl(input, init)) as typeof fetch;
   }
 
   async push(

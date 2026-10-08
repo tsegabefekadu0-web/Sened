@@ -929,7 +929,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
             </button>
             <button
               type="button"
-              disabled={busy || desk.queue.byState.queued === 0}
+              disabled={busy || (desk.queue.byState.queued ?? 0) + (desk.queue.byState["retry-scheduled"] ?? 0) === 0}
               onClick={() => void drain()}
               className="rounded-full border border-terracotta-500 px-4 py-1.5 text-xs disabled:opacity-50"
             >

@@ -14,6 +14,8 @@ export interface MesobCeremonyProps {
   readonly reducedMotion: boolean;
   readonly winnerName?: string;
   readonly roundLabel: string;
+  /** The word on the wax seal; localised by the caller (defaults to the English word). */
+  readonly sealLabel?: string;
 }
 
 const CONFETTI_COLORS = ["#D4A244", "#E06438", "#16A34A", "#F3C769", "#C6532B"];
@@ -52,7 +54,8 @@ export function MesobCeremony({
   phase,
   reducedMotion,
   winnerName,
-  roundLabel
+  roundLabel,
+  sealLabel
 }: MesobCeremonyProps) {
   const shaking = phase === "shaking" && !reducedMotion;
   const lidLifting = phase === "revealing" && !reducedMotion;
@@ -98,7 +101,7 @@ export function MesobCeremony({
         {phase === "sealed" || phase === "shaking" ? (
           <div className="sened-seal absolute right-[14%] top-[6%] flex h-[46px] w-[46px] items-center justify-center rounded-full border-2 border-[#F3C769] bg-[#863214] text-[9px] font-bold leading-none tracking-tight text-[#F3C769]">
             <span className="font-ethiopic">ቃል</span>
-            <span className="font-sans">SEALED</span>
+            <span className="font-sans">{sealLabel ?? "SEALED"}</span>
           </div>
         ) : null}
 

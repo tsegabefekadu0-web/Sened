@@ -156,6 +156,16 @@ describe("DrawBoard ceremony", () => {
     expect(panel("rotation").getAllByText("አሸናፊ ሆነዋል")).toHaveLength(2);
   });
 
+  it("shows no English words in the Amharic page header and seal stamp, and the English ones after the switch", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<DrawPage />);
+    expect(screen.queryByText("VERIFIABLE DRAW")).toBeNull();
+    expect(screen.getByText("ሊረጋገጥ የሚችል እጣ")).toBeInTheDocument();
+    expect(container.textContent).not.toContain("SEALED");
+    await user.click(screen.getByRole("button", { name: "Switch to English" }));
+    expect(screen.getByText("VERIFIABLE DRAW")).toBeInTheDocument();
+  });
+
   it("switches to English without losing the ceremony", async () => {
     const user = userEvent.setup();
     render(<DrawPage />);

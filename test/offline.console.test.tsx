@@ -294,6 +294,52 @@ describe("offline console", () => {
     expect(rows[0]?.serverEntryId).toBe("server-entry-1");
   });
 
+  it("keeps offering to send after a lost response: a retry-scheduled draft can be sent again and lands once", async () => {
+    const draft = await saveDraft(db, { request: contributionRequest("251.37", "d-lost"), updatedBy: ACTOR_ID });
+    await queueDraft(db, draft.id);
+    let calls = 0;
+    const flaky: SyncTransport = {
+      async push(_authorization, envelopes): Promise<readonly SyncPushResult[]> {
+        calls += 1;
+        if (calls === 1) {
+          // The server may have stored the entry; the answer never arrived.
+          throw new SyncError("SYNC_NETWORK", "This device could not reach the sync service.");
+        }
+        return envelopes.map((envelope) => ({
+          mutationId: envelope.mutationId,
+          outcome: "ACCEPTED" as const,
+          serverEntryId: "server-entry-1",
+          serverEntryHash: "a".repeat(64),
+          serverSequence: "1"
+        }));
+      },
+      async pull() {
+        throw new SyncError("SYNC_NOT_CONFIGURED", "no pull in this test");
+      }
+    };
+
+    const user = userEvent.setup();
+    render(<OfflineConsole database={db} authorization={token} transport={flaky} />);
+    await screen.findAllByText(OFFLINE_COPY["offline.queue.pending"].en);
+    const push = screen.getByRole("button", { name: OFFLINE_SYNC_PUSH });
+    await waitFor(() => expect(push).toBeEnabled());
+    await user.click(push);
+    await waitFor(async () => {
+      expect((await db.outbox.toArray())[0]?.state).toBe("retry-scheduled");
+    });
+
+    // The row is waiting for a retry, not gone: the button must still be there to press.
+    await waitFor(() => expect(screen.getByRole("button", { name: OFFLINE_SYNC_PUSH })).toBeEnabled());
+    await waitFor(
+      async () => {
+        await user.click(screen.getByRole("button", { name: OFFLINE_SYNC_PUSH }));
+        expect((await db.outbox.toArray())[0]?.state).toBe("synced");
+      },
+      { timeout: 6000, interval: 400 }
+    );
+    expect(calls).toBe(2);
+  });
+
   it("shows the confirmed chain head and hash after a pull", async () => {
     const first: LedgerEntryLike = {
       id: "e1",

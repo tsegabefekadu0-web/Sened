@@ -27,7 +27,7 @@ export default function DrawPage() {
                 እጣ
               </h1>
               <p className="font-sans text-[10px] font-medium tracking-[0.16em] text-[#D4A244]">
-                VERIFIABLE DRAW
+                {locale === "am" ? "ሊረጋገጥ የሚችል እጣ" : "VERIFIABLE DRAW"}
               </p>
             </div>
           </div>

@@ -263,6 +263,7 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
         phase={phase}
         reducedMotion={reducedMotion}
         roundLabel={copy.roundLabel(roundNumber, TOTAL_ROUNDS)}
+        sealLabel={locale === "am" ? "ታሽጓል" : "SEALED"}
         winnerName={
           reveal === null
             ? undefined

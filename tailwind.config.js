@@ -69,8 +69,8 @@ module.exports = {
         }
       },
       fontFamily: {
-        ethiopic: ["Noto Sans Ethiopic", "Abyssinica SIL", "sans-serif"],
-        sans: ["Plus Jakarta Sans", "Noto Sans Ethiopic", "Inter", "sans-serif"],
+        ethiopic: ["var(--font-noto-sans-ethiopic)", "Noto Sans Ethiopic", "Abyssinica SIL", "sans-serif"],
+        sans: ["var(--font-plus-jakarta-sans)", "Plus Jakarta Sans", "Noto Sans Ethiopic", "Inter", "sans-serif"],
       },
       boxShadow: {
         debter: "0 16px 36px -8px rgba(13, 10, 8, 0.65), 0 4px 12px rgba(13, 10, 8, 0.4)",

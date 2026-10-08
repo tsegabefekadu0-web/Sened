@@ -41,12 +41,11 @@ async function bodyText(page: Page): Promise<string> {
 /**
  * Block everything that is not served by this app.
  *
- * `layout.tsx` loads Noto Sans Ethiopic from fonts.googleapis.com. Where that is
- * unreachable the request hangs, and a navigation waiting for the `load` event
- * waits with it — which is what made this suite flake: the same forty tests
- * would pass or fail depending on whether a third-party CDN answered. The font
- * degrades to a system stack either way, so blocking it changes nothing about
- * what is being tested and makes every navigation deterministic.
+ * The app serves its own fonts (`next/font` self-hosts them at build time), so
+ * nothing here should reach a third party. This stays as hygiene: a stray
+ * external request, such as a CDN that hangs, would otherwise stall the `load`
+ * event and make navigation flaky, and blocking it makes every run
+ * deterministic and any regression visible as a failed request.
  */
 test.beforeEach(async ({ page }) => {
   await page.route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/, (route) => route.abort());
@@ -59,20 +58,6 @@ test.describe("every route renders", () => {
       page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
       page.on("console", (message) => {
         if (message.type() !== "error") {
-          return;
-        }
-        // A third-party CDN being unreachable is not a defect in this codebase.
-        // `layout.tsx` loads Noto Sans Ethiopic from fonts.googleapis.com, and in
-        // a restricted network that resolves to ERR_NAME_NOT_RESOLVED — which
-        // the browser reports as a console error. The font then falls back to a
-        // system stack, which is the correct degradation. Asserting zero console
-        // errors including that would make the suite report the network rather
-        // than the application.
-        //
-        // Self-hosting the fonts is the real fix for a product used on poor
-        // connections, and it is recorded in AGENTWORK.md section 6. It is not
-        // something to slip in here.
-        if (/Failed to load resource/i.test(message.text())) {
           return;
         }
         failures.push(`console.error: ${message.text()}`);

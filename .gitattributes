@@ -1,0 +1,25 @@
+# Normalise line endings in the repository to LF; checkouts follow the OS default unless forced below.
+* text=auto eol=lf
+
+# Windows scripts, and the CSVs a reviewer opens in Excel, stay CRLF.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.csv text eol=crlf
+
+# Binaries: never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.mp3 binary
+*.wav binary
+*.webm binary
+*.mp4 binary

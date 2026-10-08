@@ -1,7 +1,25 @@
 import type { Metadata, Viewport } from "next";
+import { Noto_Sans_Ethiopic, Plus_Jakarta_Sans } from "next/font/google";
 import "./globals.css";
 import { ServiceWorkerRegistration } from "@/components/pwa/ServiceWorkerRegistration";
 import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
+
+// Self-hosted at build time by next/font, so no runtime request goes to Google.
+// The CSS variables are consumed first in the font stacks in globals.css and
+// tailwind.config.js; the original family names stay behind them as fallbacks.
+const notoSansEthiopic = Noto_Sans_Ethiopic({
+  subsets: ["ethiopic", "latin"],
+  weight: ["400", "500", "600", "700", "800"],
+  display: "swap",
+  variable: "--font-noto-sans-ethiopic"
+});
+
+const plusJakartaSans = Plus_Jakarta_Sans({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800"],
+  display: "swap",
+  variable: "--font-plus-jakarta-sans"
+});
 
 export const metadata: Metadata = {
   title: "Sened (ሰነድ) — የህብረተሰብ እቁብ እና ዕድር አስተዳዳሪ",
@@ -40,15 +58,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="am">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Noto+Sans+Ethiopic:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
-          rel="stylesheet"
-        />
-      </head>
+    <html lang="am" className={`${notoSansEthiopic.variable} ${plusJakartaSans.variable}`}>
       <body className="min-h-screen bg-[#F4EEE5] font-ethiopic antialiased selection:bg-terracotta-500 selection:text-white">
         <ServiceWorkerRegistration />
         {/* One active group for the whole app: a client provider inside this server layout. */}

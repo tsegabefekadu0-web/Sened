@@ -14,20 +14,22 @@ const DIR = "supabase/migrations";
 const FILE = "20261011100000_contribution_grid_and_gate.sql";
 const sql = readFileSync(join(process.cwd(), DIR, FILE), "utf8");
 const code = sql.replace(/--.*$/gm, "");
+// 20261014100000 redefines open_draw_v1 and create_draw_cycle_v1 (a trailing optional parameter each).
+const integrity = readFileSync(join(process.cwd(), DIR, "20261014100000_draw_integrity.sql"), "utf8").replace(/--.*$/gm, "");
 const repository = readFileSync(join(process.cwd(), "src/lib/draw/repository.ts"), "utf8");
 const server = readFileSync(join(process.cwd(), "src/lib/draw/contributionsServer.ts"), "utf8");
 const harness = readFileSync(join(process.cwd(), "scripts/verify-migrations.sql"), "utf8");
 const powershell = readFileSync(join(process.cwd(), "scripts/verify-migrations.ps1"), "utf8");
 
-function body(name: string): string {
-  const start = code.indexOf(`create or replace function public.${name}(`);
+function body(name: string, source = code): string {
+  const start = source.indexOf(`create or replace function public.${name}(`);
   if (start === -1) throw new Error(`${name} is not defined`);
-  const next = code.indexOf("create or replace function public.", start + 10);
-  return code.slice(start, next === -1 ? undefined : next);
+  const next = source.indexOf("create or replace function public.", start + 10);
+  return source.slice(start, next === -1 ? undefined : next);
 }
 
-function parameters(name: string): string[] {
-  const text = body(name);
+function parameters(name: string, source = code): string[] {
+  const text = body(name, source);
   const open = text.indexOf("(");
   let depth = 0;
   let close = -1;
@@ -75,18 +77,33 @@ describe("the migration is last and does not edit earlier ones", () => {
 });
 
 describe("the arities, the repository and the server agree", () => {
-  it("open_draw_v1 gains exactly one trailing optional parameter, sent by name", () => {
+  it("open_draw_v1: the gate's trailing override reason, then (20261014) exclude_missed, all sent by name", () => {
     expect(parameters("open_draw_v1")).toEqual(["cycle_id", "round", "idempotency_key", "override_reason"]);
     expect(body("open_draw_v1")).toMatch(/p_override_reason text default null/);
-    expect(rpcKeys(repository, "open_draw_v1").sort()).toEqual([...parameters("open_draw_v1")].sort());
+    expect(parameters("open_draw_v1", integrity)).toEqual(["cycle_id", "round", "idempotency_key", "override_reason", "exclude_missed"]);
+    expect(body("open_draw_v1", integrity)).toMatch(/p_exclude_missed boolean default false/);
+    expect(rpcKeys(repository, "open_draw_v1").sort()).toEqual([...parameters("open_draw_v1", integrity)].sort());
   });
 
-  it("create_draw_cycle_v1 gains exactly one trailing optional parameter, defaulting to off", () => {
+  it("create_draw_cycle_v1: the gate (default off), then (20261014) the two windows, all sent by name", () => {
     expect(parameters("create_draw_cycle_v1")).toEqual([
       "group_id", "name", "contribution_amount", "total_rounds", "reserve_ratio_bps", "started_at", "idempotency_key", "contribution_gate"
     ]);
     expect(body("create_draw_cycle_v1")).toMatch(/p_contribution_gate text default 'off'/);
-    expect(rpcKeys(repository, "create_draw_cycle_v1").sort()).toEqual([...parameters("create_draw_cycle_v1")].sort());
+    expect(parameters("create_draw_cycle_v1", integrity)).toEqual([
+      "group_id", "name", "contribution_amount", "total_rounds", "reserve_ratio_bps", "started_at", "idempotency_key",
+      "contribution_gate", "seal_window_hours", "nonce_window_hours"
+    ]);
+    expect(rpcKeys(repository, "create_draw_cycle_v1").sort()).toEqual([...parameters("create_draw_cycle_v1", integrity)].sort());
+  });
+
+  it("20261014 drops the previous arities of both functions before redefining them", () => {
+    const dropOpen = integrity.indexOf("drop function if exists public.open_draw_v1(uuid, integer, text, text);");
+    const dropCreate = integrity.indexOf("drop function if exists public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text);");
+    expect(dropOpen).toBeGreaterThan(-1);
+    expect(dropCreate).toBeGreaterThan(-1);
+    expect(dropOpen).toBeLessThan(integrity.indexOf("create or replace function public.open_draw_v1("));
+    expect(dropCreate).toBeLessThan(integrity.indexOf("create or replace function public.create_draw_cycle_v1("));
   });
 
   it("the old arities are dropped, not left as overloads PostgREST cannot choose between", () => {

@@ -60,7 +60,13 @@ const session: DrawSessionView = {
   eligible: [actorId, otherMember],
   seals: [{ memberId: otherMember, sealed: "a".repeat(64), sealedAt: "2026-10-01T10:01:00.000Z" }],
   nonces: [{ memberId: otherMember, released: true }],
-  revealRequested: false
+  revealRequested: false,
+  sealDeadline: "2026-10-03T10:00:00.000Z",
+  nonceDeadline: "2026-10-03T10:05:00.000Z",
+  excluded: [],
+  cancelsThisRound: 0,
+  cancellation: null,
+  revealOpening: null
 };
 
 function fakeService() {

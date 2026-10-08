@@ -32,6 +32,12 @@ const SEED = "treasurer-seed-0123456789-xyz";
 const as = (userId: string) => ({ userId });
 
 function build() {
+  // Deadlines are the repository's clock: tests move it instead of waiting 48 hours.
+  const clockState = { now: new Date("2026-10-01T10:00:00.000Z") };
+  const clock = () => new Date(clockState.now);
+  const advanceHours = (hours: number) => {
+    clockState.now = new Date(clockState.now.getTime() + hours * 3_600_000);
+  };
   const repository = new InMemoryDrawRepository({
     groups: [
       {
@@ -45,7 +51,7 @@ function build() {
       }
     ],
     hasher,
-    clock: () => new Date("2026-10-01T10:00:00.000Z")
+    clock
   });
   const ledger = new InMemoryLedgerRepository({
     groups: [{ id: GROUP, tenantId: TENANT, members: [{ userId: TREASURER, role: "treasurer" }] }],
@@ -55,11 +61,8 @@ function build() {
     ],
     clock: () => new Date("2026-10-01T10:00:00.000Z")
   });
-  const service = new DrawService(repository, new LedgerService(ledger), {
-    hasher,
-    clock: () => new Date("2026-10-01T10:00:00.000Z")
-  });
-  return { repository, service };
+  const service = new DrawService(repository, new LedgerService(ledger), { hasher, clock });
+  return { repository, service, advanceHours };
 }
 
 type Built = ReturnType<typeof build>;
@@ -102,11 +105,33 @@ async function sealAs(built: Built, drawId: string, memberId: string) {
   return mine;
 }
 
-const commit = (built: Built, drawId: string, by = TREASURER) =>
-  built.service.commitFromSession(
+/** Every eligible member seals: the quorum is all of them, not one. Members who already sealed keep their seal. */
+async function sealEveryone(built: Built, drawId: string) {
+  const session = await built.service.getSession(drawId, as(TREASURER));
+  for (const memberId of session.eligible) {
+    if (!session.seals.some((seal) => seal.memberId === memberId)) await sealAs(built, drawId, memberId);
+  }
+}
+
+/** Every sealed member releases the nonce their device made (the nonces are deterministic in this file). */
+async function releaseEveryone(built: Built, drawId: string) {
+  const session = await built.service.getSession(drawId, as(TREASURER));
+  const released = new Map<string, string>();
+  for (const seal of session.seals) {
+    const mine = await memberSeal(drawId, seal.memberId);
+    await built.service.submitNonce({ drawId, nonce: mine.nonce }, as(seal.memberId));
+    released.set(seal.memberId, mine.nonce);
+  }
+  return released;
+}
+
+const commit = async (built: Built, drawId: string, by = TREASURER) => {
+  await sealEveryone(built, drawId);
+  return built.service.commitFromSession(
     { drawId, seed: SEED, commitmentNonce: "treasurer-commit-nonce-0123456789", idempotencyKey: `commit.${drawId}` },
     as(by)
   );
+};
 
 describe("cycles", () => {
   it("lets an owner or treasurer create one, with the pot computed from the contribution and the members", async () => {
@@ -263,6 +288,9 @@ describe("a nonce is released only after the commitment, and only by its owner",
     const session = await openRound(built, made.cycleId);
     const m1 = await sealAs(built, session.drawId, M1);
     const m2 = await sealAs(built, session.drawId, M2);
+    // The quorum is everyone: the owner and the treasurer seal too.
+    await sealAs(built, session.drawId, OWNER);
+    await sealAs(built, session.drawId, TREASURER);
     return { built, session, m1, m2, made };
   }
 
@@ -272,7 +300,7 @@ describe("a nonce is released only after the commitment, and only by its owner",
     expect((await built.service.getSession(session.drawId, as(M1))).nonces).toEqual([]);
   });
 
-  it("is refused for a wrong nonce, another member's nonce, a member who never sealed, and an outsider", async () => {
+  it("is refused for a wrong nonce, another member's nonce, a nonce that is not yours, and an outsider", async () => {
     const { built, session, m1, m2 } = await sealed();
     await commit(built, session.drawId);
 
@@ -281,7 +309,7 @@ describe("a nonce is released only after the commitment, and only by its owner",
     );
     // M2's genuine nonce, submitted by M1: it opens M2's seal, not M1's.
     expect(await refusal(built.service.submitNonce({ drawId: session.drawId, nonce: m2.nonce }, as(M1)))).toBe("MEMBER_COMMITMENT_MISMATCH");
-    expect(await refusal(built.service.submitNonce({ drawId: session.drawId, nonce: m1.nonce }, as(OWNER)))).toBe("MEMBER_COMMITMENT_MISSING");
+    expect(await refusal(built.service.submitNonce({ drawId: session.drawId, nonce: m1.nonce }, as(OWNER)))).toBe("MEMBER_COMMITMENT_MISMATCH");
     expect(await refusal(built.service.submitNonce({ drawId: session.drawId, nonce: m1.nonce }, as(OUTSIDER)))).toBe("FORBIDDEN");
     expect((await built.service.getSession(session.drawId, as(M1))).nonces.every((entry) => !entry.released)).toBe(true);
   });
@@ -302,10 +330,9 @@ describe("a nonce is released only after the commitment, and only by its owner",
   });
 
   it("is refused once the reveal has been requested", async () => {
-    const { built, session, m1, m2 } = await sealed();
+    const { built, session, m1 } = await sealed();
     await commit(built, session.drawId);
-    await built.service.submitNonce({ drawId: session.drawId, nonce: m1.nonce }, as(M1));
-    await built.service.submitNonce({ drawId: session.drawId, nonce: m2.nonce }, as(M2));
+    await releaseEveryone(built, session.drawId);
     await built.repository.requestReveal({ drawId: session.drawId, seed: SEED }, as(TREASURER));
 
     expect(await refusal(built.service.submitNonce({ drawId: session.drawId, nonce: m1.nonce }, as(M1)))).toBe("ALREADY_REVEALED");
@@ -322,15 +349,58 @@ describe("the commit is over what the database holds", () => {
     expect((await built.service.getSession(session.drawId, as(M1))).state).toBe("sealing");
   });
 
-  it("needs a seal from someone other than the committer", async () => {
+  it("needs a seal from EVERY eligible member, not just one from somebody else", async () => {
     const built = build();
     const session = await openRound(built, (await cycle(built)).cycleId);
-    expect(await refusal(commit(built, session.drawId))).toBe("MEMBER_COMMITMENT_MISSING");
+    const direct = () =>
+      built.service.commitFromSession(
+        { drawId: session.drawId, seed: SEED, commitmentNonce: "treasurer-commit-nonce-0123456789", idempotencyKey: `quorum.${session.drawId}` },
+        as(TREASURER)
+      );
+    expect(await refusal(direct())).toBe("MEMBER_COMMITMENT_MISSING");
     await sealAs(built, session.drawId, TREASURER);
-    // The treasurer's own seal alone does not stop them choosing the winner.
-    expect(await refusal(commit(built, session.drawId))).toBe("MEMBER_COMMITMENT_MISSING");
+    // The treasurer's own seal alone does not stop them choosing the winner ...
+    expect(await refusal(direct())).toBe("MEMBER_COMMITMENT_MISSING");
+    // ... and neither does a seal from one other member while two eligible members have not sealed.
     await sealAs(built, session.drawId, M1);
-    expect((await commit(built, session.drawId)).round.state).toBe("committed");
+    expect(await refusal(direct())).toBe("MEMBER_COMMITMENT_MISSING");
+    await sealAs(built, session.drawId, OWNER);
+    expect(await refusal(direct())).toBe("MEMBER_COMMITMENT_MISSING");
+    await sealAs(built, session.drawId, M2);
+    expect((await direct()).round.state).toBe("committed");
+  });
+
+  it("is refused by the double itself with a missing seal, even for a hand-built commitment", async () => {
+    const built = build();
+    const made = await cycle(built);
+    const session = await openRound(built, made.cycleId);
+    const m1 = await sealAs(built, session.drawId, M1);
+    const lone = await createCommitment(
+      {
+        groupId: GROUP,
+        cycleId: made.cycleId,
+        round: 1,
+        totalRounds: 3,
+        drawId: session.drawId,
+        commitmentNonce: "treasurer-commit-nonce-0123456789",
+        seed: SEED,
+        memberCommitments: [{ memberId: M1, sealed: m1.sealed }],
+        potAmount: made.potAmount,
+        reserveRatioBps: 1000,
+        members: session.eligible.map((memberId) => ({
+          memberId,
+          displayName: "x",
+          status: "active" as const,
+          contributionAmount: "1000.00"
+        })),
+        priorWinnerIds: [],
+        committedBy: TREASURER,
+        committedAt: "2026-10-01T10:00:00.000Z",
+        idempotencyKey: key("lone")
+      },
+      hasher
+    );
+    expect(await refusal(built.repository.saveCommitment(lone, as(TREASURER)))).toBe("MEMBER_COMMITMENT_MISSING");
   });
 
   it("commits to exactly the stored seals, the cycle's terms, and the group's roster", async () => {
@@ -343,7 +413,7 @@ describe("the commit is over what the database holds", () => {
     const { round, replayed } = await commit(built, session.drawId);
 
     expect(replayed).toBe(false);
-    expect(round.memberCommitments.map((entry) => entry.memberId).sort()).toEqual([M1, M2].sort());
+    expect(round.memberCommitments.map((entry) => entry.memberId).sort()).toEqual([OWNER, TREASURER, M1, M2].sort());
     expect(round.memberCommitments.find((entry) => entry.memberId === M1)?.sealed).toBe(m1.sealed);
     expect(round.memberCommitments.find((entry) => entry.memberId === M2)?.sealed).toBe(m2.sealed);
     expect(round).toMatchObject({ potAmount: "4000.00", totalRounds: 3, reserveRatioBps: 1000, round: 1, groupId: GROUP, cycleId: made.cycleId });
@@ -373,7 +443,11 @@ describe("the commit is over what the database holds", () => {
     const built = build();
     const made = await cycle(built);
     const session = await openRound(built, made.cycleId);
-    const m1 = await sealAs(built, session.drawId, M1);
+    await sealEveryone(built, session.drawId);
+    const stored = (await built.service.getSession(session.drawId, as(TREASURER))).seals.map((seal) => ({
+      memberId: seal.memberId,
+      sealed: seal.sealed
+    }));
 
     // What the application would build, and then the same thing with one lie in it.
     const honest = await createCommitment(
@@ -385,7 +459,7 @@ describe("the commit is over what the database holds", () => {
         drawId: session.drawId,
         commitmentNonce: "treasurer-commit-nonce-0123456789",
         seed: SEED,
-        memberCommitments: [{ memberId: M1, sealed: m1.sealed }],
+        memberCommitments: stored,
         potAmount: made.potAmount,
         reserveRatioBps: 1000,
         members: session.eligible.map((memberId) => ({
@@ -463,6 +537,8 @@ describe("the commit is over what the database holds", () => {
     const session = await openRound(built, (await cycle(built)).cycleId);
     await sealAs(built, session.drawId, M1);
     await sealAs(built, session.drawId, M2);
+    await sealAs(built, session.drawId, OWNER);
+    await sealAs(built, session.drawId, TREASURER);
     built.repository.setGroup({
       groupId: GROUP,
       members: [
@@ -475,7 +551,8 @@ describe("the commit is over what the database holds", () => {
 
     const { round } = await commit(built, session.drawId);
 
-    expect(round.memberCommitments.map((entry) => entry.memberId)).toEqual([M1]);
+    // M2's seal is dropped; the rest are the committed set.
+    expect(round.memberCommitments.map((entry) => entry.memberId).sort()).toEqual([OWNER, TREASURER, M1].sort());
     expect(round.participants.map((p) => p.memberId)).not.toContain(M2);
   });
 });
@@ -489,6 +566,13 @@ describe("the reveal uses the stored nonces and publishes them only with a match
     const m2 = await sealAs(built, session.drawId, M2);
     await commit(built, session.drawId);
     return { built, session, made, m1, m2 };
+  }
+
+  /** Everyone else's nonces too: the quorum is all four members. */
+  async function releaseOthers(built: Built, drawId: string) {
+    for (const memberId of [OWNER, TREASURER]) {
+      await built.service.submitNonce({ drawId, nonce: (await memberSeal(drawId, memberId)).nonce }, as(memberId));
+    }
   }
 
   it("never returns a nonce from any read, before or after members release them", async () => {
@@ -507,7 +591,9 @@ describe("the reveal uses the stored nonces and publishes them only with a match
       expect(await everything()).not.toContain(nonce);
     }
     await built.service.submitNonce({ drawId: session.drawId, nonce: m2.nonce }, as(M2));
-    for (const nonce of [m1.nonce, m2.nonce]) {
+    await releaseOthers(built, session.drawId);
+    const others = [(await memberSeal(session.drawId, OWNER)).nonce, (await memberSeal(session.drawId, TREASURER)).nonce];
+    for (const nonce of [m1.nonce, m2.nonce, ...others]) {
       expect(await everything()).not.toContain(nonce);
     }
   });
@@ -530,6 +616,7 @@ describe("the reveal uses the stored nonces and publishes them only with a match
     await built.service.submitNonce({ drawId: session.drawId, nonce: m1.nonce }, as(M1));
     expect(await refusal(built.service.reveal({ drawId: session.drawId, seed: SEED }, as(TREASURER)))).toBe("MEMBER_COMMITMENT_MISSING");
     await built.service.submitNonce({ drawId: session.drawId, nonce: m2.nonce }, as(M2));
+    await releaseOthers(built, session.drawId);
 
     const result = await built.service.reveal(
       // A forged opening supplied by the caller is not used on a server-created draw.
@@ -539,20 +626,20 @@ describe("the reveal uses the stored nonces and publishes them only with a match
 
     expect(result.verification.verified).toBe(true);
     expect(result.round.state).toBe("revealed");
-    expect([...result.round.reveal!.memberNonces].sort((a, b) => (a.memberId < b.memberId ? -1 : 1))).toEqual(
-      [
-        { memberId: M1, nonce: m1.nonce },
-        { memberId: M2, nonce: m2.nonce }
-      ].sort((a, b) => (a.memberId < b.memberId ? -1 : 1))
-    );
+    const expectedNonces = [
+      { memberId: M1, nonce: m1.nonce },
+      { memberId: M2, nonce: m2.nonce },
+      { memberId: OWNER, nonce: (await memberSeal(session.drawId, OWNER)).nonce },
+      { memberId: TREASURER, nonce: (await memberSeal(session.drawId, TREASURER)).nonce }
+    ].sort((a, b) => (a.memberId < b.memberId ? -1 : 1));
+    expect([...result.round.reveal!.memberNonces].sort((a, b) => (a.memberId < b.memberId ? -1 : 1))).toEqual(expectedNonces);
     // Only now are the seed and nonces in the published transcript.
     expect((await built.service.verify(session.drawId, as(M1))).transcript.seed).toBe(SEED);
   });
 
   it("refuses a reveal row that differs from the published opening", async () => {
-    const { built, session, m1, m2 } = await committed();
-    await built.service.submitNonce({ drawId: session.drawId, nonce: m1.nonce }, as(M1));
-    await built.service.submitNonce({ drawId: session.drawId, nonce: m2.nonce }, as(M2));
+    const { built, session, m1 } = await committed();
+    await releaseEveryone(built, session.drawId);
     const round = await built.service.getRound(session.drawId, as(TREASURER));
     const opened = await built.repository.requestReveal({ drawId: session.drawId, seed: SEED }, as(TREASURER));
 
@@ -575,7 +662,10 @@ describe("the reveal uses the stored nonces and publishes them only with a match
     expect(await refusal(built.repository.saveReveal({ ...reveal, seed: "swapped-seed-0123456789-xxxx" }, as(TREASURER)))).toBe("COMMITMENT_MISMATCH");
     expect(
       await refusal(
-        built.repository.saveReveal({ ...reveal, memberNonces: [{ memberId: M1, nonce: m1.nonce }, { memberId: M2, nonce: "forged-nonce-0123456789-abcd" }] }, as(TREASURER))
+        built.repository.saveReveal(
+          { ...reveal, memberNonces: opened!.memberNonces.map((entry) => (entry.memberId === M2 ? { ...entry, nonce: "forged-nonce-0123456789-abcd" } : entry)) },
+          as(TREASURER)
+        )
       )
     ).toBe("MEMBER_COMMITMENT_MISMATCH");
     expect((await built.service.getRound(session.drawId, as(TREASURER))).state).toBe("committed");
@@ -598,13 +688,10 @@ describe("a whole cycle: rotation, order, and the state of every draw", () => {
         const mine = await memberSeal(session.drawId, winner);
         expect(await refusal(built.service.submitSeal({ drawId: session.drawId, sealed: mine.sealed }, as(winner)))).toBe("NOT_ELIGIBLE");
       }
-      // The treasurer commits. Every other eligible member seals and releases; when
-      // the treasurer is the only one left there is nothing to choose, so their own
-      // seal is enough (the database allows exactly that case).
+      // The treasurer commits once EVERY eligible member has sealed; then every one of them releases.
       const committer = TREASURER;
-      const sealers = session.eligible.filter((id) => id !== committer);
       const secrets = new Map<string, string>();
-      for (const id of sealers.length > 0 ? sealers : [committer]) secrets.set(id, (await sealAs(built, session.drawId, id)).nonce);
+      for (const id of session.eligible) secrets.set(id, (await sealAs(built, session.drawId, id)).nonce);
       await commit(built, session.drawId, committer);
       for (const [id, nonce] of secrets) await built.service.submitNonce({ drawId: session.drawId, nonce }, as(id));
       const { round: revealed } = await built.service.reveal({ drawId: session.drawId, seed: SEED }, as(committer));
@@ -618,19 +705,38 @@ describe("a whole cycle: rotation, order, and the state of every draw", () => {
     expect(await refusal(built.service.openDraw({ cycleId: made.cycleId, idempotencyKey: key("late") }, as(OWNER)))).toBe("CYCLE_COMPLETE");
   });
 
-  it("marks an abandoned draw as superseded when a new one is opened for the round", async () => {
+  it("does NOT let a committed draw be replaced by opening a new one: that was the re-roll", async () => {
+    const built = build();
+    const made = await cycle(built);
+    const first = await openRound(built, made.cycleId);
+    await commit(built, first.drawId);
+
+    expect(await refusal(built.service.openDraw({ cycleId: made.cycleId, idempotencyKey: key("reroll") }, as(TREASURER)))).toBe(
+      "ROUND_HAS_LIVE_DRAW"
+    );
+    expect(await refusal(built.service.openDraw({ cycleId: made.cycleId, idempotencyKey: key("reroll"), round: 1 }, as(OWNER)))).toBe(
+      "ROUND_HAS_LIVE_DRAW"
+    );
+    const detail = await built.service.getCycleDetail(made.cycleId, as(M1));
+    expect(detail.draws).toHaveLength(1);
+  });
+
+  it("marks a cancelled draw as superseded, and cancelled, when a new one is opened for the round", async () => {
     const built = build();
     const made = await cycle(built);
     const first = await openRound(built, made.cycleId);
     await sealAs(built, first.drawId, M1);
-    await commit(built, first.drawId);
-    // The committed draw is abandoned (say a member lost their nonce); a fresh one is opened.
+    // Nobody else answers. Past the seal deadline the treasurer cancels, with a reason, and opens again.
+    built.advanceHours(49);
+    const { cancellation } = await built.service.cancelDraw({ drawId: first.drawId, reason: "Three members never sealed in time" }, as(TREASURER));
+    expect(cancellation.missedMembers.slice().sort()).toEqual([OWNER, TREASURER, M2].sort());
     const second = await openRound(built, made.cycleId);
 
     expect(second.drawId).not.toBe(first.drawId);
     const detail = await built.service.getCycleDetail(made.cycleId, as(M1));
-    expect(detail.draws.find((entry) => entry.drawId === first.drawId)).toMatchObject({ state: "committed", superseded: true });
+    expect(detail.draws.find((entry) => entry.drawId === first.drawId)).toMatchObject({ state: "cancelled", superseded: true });
     expect(detail.draws.find((entry) => entry.drawId === second.drawId)).toMatchObject({ state: "sealing", superseded: false });
+    expect(detail.cancellations).toHaveLength(1);
   });
 });
 

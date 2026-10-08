@@ -238,7 +238,7 @@ describe("the SQL error contract", () => {
       { memberId: "not-an-id-but-a-string", round: 2 }
     ]);
     expect(drawErrorStatus("CONTRIBUTION_GATE_BLOCKED")).toBe(409);
-    expect(rpc).toHaveBeenCalledWith("open_draw_v1", { p_cycle_id: CYCLE, p_round: null, p_idempotency_key: "k", p_override_reason: null });
+    expect(rpc).toHaveBeenCalledWith("open_draw_v1", { p_cycle_id: CYCLE, p_round: null, p_idempotency_key: "k", p_override_reason: null, p_exclude_missed: false });
   });
 
   it("an unreadable DETAIL still refuses (with no rounds), never opens", async () => {
@@ -254,7 +254,7 @@ describe("the SQL error contract", () => {
       .openDraw({ cycleId: CYCLE, round: 2, idempotencyKey: "k", overrideReason: REASON }, { userId: OWNER })
       .catch((caught: unknown) => caught)) as DrawError;
     expect(error.code).toBe("INVALID_REQUEST");
-    expect(rpc).toHaveBeenCalledWith("open_draw_v1", { p_cycle_id: CYCLE, p_round: 2, p_idempotency_key: "k", p_override_reason: REASON });
+    expect(rpc).toHaveBeenCalledWith("open_draw_v1", { p_cycle_id: CYCLE, p_round: 2, p_idempotency_key: "k", p_override_reason: REASON, p_exclude_missed: false });
 
     const created = repositoryWith({ code: "P0001", message: "draw_invalid_request" });
     await created.repository

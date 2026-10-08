@@ -1,6 +1,6 @@
 import { formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
 
-import { planReserve, type ReservePlan } from "./risk";
+import { planDrawReserve, type ReservePlan } from "./risk";
 
 /**
  * M4.2 — social collateral and post-win default risk.
@@ -344,7 +344,7 @@ export function summarizeCollateral(view: CycleCollateral): CollateralSummary {
 }
 
 /**
- * The reserve the existing heuristic (`planReserve`) would withhold from the NEXT
+ * The reserve the draw (`planDrawReserve`: the cycle's ratio of the pot) would withhold from the NEXT
  * payout, for display beside the exposure. `null` when the cycle is complete or
  * the figures `planReserve` needs are not on record; never an invented number.
  */
@@ -353,7 +353,7 @@ export function planNextReserve(view: CycleCollateral): ReservePlan | null {
     return null;
   }
   try {
-    return planReserve({
+    return planDrawReserve({
       drawId: view.cycleId,
       round: view.nextRound,
       potAmount: view.potAmount,

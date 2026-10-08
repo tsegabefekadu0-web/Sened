@@ -45,6 +45,7 @@ export const RATE_LIMITED = new Set([
   "/api/draw/draws",
   "/api/draw/draws/[drawId]",
   "/api/draw/seals",
+  "/api/draw/cancel",
   "/api/draw/nonces",
   // Collateral (M4.2): the derived read, and one POST carrying propose / accept /
   // decline / release / supersede for a guarantee. Advisory only; nothing moves money.
@@ -177,6 +178,12 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
   }
   if (pathname === "/api/governance/citations" || pathname === "/api/reconciliation/drain") {
     return WRITE_RULE;
+  }
+  // `/api/sync` carries both pushes and pulls on one URL, so the middleware only
+  // floods-guards it per request; the handler charges the real cost (a push by the
+  // number of entries it carries, a pull in its own bucket). See `src/lib/sync`.
+  if (pathname === "/api/sync") {
+    return READ_RULE;
   }
   if (pathname.endsWith("/sync")) {
     return WRITE_RULE;

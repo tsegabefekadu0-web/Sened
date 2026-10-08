@@ -5,6 +5,7 @@ import { bearerToken, getUserScopedClient } from "@/lib/supabaseServer";
 import {
   drawCycleCreateRequestSchema,
   drawCycleIdSchema,
+  drawCancelRequestSchema,
   drawCycleListQuerySchema,
   drawGateRequestSchema,
   drawNonceRequestSchema,
@@ -15,7 +16,7 @@ import {
 } from "@/lib/validation";
 
 import { toVerificationTranscript } from "./canonical";
-import { isDrawError } from "./errors";
+import { hasServerOnlyDetail, isDrawError, publicDrawMessage } from "./errors";
 import { drawErrorStatus, type DrawActorContext } from "./repository";
 import {
   drawCommitRequestSchema,
@@ -25,7 +26,7 @@ import {
 } from "./schemas";
 import { createProductionDrawService } from "./server";
 import type { DrawService } from "./service";
-import type { DrawCycleRecord, DrawListEntry, DrawRound, DrawSessionView } from "./types";
+import type { DrawCancellation, DrawCycleRecord, DrawListEntry, DrawRound, DrawSessionView } from "./types";
 
 /** Matches the banking lane: 8 KiB. A commit carries a roster, nothing larger. */
 const MAX_BODY_BYTES = 8_192;
@@ -152,7 +153,13 @@ function publicTranscript(round: Parameters<typeof toVerificationTranscript>[0])
 
 function mapError(error: unknown): Response {
   if (!isDrawError(error)) {
+    // Unknown failure: the code only. The cause stays in the server log.
+    console.error("draw: unexpected failure", error);
     return jsonError("draw_failed", 502);
+  }
+  if (hasServerOnlyDetail(error.code)) {
+    // The detail (a database or ledger message) is for the server's log; the client gets the code.
+    console.error(`draw: ${error.code}`, error.message, error.cause ?? "");
   }
   if (error.code === "CONTRIBUTION_GATE_BLOCKED") {
     // Who is flagged for which round travels with the refusal so the screen can say it.
@@ -165,7 +172,7 @@ function mapError(error: unknown): Response {
       { status: drawErrorStatus(error.code), headers: { "Cache-Control": "no-store" } }
     );
   }
-  return jsonError(error.code.toLowerCase(), drawErrorStatus(error.code), error.message);
+  return jsonError(error.code.toLowerCase(), drawErrorStatus(error.code), publicDrawMessage(error));
 }
 
 /**
@@ -424,6 +431,23 @@ function publicListEntry(entry: DrawListEntry): Record<string, unknown> {
   };
 }
 
+/** A cancellation is public to every member of the group: who, when, why, and who missed. */
+function publicCancellation(entry: DrawCancellation): Record<string, unknown> {
+  return {
+    cancellationId: entry.cancellationId,
+    drawId: entry.drawId,
+    cycleId: entry.cycleId,
+    round: entry.round,
+    stage: entry.stage,
+    reason: entry.reason,
+    missedMembers: entry.missedMembers,
+    deadlineAt: entry.deadlineAt,
+    ownerDecision: entry.ownerDecision,
+    cancelledBy: entry.cancelledBy,
+    cancelledAt: entry.cancelledAt
+  };
+}
+
 /**
  * A draw in progress, as members may see it. Explicit field copy on purpose: seal
  * HASHES, and per member only a boolean for "released a nonce". There is no field
@@ -443,7 +467,21 @@ function publicSession(session: DrawSessionView): Record<string, unknown> {
     eligible: session.eligible,
     seals: session.seals.map((seal) => ({ memberId: seal.memberId, sealed: seal.sealed })),
     nonces: session.nonces.map((entry) => ({ memberId: entry.memberId, released: entry.released })),
-    revealRequested: session.revealRequested
+    revealRequested: session.revealRequested,
+    sealDeadline: session.sealDeadline,
+    nonceDeadline: session.nonceDeadline,
+    excluded: session.excluded,
+    cancelsThisRound: session.cancelsThisRound,
+    cancellation: session.cancellation === null ? null : publicCancellation(session.cancellation),
+    // Public from the instant the reveal is opened, so any manager can finish a stalled draw.
+    revealOpening:
+      session.revealOpening === null
+        ? null
+        : {
+            seed: session.revealOpening.seed,
+            openedBy: session.revealOpening.openedBy,
+            openedAt: session.revealOpening.openedAt
+          }
   };
 }
 
@@ -540,7 +578,14 @@ export function createCycleReadHandler(
     if (!supabase) return jsonError("not_configured", 503);
     try {
       const detail = await serviceFactory(supabase).getCycleDetail(parsed.data, auth.context);
-      return jsonOk({ cycle: publicCycle(detail.cycle), draws: detail.draws.map(publicListEntry) }, 200);
+      return jsonOk(
+        {
+          cycle: publicCycle(detail.cycle),
+          draws: detail.draws.map(publicListEntry),
+          cancellations: (detail.cancellations ?? []).map(publicCancellation)
+        },
+        200
+      );
     } catch (error) {
       return mapError(error);
     }
@@ -575,6 +620,35 @@ export function createDrawOpenHandler(
               }
             : null
         },
+        result.replayed ? 200 : 201
+      );
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+/**
+ * Owner or treasurer cancels a draw whose members did not respond, with a reason. The database
+ * decides whether the deadline has passed and whether the reveal was opened (it cannot be cancelled
+ * then). 200 for a repeat (replay), 201 for a new cancellation.
+ */
+export function createCancelHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request) => Promise<Response> {
+  return async function post(request: Request): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const payload = await readJsonBody(request);
+    if (!payload.ok) return payload.response;
+    const parsed = parse(drawCancelRequestSchema, payload.body);
+    if (!parsed.ok) return jsonError("invalid_request", 400, parsed.message);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const result = await serviceFactory(supabase).cancelDraw(parsed.data, auth.context);
+      return jsonOk(
+        { cancellation: publicCancellation(result.cancellation), replayed: result.replayed },
         result.replayed ? 200 : 201
       );
     } catch (error) {

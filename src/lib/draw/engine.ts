@@ -13,7 +13,7 @@ import {
 } from "./canonical";
 import { DRAW_CURRENT_PROTOCOL_VERSION } from "./types";
 import { DrawError } from "./errors";
-import { planReserve, assessDrawRisk, type ReservePlan } from "./risk";
+import { planDrawReserve, planReserve, assessDrawRisk, type ReservePlan } from "./risk";
 import { buildParticipants, excludePriorWinners } from "./rotation";
 import type {
   DrawCommitment,
@@ -32,14 +32,10 @@ import type {
 } from "./types";
 
 /**
- * How many members must seal a contribution before a round may commit.
- *
- * One is the minimum that makes grinding pointless: the treasurer can no longer
- * search for an outcome, because a value they do not have is inside the
- * commitment. More is better, and a group that trusts its members should raise
- * it — but refusing to run a draw because nobody could be bothered to seal a
- * nonce would push groups back to the treasurer-chosen seed, which is the thing
- * this exists to remove. One is the floor, not the target.
+ * The engine-level floor on sealed contributions. The ceremony itself (the database, and
+ * `DrawService.commitFromSession`) requires a seal from EVERY eligible member, so this is only the
+ * minimum the pure engine accepts when a caller passes no `minMemberCommitments`: one seal is the least
+ * that makes grinding pointless, because the treasurer can no longer search for a value they do not hold.
  */
 export const MIN_MEMBER_COMMITMENTS = 1;
 
@@ -512,7 +508,9 @@ export async function openReveal(
     throw new DrawError("NO_ELIGIBLE_PARTICIPANTS", "The committed roster is empty");
   }
 
-  const plan = planReserve({
+  // v3 splits by the cycle's ratio (the database enforces it); v2 history was split by the exposure model.
+  const planFor = commitment.protocolVersion === "v2" ? planReserve : planDrawReserve;
+  const plan = planFor({
     drawId: commitment.drawId,
     round: commitment.round,
     potAmount: commitment.potAmount,

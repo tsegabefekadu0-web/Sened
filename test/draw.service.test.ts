@@ -61,7 +61,6 @@ function harness(options: { readonly hasher?: typeof nodeDrawHasher } = {}): Har
   // server-created flow.
   const drawRepo = new InMemoryDrawRepository({ allowSessionlessCommit: true, hasher: drawHasher });
   const sealed = new Map<string, { memberId: string; nonce: string }>();
-  let counter = 0;
   return {
     ledger,
     drawRepo,
@@ -69,8 +68,7 @@ function harness(options: { readonly hasher?: typeof nodeDrawHasher } = {}): Har
     sealed,
     service: new DrawService(drawRepo, new LedgerService(ledger), {
       hasher: drawHasher,
-      clock: () => new Date("2026-09-26T10:00:00.000Z"),
-      entropyFactory: () => `entropy-${String(counter++).padStart(4, "0")}-abcdefghij`
+      clock: () => new Date("2026-09-26T10:00:00.000Z")
     })
   };
 }

@@ -265,7 +265,11 @@ export const drawCycleCreateRequestSchema = z
       .optional(),
     idempotencyKey: drawIdempotencyKeySchema,
     /** The cycle's contribution gate (§18); `off` when absent. */
-    contributionGate: z.enum(["off", "warn", "block"]).optional()
+    contributionGate: z.enum(["off", "warn", "block"]).optional(),
+    /** Hours after a draw opens before it may be cancelled for missing seals (1..720, default 48). */
+    sealWindowHours: z.number().int().min(1).max(720).optional(),
+    /** Hours after the commit before it may be cancelled for missing nonces (1..720, default 48). */
+    nonceWindowHours: z.number().int().min(1).max(720).optional()
   })
   .strict();
 
@@ -281,7 +285,12 @@ export const drawOpenRequestSchema = z
      * Only meaningful under a `block` gate: an owner/treasurer's recorded reason for
      * opening the draw although an active member has a flagged earlier round.
      */
-    overrideReason: gateReasonSchema.optional()
+    overrideReason: gateReasonSchema.optional(),
+    /**
+     * Re-opening a round after a cancel: leave out the members recorded as non-responders of
+     * that round's earlier cancels. Only them; the database refuses it when there are none.
+     */
+    excludeMissed: z.boolean().optional()
   })
   .strict();
 
@@ -359,7 +368,8 @@ export const drawCycleListQuerySchema = ledgerGroupQuerySchema;
  * rejection and not the whole batch's 400.
  */
 export const SYNC_PUSH_MAX_BATCH = 25;
-export const SYNC_PULL_MAX_LIMIT = 500;
+/** One pull page: small enough that its postings are read in a handful of requests. */
+export const SYNC_PULL_MAX_LIMIT = 100;
 
 const syncKeySchema = z
   .string()
@@ -482,3 +492,15 @@ export function parse<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input: unk
     message: fields.length > 0 ? `Invalid fields: ${fields.join(", ")}` : "Invalid request body"
   };
 }
+
+/**
+ * `POST /api/draw/cancel`: owner/treasurer cancels a draw whose members did not respond. The reason
+ * (10..1000 characters once trimmed) is recorded with who and when; the database decides whether the
+ * deadline has passed. Amharic is 3 bytes a character, so a full reason fits the route's 8 KiB cap.
+ */
+export const drawCancelRequestSchema = z
+  .object({
+    drawId: uuidSchema,
+    reason: gateReasonSchema
+  })
+  .strict();

@@ -63,6 +63,18 @@ export const DRAW_ERROR_CODES = [
    */
   "CONTRIBUTION_GATE_BLOCKED",
   "IDEMPOTENCY_CONFLICT",
+  /** A committed draw that is not revealed or cancelled already exists for this round: no re-roll. */
+  "ROUND_HAS_LIVE_DRAW",
+  /** The draw was cancelled; it takes no seal, nonce, commit or reveal. */
+  "DRAW_CANCELLED",
+  /** Cancel before the seal or nonce-release deadline. */
+  "CANCEL_TOO_EARLY",
+  /** The reveal was opened, so the draw must be finished and cannot be cancelled. */
+  "CANCEL_REVEAL_OPENED",
+  /** Every member responded; there is nothing to cancel for. */
+  "CANCEL_NOTHING_MISSED",
+  /** Two cancels in this round already; only a group owner may go further. */
+  "CANCEL_LIMIT_REACHED",
   "UNIFORMITY_EXHAUSTED",
   "UNAVAILABLE",
   "STORAGE_FAILURE",
@@ -270,7 +282,8 @@ export type DrawRiskNote =
   | { readonly code: "final_round" }
   | { readonly code: "capped"; readonly needed: string; readonly ceilingBps: number }
   | { readonly code: "coverage"; readonly percent: string; readonly owed: string }
-  | { readonly code: "cannot_absorb" };
+  | { readonly code: "cannot_absorb" }
+  | { readonly code: "exposure_uncovered"; readonly exposure: string; readonly reserve: string };
 
 export interface DrawRiskAssessment {
   readonly drawId: string;
@@ -314,7 +327,7 @@ export function isDrawVerificationCode(
  * `sealing` (opened, members sealing) -> `committed` (sealed set frozen, nonces
  * may be released) -> `revealed` -> `paid`.
  */
-export const DRAW_LIFECYCLE_STATES = ["sealing", "committed", "revealed", "paid"] as const;
+export const DRAW_LIFECYCLE_STATES = ["sealing", "committed", "revealed", "paid", "cancelled"] as const;
 export type DrawLifecycleState = (typeof DRAW_LIFECYCLE_STATES)[number];
 
 export function isDrawLifecycleState(value: unknown): value is DrawLifecycleState {
@@ -430,4 +443,50 @@ export interface DrawSessionView {
   readonly nonces: readonly { readonly memberId: string; readonly released: boolean }[];
   /** The reveal was requested: the seed and nonces are public to the group. */
   readonly revealRequested: boolean;
+  /** After this instant an owner/treasurer may cancel a draw that is still sealing. Fixed at open. */
+  readonly sealDeadline: string;
+  /** After this instant (and with a nonce missing, reveal not opened) a committed draw may be cancelled. */
+  readonly nonceDeadline: string | null;
+  /** Members excluded from this session as recorded non-responders of an earlier cancel of this round. */
+  readonly excluded: readonly string[];
+  /** Cancels already recorded for this cycle and round (the limit is {@link DRAW_CANCEL_LIMIT}). */
+  readonly cancelsThisRound: number;
+  readonly cancellation: DrawCancellation | null;
+  /** Present once the reveal is opened: the published seed, so any manager can finish the draw. */
+  readonly revealOpening: DrawRevealOpening | null;
 }
+
+/** The two stages at which a draw can be cancelled for members who did not respond. */
+export type DrawCancelStage = "sealing" | "committed";
+
+/**
+ * One append-only cancellation: who, when, why, which stage, the deadline that had passed and
+ * the members who missed it. Visible to every member of the group.
+ */
+export interface DrawCancellation {
+  readonly cancellationId: string;
+  readonly drawId: string;
+  readonly cycleId: string;
+  readonly round: number;
+  readonly stage: DrawCancelStage;
+  readonly reason: string;
+  readonly missedMembers: readonly string[];
+  readonly deadlineAt: string;
+  /** An owner made this call past the per-round limit. */
+  readonly ownerDecision: boolean;
+  readonly cancelledBy: string;
+  readonly cancelledAt: string;
+}
+
+/** Published the moment the reveal is opened: the seed is public from then on. */
+export interface DrawRevealOpening {
+  readonly seed: string;
+  readonly openedBy: string;
+  readonly openedAt: string;
+}
+
+/**
+ * Cancels allowed per round by a treasurer. A third needs a group owner. Mirrors
+ * `sened_draw_cancel_limit()` in the database, which is the authority.
+ */
+export const DRAW_CANCEL_LIMIT = 2;

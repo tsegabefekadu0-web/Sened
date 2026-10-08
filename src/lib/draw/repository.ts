@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { DrawError, isDrawError } from "./errors";
 import { isDrawContributionGate, isDrawLifecycleState, isDrawProtocolVersion, type DrawErrorCode } from "./types";
 import type {
+  DrawCancellation,
   DrawCommitment,
   DrawContributionGate,
   DrawCycleRecord,
@@ -14,6 +15,7 @@ import type {
   DrawPayout,
   DrawReveal,
   DrawRound,
+  DrawRevealOpening,
   DrawSessionSeal,
   DrawSessionView
 } from "./types";
@@ -75,6 +77,10 @@ export interface DrawRepository {
       readonly idempotencyKey: string;
       /** Defaults to `off`. */
       readonly contributionGate?: DrawContributionGate;
+      /** Hours after a draw opens before an owner/treasurer may cancel it for missing seals. Default 48. */
+      readonly sealWindowHours?: number;
+      /** Hours after the commit before a committed draw may be cancelled for missing nonces. Default 48. */
+      readonly nonceWindowHours?: number;
     },
     context: DrawActorContext
   ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }>;
@@ -93,6 +99,18 @@ export interface DrawRepository {
     cycleId: string,
     context: DrawActorContext
   ): Promise<{ readonly cycle: DrawCycleRecord; readonly draws: readonly DrawListEntry[] }>;
+  /** Any member of the cycle's group: every cancellation in the cycle, oldest first. Append-only. */
+  listCancellations(cycleId: string, context: DrawActorContext): Promise<readonly DrawCancellation[]>;
+  /**
+   * Owner or treasurer cancels a draw whose members did not respond, with a reason (10..1000
+   * characters). The database decides whether it is allowed: the seal deadline (still sealing) or the
+   * nonce-release deadline (committed, a nonce missing, reveal NOT opened) must have passed, and a third
+   * cancel in one round needs a group owner. Records who missed. A repeat is a replay.
+   */
+  cancelDraw(
+    input: { readonly drawId: string; readonly reason: string },
+    context: DrawActorContext
+  ): Promise<{ readonly cancellation: DrawCancellation; readonly replayed: boolean }>;
   /**
    * Owner or treasurer. The server creates the draw id; the draw starts in `sealing`.
    * Under a `block` gate the database refuses (`CONTRIBUTION_GATE_BLOCKED`, carrying who is
@@ -104,6 +122,8 @@ export interface DrawRepository {
       readonly round?: number;
       readonly idempotencyKey: string;
       readonly overrideReason?: string;
+      /** Exclude the members recorded as non-responders in earlier cancels of this round (only them). */
+      readonly excludeMissed?: boolean;
     },
     context: DrawActorContext
   ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean; readonly gate: DrawOpenGate | null }>;
@@ -171,6 +191,18 @@ function mapSupabaseError(
     return new DrawError("CONTRIBUTION_GATE_BLOCKED", message, undefined, parseGateFlags(error?.details));
   }
   if (message === "draw_already_committed") return new DrawError("ALREADY_COMMITTED", message);
+  if (message === "draw_round_has_live_draw") return new DrawError("ROUND_HAS_LIVE_DRAW", message);
+  if (message === "draw_round_already_revealed") return new DrawError("ALREADY_REVEALED", message);
+  if (message === "draw_cancelled") return new DrawError("DRAW_CANCELLED", message);
+  if (message === "draw_cancel_too_early") return new DrawError("CANCEL_TOO_EARLY", message);
+  if (message === "draw_reveal_opened") return new DrawError("CANCEL_REVEAL_OPENED", message);
+  if (message === "draw_cancel_nothing_missed") return new DrawError("CANCEL_NOTHING_MISSED", message);
+  if (message === "draw_cancel_limit_reached") return new DrawError("CANCEL_LIMIT_REACHED", message);
+  if (message === "draw_cancel_reason_invalid") return new DrawError("INVALID_REQUEST", message);
+  if (message === "draw_uniformity_exhausted") return new DrawError("UNIFORMITY_EXHAUSTED", message);
+  // The database derived a different winner or transcript than the caller claimed.
+  if (message === "draw_transcript_mismatch") return new DrawError("INTEGRITY_FAILURE", message);
+  if (message === "draw_selection_mismatch") return new DrawError("INTEGRITY_FAILURE", message);
   if (message === "draw_not_eligible") return new DrawError("NOT_ELIGIBLE", message);
   if (message === "draw_nonce_too_early") return new DrawError("NONCE_TOO_EARLY", message);
   if (message === "draw_cycle_complete" || message === "draw_cycle_closed") return new DrawError("CYCLE_COMPLETE", message);
@@ -318,6 +350,33 @@ function parseListEntry(value: unknown): DrawListEntry {
   };
 }
 
+function parseCancellation(value: unknown): DrawCancellation {
+  if (typeof value !== "object" || value === null) throw malformed("cancellation");
+  const row = value as Record<string, unknown>;
+  if (row.stage !== "sealing" && row.stage !== "committed") throw malformed("cancellation");
+  if (!Array.isArray(row.missedMembers)) throw malformed("cancellation");
+  return {
+    cancellationId: str(row.cancellationId, "cancellation"),
+    drawId: str(row.drawId, "cancellation"),
+    cycleId: str(row.cycleId, "cancellation"),
+    round: int(row.round, "cancellation"),
+    stage: row.stage,
+    reason: str(row.reason, "cancellation"),
+    missedMembers: row.missedMembers.map((id) => str(id, "cancellation")),
+    deadlineAt: str(row.deadlineAt, "cancellation"),
+    ownerDecision: row.ownerDecision === true,
+    cancelledBy: str(row.cancelledBy, "cancellation"),
+    cancelledAt: str(row.cancelledAt, "cancellation")
+  };
+}
+
+function parseRevealOpening(value: unknown): DrawRevealOpening | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.seed !== "string" || typeof row.openedBy !== "string" || typeof row.openedAt !== "string") return null;
+  return { seed: row.seed, openedBy: row.openedBy, openedAt: row.openedAt };
+}
+
 function parseSession(value: unknown): DrawSessionView {
   if (typeof value !== "object" || value === null) throw malformed("draw session");
   const row = value as Record<string, unknown>;
@@ -346,7 +405,14 @@ function parseSession(value: unknown): DrawSessionView {
       memberId: str(entry.memberId, "draw session"),
       released: entry.released === true
     })),
-    revealRequested: row.revealRequested === true
+    revealRequested: row.revealRequested === true,
+    // A database from before the integrity migration sends none of these: no deadline known, nobody excluded.
+    sealDeadline: typeof row.sealDeadline === "string" ? row.sealDeadline : str(row.openedAt, "draw session"),
+    nonceDeadline: typeof row.nonceDeadline === "string" ? row.nonceDeadline : null,
+    excluded: Array.isArray(row.excluded) ? (row.excluded as unknown[]).map((id) => str(id, "draw session")) : [],
+    cancelsThisRound: typeof row.cancelsThisRound === "number" ? row.cancelsThisRound : 0,
+    cancellation: row.cancellation == null ? null : parseCancellation(row.cancellation),
+    revealOpening: parseRevealOpening(row.revealOpening)
   };
 }
 
@@ -373,7 +439,6 @@ export class SupabaseDrawRepository implements DrawRepository {
       p_member_digest: commitment.memberDigest,
       p_participants: commitment.participants.map((participant) => ({ ...participant })),
       p_idempotency_key: commitment.idempotencyKey,
-      p_occurred_at: commitment.committedAt,
       // Pinned in the database so the derivation cannot be relabelled later.
       p_protocol_version: commitment.protocolVersion,
       // The contribution gate is checked again at commit; null unless the treasurer gave a reason.
@@ -486,6 +551,10 @@ export class SupabaseDrawRepository implements DrawRepository {
       readonly startedAt?: string;
       readonly idempotencyKey: string;
       readonly contributionGate?: DrawContributionGate;
+      /** Hours after a draw opens before an owner/treasurer may cancel it for missing seals. Default 48. */
+      readonly sealWindowHours?: number;
+      /** Hours after the commit before a committed draw may be cancelled for missing nonces. Default 48. */
+      readonly nonceWindowHours?: number;
     },
     _context: DrawActorContext
   ): Promise<{ readonly cycle: DrawCycleRecord; readonly replayed: boolean }> {
@@ -497,7 +566,9 @@ export class SupabaseDrawRepository implements DrawRepository {
       p_reserve_ratio_bps: input.reserveRatioBps,
       p_started_at: input.startedAt ?? null,
       p_idempotency_key: input.idempotencyKey,
-      p_contribution_gate: input.contributionGate ?? "off"
+      p_contribution_gate: input.contributionGate ?? "off",
+      p_seal_window_hours: input.sealWindowHours ?? null,
+      p_nonce_window_hours: input.nonceWindowHours ?? null
     });
     if (error) throw mapSupabaseError(error);
     const payload = data as { readonly cycle?: unknown; readonly replayed?: unknown } | null;
@@ -531,6 +602,26 @@ export class SupabaseDrawRepository implements DrawRepository {
     return data.map(parseCycle);
   }
 
+  async listCancellations(cycleId: string, _context: DrawActorContext): Promise<readonly DrawCancellation[]> {
+    const { data, error } = await this.client.rpc("list_draw_cancellations_v1", { p_cycle_id: cycleId });
+    if (error) throw mapSupabaseError(error);
+    if (!Array.isArray(data)) throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed cancellation list");
+    return data.map(parseCancellation);
+  }
+
+  async cancelDraw(
+    input: { readonly drawId: string; readonly reason: string },
+    _context: DrawActorContext
+  ): Promise<{ readonly cancellation: DrawCancellation; readonly replayed: boolean }> {
+    const { data, error } = await this.client.rpc("cancel_draw_v1", { p_draw_id: input.drawId, p_reason: input.reason });
+    if (error) throw mapSupabaseError(error);
+    const payload = data as { readonly cancellation?: unknown; readonly replayed?: unknown } | null;
+    if (typeof payload?.replayed !== "boolean") {
+      throw new DrawError("INTEGRITY_FAILURE", "Draw storage returned a malformed cancellation result");
+    }
+    return { cancellation: parseCancellation(payload.cancellation), replayed: payload.replayed };
+  }
+
   async getCycleDetail(
     cycleId: string,
     _context: DrawActorContext
@@ -550,6 +641,8 @@ export class SupabaseDrawRepository implements DrawRepository {
       readonly round?: number;
       readonly idempotencyKey: string;
       readonly overrideReason?: string;
+      /** Exclude the members recorded as non-responders in earlier cancels of this round. */
+      readonly excludeMissed?: boolean;
     },
     _context: DrawActorContext
   ): Promise<{ readonly session: DrawSessionView; readonly replayed: boolean; readonly gate: DrawOpenGate | null }> {
@@ -557,7 +650,8 @@ export class SupabaseDrawRepository implements DrawRepository {
       p_cycle_id: input.cycleId,
       p_round: input.round ?? null,
       p_idempotency_key: input.idempotencyKey,
-      p_override_reason: input.overrideReason ?? null
+      p_override_reason: input.overrideReason ?? null,
+      p_exclude_missed: input.excludeMissed ?? false
     });
     if (error) throw mapSupabaseError(error);
     const payload = data as { readonly session?: unknown; readonly replayed?: unknown; readonly contributionGate?: unknown } | null;
@@ -652,6 +746,14 @@ export function drawErrorStatus(code: DrawErrorCode): number {
     case "ALREADY_COMMITTED":
     case "ALREADY_REVEALED":
     case "IDEMPOTENCY_CONFLICT":
+    // No re-roll: the round already has its draw. A cancelled draw takes nothing more.
+    case "ROUND_HAS_LIVE_DRAW":
+    case "DRAW_CANCELLED":
+    // Cancel is a request the draw's state refuses: too early, reveal opened, nobody missed, limit.
+    case "CANCEL_TOO_EARLY":
+    case "CANCEL_REVEAL_OPENED":
+    case "CANCEL_NOTHING_MISSED":
+    case "CANCEL_LIMIT_REACHED":
     // The request is fine; the cycle's own policy holds the draw until the rounds are met or overridden.
     case "CONTRIBUTION_GATE_BLOCKED":
       return 409;

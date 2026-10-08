@@ -39,6 +39,8 @@ export function RiskPanel({ locale = "am", risk, currencyLabel }: RiskPanelProps
         return tr("drawRisk.note.coverage", { percent: note.percent, owed: formatEtbDisplay(note.owed), currency: currencyLabel });
       case "cannot_absorb":
         return tr("drawRisk.note.cannot_absorb");
+      case "exposure_uncovered":
+        return tr("drawRisk.note.exposure_uncovered", { exposure: formatEtbDisplay(note.exposure), reserve: formatEtbDisplay(note.reserve), currency: currencyLabel });
     }
   };
   return (

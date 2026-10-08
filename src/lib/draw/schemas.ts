@@ -4,12 +4,6 @@ import { DRAW_ROUND_STATES, DRAW_VERIFICATION_CODES } from "./types";
 
 const uuidSchema = z.string().uuid().transform((value) => value.toLowerCase());
 
-const timestampSchema = z
-  .string()
-  .max(35)
-  .datetime({ offset: true })
-  .transform((value) => new Date(value).toISOString());
-
 const idempotencyKeySchema = z
   .string()
   .trim()
@@ -28,10 +22,11 @@ export const drawVerificationCodeSchema = z.enum(DRAW_VERIFICATION_CODES);
 
 /**
  * M4.1 step 1. The seed and the commitment nonce are generated on the
- * treasurer's device and sent here so the server can compute the commitment; both
- * are optional, the server fills them from a CSPRNG when absent, and anything
- * under 16 characters is refused either way.
- *
+ * M4.1 step 1. The seed and the commitment nonce are generated on the
+ * treasurer's device and sent here so the server can compute the commitment. BOTH ARE
+ * REQUIRED: a seed the server made up would never be returned, so the draw could never be
+ * revealed (the reveal needs the seed that reproduces the commitment). Anything under 16
+ * characters is refused. There is no `committedAt`: the database stamps the commit time.
  * Everything else is deliberately NOT in this body. The roster, the pot, the
  * contribution, the reserve and the number of rounds come from the cycle and the
  * group as the database holds them, and the sealed set is whatever the members
@@ -42,10 +37,9 @@ export const drawVerificationCodeSchema = z.enum(DRAW_VERIFICATION_CODES);
 export const drawCommitRequestSchema = z
   .object({
     drawId: uuidSchema,
-    commitmentNonce: entropySchema.optional(),
-    seed: entropySchema.optional(),
+    commitmentNonce: entropySchema,
+    seed: entropySchema,
     idempotencyKey: idempotencyKeySchema,
-    committedAt: timestampSchema.optional(),
     /**
      * Only meaningful under a `block` gate: an owner/treasurer's recorded reason for committing although
      * an active member has a flagged earlier round that the override given at open did not name.
@@ -54,7 +48,7 @@ export const drawCommitRequestSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (value.commitmentNonce !== undefined && value.commitmentNonce === value.seed) {
+    if (value.commitmentNonce === value.seed) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["commitmentNonce"],
@@ -72,7 +66,8 @@ export const drawCommitRequestSchema = z
 export const drawRevealRequestSchema = z
   .object({
     drawId: uuidSchema,
-    seed: entropySchema,
+    /** Omitted when the reveal was already opened: the seed is public then, and any manager can finish the draw. */
+    seed: entropySchema.optional(),
     idempotencyKey: idempotencyKeySchema
   })
   .strict();
@@ -81,8 +76,7 @@ export const drawPayoutRequestSchema = z
   .object({
     drawId: uuidSchema,
     cashAccountId: uuidSchema,
-    payoutAccountId: uuidSchema,
-    occurredAt: timestampSchema.optional()
+    payoutAccountId: uuidSchema
   })
   .strict()
   .superRefine((value, context) => {

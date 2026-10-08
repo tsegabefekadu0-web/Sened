@@ -25,11 +25,12 @@ import DrawPage from "@/app/draw/page";
 import { LiveDraw } from "@/components/draw/LiveDraw";
 import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
 import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
-import { drawErrorKey, readSeal, sealForDraw } from "@/lib/draw/clientDraw";
+import { drawErrorKey, readSeal, sealForDraw, writeSeal } from "@/lib/draw/clientDraw";
 import { DRAW_ERROR_CODES } from "@/lib/draw/types";
 import { InMemoryDrawRepository } from "@/lib/draw/repository";
 import { nodeDrawHasher } from "@/lib/draw/nodeHasher";
 import {
+  createCancelHandler,
   createCommitHandler,
   createCycleCreateHandler,
   createCycleListHandler,
@@ -71,7 +72,10 @@ type Tamper = (path: string, body: Record<string, unknown>) => Record<string, un
  * the stored seals). Only the network and the Supabase session are replaced, so
  * what the browser verifies is what a real server would have published.
  */
-function createServer(role: Role, opts: { override?: Override; tamper?: Tamper; groups?: number; bankPaid?: boolean; cashPaid?: boolean } = {}) {
+function createServer(
+  role: Role,
+  opts: { override?: Override; tamper?: Tamper; groups?: number; bankPaid?: boolean; cashPaid?: boolean; clock?: () => Date } = {}
+) {
   const ledger = new InMemoryLedgerRepository({
     groups: [{ id: GROUP, tenantId: TENANT, members: [{ userId: TREASURER, role: "treasurer" }] }],
     accounts: [
@@ -88,7 +92,8 @@ function createServer(role: Role, opts: { override?: Override; tamper?: Tamper; 
   const repository = new InMemoryDrawRepository({
     groups: [{ groupId: GROUP, members: roster }],
     hasher: nodeDrawHasher,
-    clock: () => new Date(NOW)
+    // Deadlines are the draw repository's clock; a test that crosses one hands it a clock it can move.
+    clock: opts.clock ?? (() => new Date(NOW))
   });
   const service = new DrawService(repository, new LedgerService(ledger), {
     hasher: nodeDrawHasher,
@@ -102,7 +107,8 @@ function createServer(role: Role, opts: { override?: Override; tamper?: Tamper; 
     "/api/draw/cycles": createCycleCreateHandler(() => service),
     "/api/draw/draws": createDrawOpenHandler(() => service),
     "/api/draw/seals": createSealHandler(() => service),
-    "/api/draw/nonces": createNonceHandler(() => service)
+    "/api/draw/nonces": createNonceHandler(() => service),
+    "/api/draw/cancel": createCancelHandler(() => service)
   };
   const listCycles = createCycleListHandler(() => service);
   const readCycle = createCycleReadHandler(() => service);
@@ -380,8 +386,8 @@ describe("signed in: the ceremony, member and treasurer", () => {
     await createTheCycle(user);
     await openTheDraw(user);
     expect(screen.getByTestId("seal-progress")).toHaveTextContent("0 of 3 eligible members have sealed.");
-    // Nobody else has sealed, so the treasurer cannot commit yet.
-    expect(screen.getByTestId("commit-needs-other")).toBeInTheDocument();
+    // Nobody has sealed, so the treasurer cannot commit yet: EVERY eligible member must seal.
+    expect(screen.getByTestId("commit-needs-all")).toHaveTextContent("3 of 3 have not sealed yet");
     expect(screen.getByTestId("commit-button")).toBeDisabled();
 
     // Member B, on their own device, seals. The request carries no member id.
@@ -399,17 +405,28 @@ describe("signed in: the ceremony, member and treasurer", () => {
     expect(screen.getByTestId("release-locked")).toHaveTextContent("Do not release your nonce yet");
     expect(screen.queryByTestId("release-button")).toBeNull();
 
-    // The treasurer sees B's seal and commits. Nothing but entropy is sent.
+    // Member C seals on their device (through the service here), and the treasurer seals their own.
+    const cSeal = await sealForDraw(drawId, MEMBER_C);
+    await server.service.submitSeal({ drawId, sealed: cSeal.sealed }, { userId: MEMBER_C });
     renderAs(server, TREASURER);
     await screen.findByTestId("seal-progress");
-    expect(screen.getByTestId("seal-progress")).toHaveTextContent("1 of 3 eligible members have sealed.");
-    expect(screen.queryByTestId("commit-needs-other")).toBeNull();
+    expect(screen.getByTestId("seal-progress")).toHaveTextContent("2 of 3 eligible members have sealed.");
+    // Two of three: Commit stays held until M of M have sealed.
+    expect(screen.getByTestId("commit-needs-all")).toHaveTextContent("1 of 3 have not sealed yet");
+    expect(screen.getByTestId("commit-button")).toBeDisabled();
+    await user.click(await screen.findByTestId("seal-button"));
+    await screen.findByTestId("my-seal");
+    expect(screen.getByTestId("seal-progress")).toHaveTextContent("3 of 3 eligible members have sealed.");
+    const treasurerSeal = readSeal(drawId)!;
+
+    // Everyone has sealed: the treasurer commits. Nothing but entropy is sent.
+    expect(screen.queryByTestId("commit-needs-all")).toBeNull();
     await user.click(screen.getByTestId("commit-button"));
     await screen.findByTestId("reveal-form");
     const commitRequest = server.bodies.find((entry) => entry.path === "/api/draw/commits")!.body;
     expect(Object.keys(commitRequest).sort()).toEqual(["commitmentNonce", "drawId", "idempotencyKey", "seed"]);
-    // Committed, but B has not released: the reveal is not offered yet.
-    expect(screen.getByTestId("reveal-waiting")).toHaveTextContent("Waiting for 1 member(s)");
+    // Committed, but nobody has released: the reveal is not offered yet.
+    expect(screen.getByTestId("reveal-waiting")).toHaveTextContent("Waiting for 3 member(s)");
     expect(screen.getByTestId("reveal-button")).toBeDisabled();
 
     // B releases once the commitment is published.
@@ -420,10 +437,16 @@ describe("signed in: the ceremony, member and treasurer", () => {
     expect(Object.keys(nonceRequest).sort()).toEqual(["drawId", "nonce"]);
     expect(nonceRequest.nonce).toBe(mine.nonce);
 
+    // C releases, and so does the treasurer, who sealed too.
+    await server.service.submitNonce({ drawId, nonce: cSeal.nonce }, { userId: MEMBER_C });
+
     // The treasurer reveals with the seed only; the server supplies the nonces.
     renderAs(server, TREASURER);
+    await user.click(await screen.findByTestId("release-button"));
+    await screen.findByTestId("release-done");
+    expect(treasurerSeal.nonce.length).toBeGreaterThan(0);
     await screen.findByTestId("nonce-progress");
-    expect(screen.getByTestId("nonce-progress")).toHaveTextContent("1 of 1 sealed members have released their nonce.");
+    expect(screen.getByTestId("nonce-progress")).toHaveTextContent("3 of 3 sealed members have released their nonce.");
     await user.click(screen.getByTestId("reveal-button"));
     await screen.findByTestId("compare-result");
     const revealRequest = server.bodies.find((entry) => entry.path === "/api/draw/reveals")!.body;
@@ -434,7 +457,8 @@ describe("signed in: the ceremony, member and treasurer", () => {
 
     // The payout is offered with amount and both canonical accounts; nothing is posted until confirmed.
     const payoutButton = await screen.findByRole("button", { name: "Post payout to the ledger" });
-    expect(screen.getByTestId("payout-amount")).toHaveTextContent("Br 2,000.10");
+    // The reserve is the cycle's ratio of the pot (10% of 3,000.00), rounded half up to the cent.
+    expect(screen.getByTestId("payout-amount")).toHaveTextContent("Br 2,700.00");
     expect(screen.getByTestId("payout-debit")).toHaveTextContent(`PAYOUT_EXPENSE ${EXPENSE}`);
     expect(screen.getByTestId("payout-credit")).toHaveTextContent(`POT_CASH ${CASH}`);
     expect(payoutButton).toBeDisabled();
@@ -448,14 +472,16 @@ describe("signed in: the ceremony, member and treasurer", () => {
     expect(order).toEqual([
       "POST /api/draw/draws",
       "POST /api/draw/seals",
+      "POST /api/draw/seals",
       "POST /api/draw/commits",
+      "POST /api/draw/nonces",
       "POST /api/draw/nonces",
       "POST /api/draw/reveals",
       "POST /api/draw/payouts"
     ]);
     const round = await server.service.getRound(drawId, { userId: TREASURER });
     expect(round.state).toBe("paid");
-    expect(round.payout?.amount).toBe("2000.10");
+    expect(round.payout?.amount).toBe("2700.00");
   });
 
   it("never lets the member release before the commit: the screen withholds it and the server refuses it", async () => {
@@ -501,7 +527,9 @@ describe("signed in: the ceremony, member and treasurer", () => {
     const drawId = await theDrawId(server);
     const c = await sealForDraw(drawId, MEMBER_C);
     await server.service.submitSeal({ drawId, sealed: c.sealed }, { userId: MEMBER_C });
-    await server.service.commitFromSession({ drawId, idempotencyKey: "k-commit-1" }, { userId: TREASURER });
+    const t = await sealForDraw(drawId, TREASURER);
+    await server.service.submitSeal({ drawId, sealed: t.sealed }, { userId: TREASURER });
+    await server.service.commitFromSession({ drawId, seed: "live-test-seed-0123456789", commitmentNonce: "live-test-commit-nonce-0123", idempotencyKey: "k-commit-1" }, { userId: TREASURER });
 
     renderAs(server, MEMBER_B);
     expect(await screen.findByTestId("seal-closed")).toHaveTextContent("your seal is not in it");
@@ -589,7 +617,8 @@ describe("roles", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Only the owner or treasurer of the group can do this.");
-    expect(alert).toHaveTextContent("draw_forbidden");
+    // The server's own English text is never rendered: the code is said in the member's language.
+    expect(alert).not.toHaveTextContent("draw_forbidden");
   });
 
   it("refuses with a message on no group and on several groups", async () => {
@@ -681,7 +710,8 @@ describe("server errors", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(dictionaries.am["drawLive.error.memberMismatch"]);
-    expect(alert).toHaveTextContent("nonce does not open");
+    // The server's English detail ("nonce does not open") is not shown next to the translated message.
+    expect(alert).not.toHaveTextContent("nonce does not open");
     expect(screen.queryByTestId("compare-result")).toBeNull();
     expect(drawId).toBeTruthy();
   });
@@ -702,16 +732,26 @@ async function committedDraw(server: Server) {
   );
   const { session } = await server.service.openDraw({ cycleId: cycle.cycleId, idempotencyKey: "open-1" }, owner);
   const drawId = session.drawId;
-  const b = await sealForDraw(drawId, MEMBER_B);
-  await server.service.submitSeal({ drawId, sealed: b.sealed }, { userId: MEMBER_B });
+  // The quorum is every eligible member: B, C and the treasurer all seal, then all release.
+  const everyone = [MEMBER_B, MEMBER_C, TREASURER];
+  const seals = new Map<string, Awaited<ReturnType<typeof sealForDraw>>>();
+  for (const memberId of everyone) {
+    const mine = await sealForDraw(drawId, memberId);
+    await server.service.submitSeal({ drawId, sealed: mine.sealed }, { userId: memberId });
+    seals.set(memberId, mine);
+  }
+  const b = seals.get(MEMBER_B)!;
   const commitKey = `draw-commit.${drawId}`;
   await server.service.commitFromSession(
     { drawId, seed: TREASURER_SEED, commitmentNonce: "treasurer-commit-nonce-0123456789", idempotencyKey: commitKey },
     owner
   );
-  await server.service.submitNonce({ drawId, nonce: b.nonce }, { userId: MEMBER_B });
-  // The treasurer's device holds the seed it committed with.
+  for (const memberId of everyone) {
+    await server.service.submitNonce({ drawId, nonce: seals.get(memberId)!.nonce }, { userId: memberId });
+  }
+  // The treasurer's device holds the seed it committed with, and the nonce of its own seal.
   switchDevice(TREASURER);
+  writeSeal(seals.get(TREASURER)!);
   localStorage.setItem(
     `sened.draw.draft.${drawId}`,
     JSON.stringify({
@@ -877,23 +917,31 @@ describe("haptics follow the live ceremony", () => {
     await screen.findByTestId("my-seal");
     expect(buzzes()).toEqual(["commitSealed"]);
 
+    // Member C seals through the service (no buzz: it is not this device); the treasurer seals their own.
+    const drawId = await theDrawId(server);
+    const cSeal = await sealForDraw(drawId, MEMBER_C);
+    await server.service.submitSeal({ drawId, sealed: cSeal.sealed }, { userId: MEMBER_C });
     renderAs(server, TREASURER);
-    await screen.findByTestId("seal-progress");
+    await user.click(await screen.findByTestId("seal-button"));
+    await screen.findByTestId("my-seal");
+    expect(buzzes()).toEqual(["commitSealed", "commitSealed"]);
     await user.click(screen.getByTestId("commit-button"));
     await screen.findByTestId("reveal-form");
-    expect(buzzes()).toEqual(["commitSealed", "commitSealed"]);
+    expect(buzzes()).toEqual(["commitSealed", "commitSealed", "commitSealed"]);
 
     renderAs(server, MEMBER_B);
     await user.click(await screen.findByTestId("release-button"));
     await screen.findByTestId("release-done");
-    expect(buzzes()).toEqual(["commitSealed", "commitSealed", "revealStep"]);
+    expect(buzzes()).toEqual(["commitSealed", "commitSealed", "commitSealed", "revealStep"]);
+    await server.service.submitNonce({ drawId, nonce: cSeal.nonce }, { userId: MEMBER_C });
 
     renderAs(server, TREASURER);
-    await screen.findByTestId("nonce-progress");
+    await user.click(await screen.findByTestId("release-button"));
+    await screen.findByTestId("release-done");
     await user.click(screen.getByTestId("reveal-button"));
     await screen.findByTestId("compare-result");
     await waitFor(() => expect(buzzes()).toContain("winnerRevealed"));
-    expect(buzzes()).toEqual(["commitSealed", "commitSealed", "revealStep", "revealStep", "winnerRevealed"]);
+    expect(buzzes()).toEqual(["commitSealed", "commitSealed", "commitSealed", "revealStep", "revealStep", "revealStep", "winnerRevealed"]);
   });
 
   it("does not buzz when someone merely opens a draw that was already revealed", async () => {
@@ -1083,5 +1131,157 @@ describe("signed in: collateral for each winner (advisory)", () => {
     await within(panel).findByTestId("collateral-winner");
     expect(panel).toHaveTextContent(translate("am", "collateral.title"));
     expect(panel).toHaveTextContent(translate("am", "collateral.advisory"));
+  });
+});
+
+describe("a seal lost to an ambiguous network failure is not thrown away", () => {
+  it("keeps the nonce when the server stored the seal and only the reply was lost", async () => {
+    const user = userEvent.setup();
+    let applied = false;
+    // eslint-disable-next-line prefer-const
+    let server: Server;
+    server = createServer("treasurer", {
+      override: (url, init) => {
+        if (!url.startsWith("/api/draw/seals") || applied) return null;
+        applied = true;
+        const body = JSON.parse(String(init.body)) as { drawId: string; sealed: string };
+        // The seal reaches the database ...
+        return server.service
+          .submitSeal(body, { userId: hoisted.userId })
+          .then(() => {
+            // ... and the connection drops before the reply.
+            throw new TypeError("network lost");
+          });
+      }
+    });
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+    await openTheDraw(user);
+    renderAs(server, MEMBER_B);
+    await user.click(await screen.findByTestId("seal-button"));
+
+    // The screen asked the server what it holds, found the seal, and kept the nonce that opens it.
+    await screen.findByTestId("my-seal");
+    const drawId = await theDrawId(server);
+    const mine = readSeal(drawId);
+    expect(mine).not.toBeNull();
+    const held = (await server.service.getSession(drawId, { userId: MEMBER_B })).seals.find((seal) => seal.memberId === MEMBER_B);
+    expect(held?.sealed).toBe(mine!.sealed);
+  });
+
+  it("keeps the nonce when the server cannot be asked either, and says so", async () => {
+    const user = userEvent.setup();
+    const server = createServer("treasurer", {
+      override: (url, init) => {
+        if (!url.startsWith("/api/draw/seals") && !(url.startsWith("/api/draw/draws/") && (init.method ?? "GET") === "GET" && sealSent)) return null;
+        sealSent = true;
+        throw new TypeError("network down");
+      }
+    });
+    let sealSent = false;
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+    await openTheDraw(user);
+    sealSent = false;
+    renderAs(server, MEMBER_B);
+    await user.click(await screen.findByTestId("seal-button"));
+
+    expect(await screen.findByText(translate("en", "drawLive.sealUnsure"))).toBeInTheDocument();
+    const drawId = await theDrawId(server);
+    // The seal may be on the server, so the nonce stays on this device.
+    expect(readSeal(drawId)).not.toBeNull();
+  });
+
+  it("still clears the nonce when the server answers that it refused the seal", async () => {
+    const user = userEvent.setup();
+    const server = createServer("treasurer", {
+      override: (url) =>
+        url.startsWith("/api/draw/seals") ? Response.json({ error: "not_eligible" }, { status: 403 }) : null
+    });
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+    await openTheDraw(user);
+    renderAs(server, MEMBER_B);
+    await user.click(await screen.findByTestId("seal-button"));
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    const drawId = await theDrawId(server);
+    expect(readSeal(drawId)).toBeNull();
+  });
+});
+
+describe("cancelling for members who did not respond", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows the deadline and offers no cancel before it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-02T10:00:00.000Z"));
+    const user = userEvent.setup({ advanceTimers: () => undefined });
+    const server = createServer("treasurer");
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+    await openTheDraw(user);
+
+    expect(screen.getByTestId("seal-deadline")).toBeInTheDocument();
+    expect(screen.getByTestId("cancel-early")).toBeInTheDocument();
+    expect(screen.queryByTestId("cancel-button")).toBeNull();
+    expect(screen.queryByTestId("cancel-reason")).toBeNull();
+  });
+
+  it("after the deadline the treasurer cancels with a reason, and every member sees who, why and who missed", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-01T10:00:00.000Z"));
+    const user = userEvent.setup({ advanceTimers: () => undefined });
+    const server = createServer("treasurer", { clock: () => new Date() });
+    renderAs(server, TREASURER);
+    await createTheCycle(user);
+    await openTheDraw(user);
+    expect(screen.getByTestId("cancel-early")).toBeInTheDocument();
+
+    // Two days pass with nobody sealing: the seal deadline (48 hours) is behind us.
+    vi.setSystemTime(new Date("2026-10-04T10:00:00.000Z"));
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByTestId("cancel-button");
+    expect(screen.queryByTestId("cancel-early")).toBeNull();
+    const button = await screen.findByTestId("cancel-button");
+    expect(button).toBeDisabled();
+    await user.type(screen.getByTestId("cancel-reason"), "short");
+    expect(button).toBeDisabled();
+    await user.clear(screen.getByTestId("cancel-reason"));
+    await user.type(screen.getByTestId("cancel-reason"), "Two members never sealed within the window");
+    await user.click(button);
+
+    const list = await screen.findByTestId("cancellation-list");
+    expect(list).toHaveTextContent("Two members never sealed within the window");
+    expect(list).toHaveTextContent("before the commit");
+    expect(list).toHaveTextContent("Did not respond:");
+    const request = server.bodies.find((entry) => entry.path === "/api/draw/cancel")!.body;
+    expect(Object.keys(request).sort()).toEqual(["drawId", "reason"]);
+    expect(screen.getByTestId("cancelled-note")).toHaveTextContent("Two members never sealed within the window");
+
+    // A plain member sees the same record and is offered nothing to cancel.
+    renderAs(server, MEMBER_B);
+    expect(await screen.findByTestId("cancellation-list")).toHaveTextContent("Two members never sealed within the window");
+    expect(screen.queryByTestId("cancel-form")).toBeNull();
+  });
+
+  it("once the reveal is opened the draw must be finished: no cancel, and a manager without the seed can finish it", async () => {
+    const user = userEvent.setup();
+    const server = createServer("treasurer");
+    const { drawId } = await committedDraw(server);
+    await server.repository.requestReveal({ drawId, seed: TREASURER_SEED }, { userId: TREASURER });
+    // This device never held the seed (another manager committed): only the published one exists.
+    localStorage.removeItem(`sened.draw.draft.${drawId}`);
+    renderAs(server, TREASURER);
+
+    expect(await screen.findByTestId("cancel-reveal-opened")).toBeInTheDocument();
+    expect(screen.queryByTestId("cancel-button")).toBeNull();
+    expect(screen.getByTestId("reveal-finish")).toBeInTheDocument();
+    await user.click(screen.getByTestId("reveal-button"));
+    await screen.findByTestId("compare-result");
+    const request = server.bodies.find((entry) => entry.path === "/api/draw/reveals")!.body;
+    expect(Object.keys(request).sort()).toEqual(["drawId", "idempotencyKey"]);
+    expect(screen.getByTestId("compare-result")).toHaveTextContent("agree");
   });
 });

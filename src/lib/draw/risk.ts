@@ -173,6 +173,69 @@ export function planReserve(request: ReserveRequest): ReservePlan {
   };
 }
 
+/**
+ * The reserve a draw actually withholds: the cycle's ratio of the committed pot, ROUNDED HALF
+ * UP to the cent. This is the rule the database enforces on every v3 reveal
+ * (`sened_draw_reserve_amount`, 20261014100000_draw_integrity.sql); the two are pinned by the
+ * same golden values in `test/draw.reserve.test.ts` and the SQL harness.
+ */
+export function reserveByRatioMinor(potMinor: bigint, ratioBps: number): bigint {
+  return (potMinor * BigInt(ratioBps) + BPS_SCALE / 2n) / BPS_SCALE;
+}
+
+/**
+ * The plan for a draw's payout split: reserve = ratio of the pot (half up to the cent), payout =
+ * pot - reserve. {@link planReserve} stays the ADVISORY exposure model (governance and the
+ * collateral screen use it); the draw itself never lets the exposure move the reserve, because
+ * a split the treasurer could tune is a split the database could not hold them to. When one
+ * member's remaining shares exceed the reserve, the plan says so (`exposure_uncovered`) and
+ * `reserveAdequate` is false: the group is told, the number is not changed.
+ */
+export function planDrawReserve(request: ReserveRequest): ReservePlan {
+  const advisory = planReserve(request);
+  const reserveMinor = reserveByRatioMinor(advisory.potMinor, request.reserveRatioBps);
+  const payoutMinor = advisory.potMinor - reserveMinor;
+  if (payoutMinor <= 0n) {
+    throw new DrawError(
+      "INVALID_AMOUNT",
+      "The reserve would consume the whole pot; refusing to post a zero-value payout"
+    );
+  }
+  const shareMinor = requireMinorUnits(request.contributionAmount, "contributionAmount");
+  const singleMemberExposure = shareMinor * BigInt(request.totalRounds - request.round);
+
+  const notes: string[] = [
+    `The reserve is ${formatEtbMinorUnits(reserveMinor)} ETB (${request.reserveRatioBps} bps of the pot, rounded half up to the cent).`
+  ];
+  const noteItems: DrawRiskNote[] = [
+    { code: "base_reserve", amount: formatEtbMinorUnits(reserveMinor), bps: request.reserveRatioBps }
+  ];
+  if (singleMemberExposure === 0n) {
+    notes.push("This is the final round, so no member retains contribution exposure.");
+    noteItems.push({ code: "final_round" });
+  } else if (singleMemberExposure > reserveMinor) {
+    notes.push(
+      `A member drawn this round still owes ${formatEtbMinorUnits(singleMemberExposure)} ETB across the remaining rounds, more than the ${formatEtbMinorUnits(reserveMinor)} ETB reserve. The reserve is the cycle's fixed ratio and does not rise to cover it.`
+    );
+    noteItems.push({
+      code: "exposure_uncovered",
+      exposure: formatEtbMinorUnits(singleMemberExposure),
+      reserve: formatEtbMinorUnits(reserveMinor)
+    });
+  }
+
+  return {
+    potMinor: advisory.potMinor,
+    baseReserveMinor: reserveMinor,
+    exposureMinor: advisory.exposureMinor,
+    reserveMinor,
+    payoutMinor,
+    capped: singleMemberExposure > reserveMinor,
+    notes,
+    noteItems
+  };
+}
+
 export function assessDrawRisk(
   request: ReserveRequest,
   plan: ReservePlan

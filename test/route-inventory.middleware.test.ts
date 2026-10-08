@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 import { RATE_LIMITED, isRateLimitedPath, middleware, resolveRateLimit } from "@/middleware";
@@ -85,6 +87,7 @@ describe("the cycle, draw, seal and nonce routes are metered", () => {
       "/api/draw/draws",
       "/api/draw/draws/[drawId]",
       "/api/draw/seals",
+      "/api/draw/cancel",
       "/api/draw/nonces"
     ]) {
       expect(RATE_LIMITED.has(path), path).toBe(true);
@@ -136,7 +139,7 @@ describe("the cycle, draw, seal and nonce routes are metered", () => {
 describe("the reserved Wave 2 sync buckets are finally reachable", () => {
   it("registers /api/sync, which resolveRateLimit already understood", () => {
     expect(RATE_LIMITED.has("/api/sync")).toBe(true);
-    expect(resolveRateLimit("/api/sync")).toEqual(WRITE_RULE);
+    expect(resolveRateLimit("/api/sync")).toEqual(READ_RULE);
     expect(isRateLimitedPath("/api/sync")).toBe(true);
   });
 
@@ -312,5 +315,138 @@ describe("the contribution grid and gate routes are metered", () => {
       last = middleware(new NextRequest("http://localhost/api/draw/gate", { method: "POST", headers: { authorization: "Bearer gate" } }));
     }
     expect(last?.status).toBe(429);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The inventory is derived from the file system, not from a hand-kept list: a
+// new `src/app/api/**/route.ts` that nobody remembered to register fails here.
+// ---------------------------------------------------------------------------
+
+const API_ROOT = join(process.cwd(), "src/app/api");
+const SRC_ROOT = join(process.cwd(), "src");
+
+function findRouteFiles(directory: string): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const full = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...findRouteFiles(full));
+    } else if (entry.name === "route.ts") {
+      found.push(full);
+    }
+  }
+  return found;
+}
+
+/** `src/app/api/draw/rounds/[roundId]/route.ts` -> `/api/draw/rounds/[roundId]`. */
+function routePath(file: string): string {
+  const relative = file.slice(API_ROOT.length).split(String.fromCharCode(92)).join("/");
+  return `/api${relative.replace(/\/route\.ts$/, "")}`;
+}
+
+const SAMPLE_UUID = "11111111-1111-4111-8111-111111111111";
+const concrete = (path: string) => path.replace(/\[[^\]]+\]/g, SAMPLE_UUID);
+
+/**
+ * Routes that are deliberately NOT metered: pure, credential-free functions that
+ * spend nothing and read nothing about anyone. Adding to this list is a decision,
+ * and the test below makes the list itself prove it is still true.
+ */
+const INTENTIONALLY_UNMETERED = new Set(["/api/voice/extract", "/api/voice/capabilities"]);
+
+/**
+ * Routes that are deliberately open to a caller with no session. Each is pure and
+ * persists nothing (its route file says so); every other route must authenticate.
+ */
+const INTENTIONALLY_NO_SESSION = new Set([
+  "/api/voice/extract",
+  "/api/voice/capabilities",
+  "/api/governance/recommendations"
+]);
+
+/** Cron-only routes authenticate with the shared secret instead of a user token. */
+const CRON_SECRET_ROUTES = new Set(["/api/reconciliation/drain"]);
+
+/** The modules that DEFINE the auth helpers; counting them would make every route "authenticate". */
+const AUTH_DEFINITIONS = new Set(
+  ["lib/authRead.ts", "lib/supabaseServer.ts"].map((file) => join(SRC_ROOT, file))
+);
+
+function resolveModule(specifier: string): string | null {
+  const base = join(SRC_ROOT, specifier.slice(2));
+  for (const candidate of [`${base}.ts`, `${base}.tsx`, join(base, "index.ts")]) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/** The route file plus what it imports through `@/`, `depth` hops down, minus the auth definitions. */
+function handlerSource(file: string, depth = 3, seen = new Set<string>()): string {
+  if (seen.has(file) || AUTH_DEFINITIONS.has(file)) {
+    return "";
+  }
+  seen.add(file);
+  const source = readFileSync(file, "utf8");
+  if (depth === 0) {
+    return source;
+  }
+  let all = source;
+  for (const match of source.matchAll(/from "(@\/[^"]+)"/g)) {
+    const next = resolveModule(match[1]);
+    if (next) {
+      all += `\n${handlerSource(next, depth - 1, seen)}`;
+    }
+  }
+  return all;
+}
+
+const routeFiles = findRouteFiles(API_ROOT).sort();
+const routes = routeFiles.map((file) => ({ file, path: routePath(file) }));
+
+describe("every API route is on the rate-limit inventory", () => {
+  it("finds the routes (a broken glob must not pass vacuously)", () => {
+    expect(routes.length).toBeGreaterThanOrEqual(30);
+    expect(routes.map((route) => route.path)).toContain("/api/sync");
+    expect(routes.map((route) => route.path)).toContain("/api/draw/rounds/[roundId]");
+  });
+
+  it.each(routes.map((route) => [route.path] as const))("meters %s (bracket form and a concrete id)", (path) => {
+    if (INTENTIONALLY_UNMETERED.has(path)) {
+      expect(isRateLimitedPath(path), path).toBe(false);
+      return;
+    }
+    expect(RATE_LIMITED.has(path), `${path} is missing from RATE_LIMITED in src/middleware.ts`).toBe(true);
+    expect(isRateLimitedPath(concrete(path)), `${concrete(path)} is not matched by the middleware`).toBe(true);
+  });
+
+  it("keeps the allowlists honest: every entry is a real route, and nothing else is registered that is not", () => {
+    const known = new Set(routes.map((route) => route.path));
+    for (const path of [...INTENTIONALLY_UNMETERED, ...INTENTIONALLY_NO_SESSION, ...CRON_SECRET_ROUTES]) {
+      expect(known.has(path), `${path} is allowlisted but is not a route`).toBe(true);
+    }
+    for (const path of RATE_LIMITED) {
+      expect(known.has(path), `${path} is rate-limited but is not a route`).toBe(true);
+    }
+  });
+});
+
+describe("every API route authenticates its caller", () => {
+  it.each(routes.map((route) => [route.path, route.file] as const))("%s", (path, file) => {
+    const source = handlerSource(file);
+    if (CRON_SECRET_ROUTES.has(path)) {
+      expect(source, `${path} must compare the cron shared secret`).toMatch(/CRON_SECRET/);
+      expect(source).toMatch(/timingSafeEqual/);
+      return;
+    }
+    if (INTENTIONALLY_NO_SESSION.has(path)) {
+      return;
+    }
+    expect(
+      /\b(authenticateRead|bearerToken)\(/.test(source),
+      `${path} must call authenticateRead() or bearerToken()`
+    ).toBe(true);
   });
 });

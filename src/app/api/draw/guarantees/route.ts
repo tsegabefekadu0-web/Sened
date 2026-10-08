@@ -4,7 +4,8 @@ import { drawGuaranteeRequestSchema, parse } from "@/lib/validation";
 
 export const runtime = "nodejs";
 
-const MAX_BODY_BYTES = 2_048;
+// A reason may be 1000 characters; Amharic is 3 bytes each in UTF-8, so 3000 bytes of reason plus the JSON envelope.
+const MAX_BODY_BYTES = 4_096;
 
 function jsonError(error: string, status: number, message?: string): Response {
   return Response.json(

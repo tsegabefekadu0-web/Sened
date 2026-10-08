@@ -50,7 +50,9 @@ values
    'bbbbbbbb-0000-4000-8000-000000000001', 'Cycle 1', 8, 3000.00),
   -- Cycle 2 isolates the round-ordering check in CHECK 4.
   ('aaaaaaaa-0000-4000-8000-0000000000c2', 'aaaaaaaa-0000-4000-8000-000000000001',
-   'bbbbbbbb-0000-4000-8000-000000000001', 'Cycle 2', 8, 3000.00);
+   'bbbbbbbb-0000-4000-8000-000000000001', 'Cycle 2', 8, 3000.00),
+  ('aaaaaaaa-0000-4000-8000-0000000000c3', 'aaaaaaaa-0000-4000-8000-000000000001',
+   'bbbbbbbb-0000-4000-8000-000000000001', 'Cycle 3', 8, 3000.00);
 
 -- Participants are listed in an order that is deliberately NOT ticket order:
 -- ticket 'aaa...' belongs to the LAST member listed, so any lookup that ignored
@@ -121,33 +123,126 @@ create or replace function pg_temp.member_nonces() returns jsonb
     )
   $$;
 
+-- ---------------------------------------------------------------------------
+-- Honest v3 draws for the legacy checks below.
+--
+-- Since 20261014100000_draw_integrity.sql the database DERIVES the winner, so a v3
+-- reveal that carries invented digests is (rightly) refused. These helpers build a
+-- commitment whose seed, seal and nonce are real and reveal with the values the
+-- database itself derives, so each check below can still isolate the ONE rule it is
+-- about (the winner binding, the ordering, the payout).
+-- ---------------------------------------------------------------------------
+create or replace function pg_temp.real_set(p_draw uuid) returns jsonb
+  language sql stable as $$
+    select jsonb_build_array(jsonb_build_object(
+      'memberId', '44444444-4444-4444-8444-444444444444',
+      'sealed', public.sened_draw_member_seal_hash(
+        p_draw, '44444444-4444-4444-8444-444444444444'::uuid, repeat('m', 24))))
+  $$;
+
+create or replace function pg_temp.real_digest(p_draw uuid) returns text
+  language sql stable as $$ select public.sened_draw_member_set_digest(p_draw, pg_temp.real_set(p_draw)) $$;
+
+create or replace function pg_temp.real_commit(p_draw uuid, p_cycle uuid, p_round integer, p_seed text, p_key text)
+returns text language plpgsql as $$
+declare
+  c text := public.sened_draw_commit_hash_v3(
+    'aaaaaaaa-0000-4000-8000-000000000001'::uuid, p_cycle, p_round, p_draw,
+    repeat('2', 64), repeat('n', 32), pg_temp.real_digest(p_draw), p_seed);
+begin
+  perform public.commit_draw_v1(
+    'aaaaaaaa-0000-4000-8000-000000000001'::uuid, p_cycle, p_round, p_draw,
+    c, repeat('n', 32), repeat('2', 64),
+    pg_temp.real_digest(p_draw), pg_temp.real_set(p_draw), pg_temp.roster(),
+    3000.00, 8, 1000, p_key, now(), 'v3');
+  return c;
+end $$;
+
+-- Reveal with the database-derived values; any argument may be overridden to forge it.
+create or replace function pg_temp.real_reveal(
+  p_draw uuid, p_seed text,
+  p_index integer default null, p_winner uuid default null, p_ticket text default null,
+  p_payout numeric default 2700.00, p_reserve numeric default 300.00,
+  p_transcript text default null, p_selection text default null)
+returns jsonb language plpgsql as $$
+declare
+  com public.draw_commitments;
+  nonces jsonb := jsonb_build_array(jsonb_build_object(
+    'memberId', '44444444-4444-4444-8444-444444444444', 'nonce', repeat('m', 24)));
+  d record;
+  who jsonb;
+  idx integer;
+begin
+  select * into com from public.draw_commitments where draw_id = p_draw;
+  select * into d from public.sened_draw_derive_v3(com, p_seed, nonces);
+  idx := coalesce(p_index, d.selected_index);
+  who := public.sened_draw_ordered_participant(com.participants, idx);
+  return public.reveal_draw_v1(
+    p_draw, p_seed, com.commitment, com.member_digest, nonces,
+    coalesce(p_transcript, d.transcript_digest), coalesce(p_selection, d.selection_digest),
+    idx, coalesce(p_winner, (who ->> 'memberId')::uuid), coalesce(p_ticket, who ->> 'ticket'),
+    p_payout, p_reserve, now());
+end $$;
+
+-- The member who wins a legacy draw, for the check that needs to name them.
+create or replace function pg_temp.derived_winner(p_draw uuid, p_seed text) returns uuid
+language plpgsql as $$
+declare
+  com public.draw_commitments;
+  d record;
+begin
+  select * into com from public.draw_commitments where draw_id = p_draw;
+  select * into d from public.sened_draw_derive_v3(com, p_seed, jsonb_build_array(jsonb_build_object(
+    'memberId', '44444444-4444-4444-8444-444444444444', 'nonce', repeat('m', 24))));
+  return (public.sened_draw_ordered_participant(com.participants, d.selected_index) ->> 'memberId')::uuid;
+end $$;
+
+-- A reveal statement carrying the values the database derives for a committed draw.
+create or replace function pg_temp.derived_reveal_stmt(
+  p_draw uuid, p_seed text, p_nonces jsonb, p_payout numeric, p_reserve numeric)
+returns text language plpgsql as $$
+declare
+  com public.draw_commitments;
+  d record;
+  who jsonb;
+begin
+  select * into com from public.draw_commitments where draw_id = p_draw;
+  select * into d from public.sened_draw_derive_v3(com, p_seed, p_nonces);
+  who := public.sened_draw_ordered_participant(com.participants, d.selected_index);
+  return format(
+    'select public.reveal_draw_v1(%L, %L, %L, %L, %L::jsonb, %L, %L, %s, %L, %L, %s, %s, now())::text',
+    p_draw, p_seed, com.commitment, com.member_digest, p_nonces,
+    d.transcript_digest, d.selection_digest, d.selected_index,
+    who ->> 'memberId', who ->> 'ticket', p_payout, p_reserve);
+end $$;
+
+create or replace function pg_temp.derived_index_winner(p_draw uuid, p_seed text, p_nonces jsonb) returns jsonb
+language plpgsql as $$
+declare
+  com public.draw_commitments;
+  d record;
+begin
+  select * into com from public.draw_commitments where draw_id = p_draw;
+  select * into d from public.sened_draw_derive_v3(com, p_seed, p_nonces);
+  return public.sened_draw_ordered_participant(com.participants, d.selected_index);
+end $$;
+
 -- ===========================================================================
 -- CHECK 2: an honest reveal is accepted
 --
--- Cycle 1, round 1. Winner is index 0 in ticket order = member-a.
+-- Cycle 1, round 1: a real commitment, revealed with the values the database derives.
 -- ===========================================================================
 do $$
 declare
-  commitment text := repeat('1', 64);
+  draw constant uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  seed constant text := 'seed-value-for-round-one-000000000000';
+  c text;
+  won uuid;
 begin
-  perform public.commit_draw_v1(
-    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
-    'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
-    1, 'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
-    commitment, repeat('n', 32), repeat('2', 64),
-    pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
-    3000.00, 8, 1000, 'verify-honest-round-1', now(), 'v3'
-  );
-
-  perform public.reveal_draw_v1(
-    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
-    'seed-value-for-round-one-000000000000',
-    commitment,
-    pg_temp.member_digest(), pg_temp.member_nonces(),
-    repeat('3', 64), repeat('4', 64),
-    0, '44444444-4444-4444-8444-444444444444'::uuid, repeat('a', 64),
-    2700.00, 300.00, now()
-  );
+  c := pg_temp.real_commit(draw, 'aaaaaaaa-0000-4000-8000-0000000000c1', 1, seed, 'verify-honest-round-1');
+  won := pg_temp.derived_winner(draw, seed);
+  perform pg_temp.real_reveal(draw, seed);
+  perform set_config('sened.test.c2_winner', won::text, false);
 end;
 $$;
 
@@ -158,32 +253,25 @@ $$;
 -- 20260926110000_draw_reveal_binding.sql the trigger never compared
 -- winner_member_id against the committed roster, so a treasurer holding an
 -- ordinary user JWT could name any winner and write a permanently
--- unalterable row.
+-- unalterable row. (The derivation itself is attacked in DRAW-INTEGRITY.)
 -- ===========================================================================
 do $$
 declare
-  commitment text := repeat('5', 64);
+  draw constant uuid := 'dddddddd-0000-4000-8000-000000000002';
+  seed constant text := 'seed-value-for-round-two-0000000000000';
+  derived_member uuid;
+  other uuid;
+  wrong_ticket text;
 begin
-  perform public.commit_draw_v1(
-    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
-    'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
-    2, 'dddddddd-0000-4000-8000-000000000002'::uuid,
-    commitment, repeat('o', 32), repeat('6', 64),
-    pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
-    3000.00, 8, 1000, 'verify-forged-round-2', now(), 'v3'
-  );
+  perform pg_temp.real_commit(draw, 'aaaaaaaa-0000-4000-8000-0000000000c1', 2, seed, 'verify-forged-round-2');
+  derived_member := pg_temp.derived_winner(draw, seed);
+  other := case when derived_member = '22222222-2222-4222-8222-222222222222'::uuid
+                then '33333333-3333-4333-8333-333333333333'::uuid
+                else '22222222-2222-4222-8222-222222222222'::uuid end;
 
-  -- Claim selected_index 0 (which is member-a) but name member-c.
+  -- The derived index, but a different member named.
   begin
-    perform public.reveal_draw_v1(
-      'dddddddd-0000-4000-8000-000000000002'::uuid,
-      'seed-value-for-round-two-0000000000000',
-      commitment,
-    pg_temp.member_digest(), pg_temp.member_nonces(),
-    repeat('7', 64), repeat('8', 64),
-      0, '22222222-2222-4222-8222-222222222222'::uuid, repeat('c', 64),
-      2700.00, 300.00, now()
-    );
+    perform pg_temp.real_reveal(draw, seed, null, other);
     raise exception 'CHECK 3 FAILED: forged winner was ACCEPTED';
   exception when others then
     if sqlerrm not like '%draw_winner_binding_mismatch%' then
@@ -191,19 +279,10 @@ begin
     end if;
   end;
 
-  -- Correct winner, but claim a ticket that belongs to somebody else. Uses
-  -- index 2 / member-c, who has not won yet, so the repeat-winner guard cannot
-  -- mask this check.
+  -- The right member, but a ticket that belongs to somebody else.
+  wrong_ticket := case when derived_member = '44444444-4444-4444-8444-444444444444'::uuid then repeat('c', 64) else repeat('a', 64) end;
   begin
-    perform public.reveal_draw_v1(
-      'dddddddd-0000-4000-8000-000000000002'::uuid,
-      'seed-value-for-round-two-0000000000000',
-      commitment,
-    pg_temp.member_digest(), pg_temp.member_nonces(),
-    repeat('7', 64), repeat('8', 64),
-      2, '22222222-2222-4222-8222-222222222222'::uuid, repeat('a', 64),
-      2700.00, 300.00, now()
-    );
+    perform pg_temp.real_reveal(draw, seed, null, null, wrong_ticket);
     raise exception 'CHECK 3 FAILED: mismatched winning ticket was ACCEPTED';
   exception when others then
     if sqlerrm not like '%draw_winning_ticket_mismatch%' then
@@ -221,36 +300,18 @@ $$;
 -- attack. Uses cycle 2 so the check is isolated from CHECK 2 and CHECK 3.
 -- ===========================================================================
 do $$
+declare
+  d1 constant uuid := 'aaaaaaaa-0000-4000-8000-0000000000c1';
+  d2 constant uuid := 'eeeeeeee-0000-4000-8000-000000000002';
+  s1 constant text := 'seed-cycle-two-round-one-000000000';
+  s2 constant text := 'seed-cycle-two-round-two-000000000';
 begin
-  perform public.commit_draw_v1(
-    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
-    'aaaaaaaa-0000-4000-8000-0000000000c2'::uuid,
-    1, 'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
-    repeat('d1', 32), repeat('r1', 32), repeat('e1', 32),
-    pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
-    3000.00, 8, 1000, 'verify-order-c2-round-1', now(), 'v3'
-  );
-  perform public.commit_draw_v1(
-    'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
-    'aaaaaaaa-0000-4000-8000-0000000000c2'::uuid,
-    2, 'eeeeeeee-0000-4000-8000-000000000002'::uuid,
-    repeat('d2', 32), repeat('r2', 32), repeat('e2', 32),
-    pg_temp.member_digest(), pg_temp.member_set(), pg_temp.roster(),
-    3000.00, 8, 1000, 'verify-order-c2-round-2', now(), 'v3'
-  );
+  perform pg_temp.real_commit(d1, 'aaaaaaaa-0000-4000-8000-0000000000c2', 1, s1, 'verify-order-c2-round-1');
+  perform pg_temp.real_commit(d2, 'aaaaaaaa-0000-4000-8000-0000000000c2', 2, s2, 'verify-order-c2-round-2');
 
-  -- Round 2 first. The chosen winner has not won yet, so the ONLY reason this
-  -- can fail is the ordering guard.
+  -- Round 2 first: the ONLY reason this can fail is the ordering guard.
   begin
-    perform public.reveal_draw_v1(
-      'eeeeeeee-0000-4000-8000-000000000002'::uuid,
-      'seed-cycle-two-round-two-000000000',
-      repeat('d2', 32),
-      pg_temp.member_digest(), pg_temp.member_nonces(),
-      repeat('f1', 32), repeat('f2', 32),
-      2, '22222222-2222-4222-8222-222222222222'::uuid, repeat('c', 64),
-      2700.00, 300.00, now()
-    );
+    perform pg_temp.real_reveal(d2, s2);
     raise exception 'CHECK 4 FAILED: out-of-order reveal was ACCEPTED';
   exception when others then
     if sqlerrm not like '%draw_round_out_of_order%' then
@@ -260,26 +321,16 @@ begin
 
   -- Round 1 now succeeds, proving the guard is ordering-based rather than
   -- simply refusing everything.
-  perform public.reveal_draw_v1(
-    'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
-    'seed-cycle-two-round-one-000000000',
-    repeat('d1', 32),
-    pg_temp.member_digest(), pg_temp.member_nonces(),
-    repeat('f3', 32), repeat('f4', 32),
-    0, '44444444-4444-4444-8444-444444444444'::uuid, repeat('a', 64),
-    2700.00, 300.00, now()
-  );
-
-  -- With round 1 revealed, round 2 becomes revealable.
-  perform public.reveal_draw_v1(
-    'eeeeeeee-0000-4000-8000-000000000002'::uuid,
-    'seed-cycle-two-round-two-000000000',
-    repeat('d2', 32),
-    pg_temp.member_digest(), pg_temp.member_nonces(),
-    repeat('f1', 32), repeat('f2', 32),
-    2, '22222222-2222-4222-8222-222222222222'::uuid, repeat('c', 64),
-    2700.00, 300.00, now()
-  );
+  perform pg_temp.real_reveal(d1, s1);
+  -- Round 2 becomes revealable unless the same member would win twice (rotation); either
+  -- way the ordering guard is satisfied, so the only acceptable refusal is the repeat winner.
+  begin
+    perform pg_temp.real_reveal(d2, s2);
+  exception when others then
+    if sqlerrm not like '%draw_repeat_winner%' then
+      raise exception 'CHECK 4 FAILED: round 2 refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
 end;
 $$;
 
@@ -319,7 +370,7 @@ begin
     perform public.record_draw_payout_v1(
       'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
       entry_id,
-      '44444444-4444-4444-8444-444444444444'::uuid,
+      current_setting('sened.test.c2_winner')::uuid,
       9999.00, 300.00, now()
     );
     raise exception 'CHECK 5 FAILED: payout with a mismatched amount was ACCEPTED';
@@ -336,7 +387,7 @@ begin
     perform public.record_draw_payout_v1(
       'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
       entry_id,
-      '22222222-2222-4222-8222-222222222222'::uuid,
+      '99999999-9999-4999-8999-999999999999'::uuid,
       2700.00, 300.00, now()
     );
     raise exception 'CHECK 5 FAILED: payout naming a different winner was ACCEPTED';
@@ -351,7 +402,7 @@ begin
   perform public.record_draw_payout_v1(
     'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
     entry_id,
-    '44444444-4444-4444-8444-444444444444'::uuid,
+    current_setting('sened.test.c2_winner')::uuid,
     2700.00, 300.00, now()
   );
 end;
@@ -481,14 +532,14 @@ declare
   draw_uuid constant uuid := 'cccccccc-0000-4000-8000-000000000001';
   group_uuid constant uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
   tenant_uuid constant uuid := 'bbbbbbbb-0000-4000-8000-000000000001';
-  cycle_uuid constant uuid := 'aaaaaaaa-0000-4000-8000-0000000000c1';
+  cycle_uuid constant uuid := 'aaaaaaaa-0000-4000-8000-0000000000c3';
   actor_uuid constant uuid := '11111111-1111-4111-8111-111111111111';
 begin
   -- A commitment carrying a real member set is accepted.
   insert into public.draw_commitments (
     draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce,
     member_digest, member_commitments, roster_digest, participants, pot_amount,
-    total_rounds, reserve_ratio_bps, actor_id, idempotency_key
+    total_rounds, reserve_ratio_bps, actor_id, idempotency_key, protocol_version
   ) values (
     draw_uuid, group_uuid, tenant_uuid, cycle_uuid, 1, repeat('a', 64),
     'nonce-0123456789abcdef-XYZ', repeat('e', 64),
@@ -511,7 +562,7 @@ begin
         'contributionAmount', '5000.00'
       )
     ),
-    5000.00, 5, 1000, actor_uuid, 'member-commit-1'
+    5000.00, 5, 1000, actor_uuid, 'member-commit-1', 'v2'
   );
 
   if not exists (
@@ -528,11 +579,11 @@ begin
     insert into public.draw_commitments (
       draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce,
       member_digest, member_commitments, roster_digest, participants, pot_amount,
-      total_rounds, reserve_ratio_bps, actor_id, idempotency_key
+      total_rounds, reserve_ratio_bps, actor_id, idempotency_key, protocol_version
     ) values (
       'cccccccc-0000-4000-8000-000000000002', group_uuid, tenant_uuid, cycle_uuid,
       2, repeat('a', 64), 'nonce-0123456789abcdef-XYZ', repeat('e', 64), '[]'::jsonb,
-      repeat('b', 64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-empty'
+      repeat('b', 64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-empty', 'v2'
     );
     raise exception 'MEMBER 2 FAILED: a commitment with an EMPTY member set was ACCEPTED';
   exception when others then
@@ -546,11 +597,11 @@ begin
     insert into public.draw_commitments (
       draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce,
       member_digest, member_commitments, roster_digest, participants, pot_amount,
-      total_rounds, reserve_ratio_bps, actor_id, idempotency_key
+      total_rounds, reserve_ratio_bps, actor_id, idempotency_key, protocol_version
     ) values (
       'cccccccc-0000-4000-8000-000000000003', group_uuid, tenant_uuid, cycle_uuid,
       3, repeat('a', 64), 'nonce-0123456789abcdef-XYZ', 'not-a-digest', '[]'::jsonb,
-      repeat('b', 64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-baddigest'
+      repeat('b', 64), '[]'::jsonb, 5000.00, 5, 1000, actor_uuid, 'member-commit-baddigest', 'v2'
     );
     raise exception 'MEMBER 3 FAILED: a non-digest member_digest was ACCEPTED';
   exception when others then
@@ -647,7 +698,7 @@ begin
   -- `draw_commitments_round_total_check` requires round <= total_rounds.
   perform public.commit_draw_v1(
     'aaaaaaaa-0000-4000-8000-000000000001'::uuid,
-    'aaaaaaaa-0000-4000-8000-0000000000c1'::uuid,
+    'aaaaaaaa-0000-4000-8000-0000000000c3'::uuid,
     2,
     'cccccccc-0000-4000-8000-000000000012'::uuid,
     repeat('a', 64),
@@ -2247,12 +2298,19 @@ values ('dddddddd-0000-4000-8000-000000000001','11111111-1111-4111-8111-11111111
 insert into public.bank_reconciliation_jobs (verification_id,user_id,provider) values ('dddddddd-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111','telebirr');
 
 delete from public.bank_reconciliation_jobs where verification_id <> 'dddddddd-0000-4000-8000-000000000001';
+-- The group's income / expense accounts, which the worker post must use as the counter leg.
+insert into public.ledger_accounts (id, group_id, tenant_id, code, name, account_type) values
+  ('aaaaaaaa-0000-4000-8000-0000000000e1', 'aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000001', 'CONTRIBUTION_INCOME', 'Income', 'income'),
+  ('aaaaaaaa-0000-4000-8000-0000000000e2', 'aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000001', 'PAYOUT_EXPENSE', 'Expense', 'expense');
 set local role service_role;
 -- 1. unclaimed job: both wrappers refuse
 do $$ begin
   begin perform public.get_bank_account_binding_for_reconciliation_v1('cccccccc-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111'); raise exception 'FAIL unclaimed binding'; exception when sqlstate '42501' then null; end;
 end $$;
-do $$ begin if (public.claim_bank_reconciliation_job_v1('w1', 60)->'job'->>'state') is distinct from 'CLAIMED' then raise exception 'worker check: claim failed'; end if; end $$;
+create temp table claimed as select public.claim_bank_reconciliation_job_v1('w1', 60) as j;
+do $$ begin if (select j->'job'->>'state' from claimed) is distinct from 'CLAIMED' then raise exception 'worker check: claim failed'; end if; end $$;
+create temp table lease as select (j->'job'->>'leaseToken')::uuid as tok from claimed;
+grant select on lease to service_role;
 -- 2. claimed: binding readable
 do $$ begin if public.get_bank_account_binding_for_reconciliation_v1('cccccccc-0000-4000-8000-000000000001','11111111-1111-4111-8111-111111111111')->>'accountLabel' is distinct from 'T' then raise exception 'worker check: binding not readable by worker rpc'; end if; end $$;
 do $$ begin if coalesce(nullif(current_setting('request.jwt.claim.sub', true),''),'') <> '' then raise exception 'worker check: identity leaked after rpc'; end if; end $$;
@@ -2261,19 +2319,23 @@ do $$ begin
   begin perform public.get_bank_account_binding_for_reconciliation_v1('cccccccc-0000-4000-8000-000000000001','22222222-2222-4222-8222-222222222222'); raise exception 'FAIL wrong user'; exception when sqlstate '42501' then null; end;
 end $$;
 -- 3. ledger post
-create temp table r as select public.post_ledger_entry_for_reconciliation_v1(
- '11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,
- '[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"credit","amount":"25.00"}]'::jsonb) as j;
+create temp table r as select public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000e1","direction":"credit","amount":"25.00"}]'::jsonb,(select tok from lease)) as j;
 do $$ begin if (select j->>'replayed' from r) <> 'false' then raise exception 'worker check: first post replayed'; end if; end $$;
-create temp table r2 as select public.post_ledger_entry_for_reconciliation_v1(
- '11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,
- '[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"credit","amount":"25.00"}]'::jsonb) as j;
+create temp table r2 as select public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000e1","direction":"credit","amount":"25.00"}]'::jsonb,(select tok from lease)) as j;
 do $$ begin if (select j->>'replayed' from r2) <> 'true' or (select j->'entry'->>'id' from r2) <> (select j->'entry'->>'id' from r) then raise exception 'worker check: replay was not idempotent'; end if; end $$;
 -- refusals
 do $$ begin
-  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','other-key',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"credit","amount":"25.00"}]'::jsonb); raise exception 'FAIL key'; exception when sqlstate '42501' then null; end;
-  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"2500.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"credit","amount":"2500.00"}]'::jsonb); raise exception 'FAIL amount'; exception when sqlstate '42501' then null; end;
-  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'disbursement',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"credit","amount":"25.00"}]'::jsonb); raise exception 'FAIL type'; exception when sqlstate '42501' then null; end;
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','other-key',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000e1","direction":"credit","amount":"25.00"}]'::jsonb,(select tok from lease)); raise exception 'FAIL key'; exception when sqlstate '42501' then null; end;
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"2500.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000e1","direction":"credit","amount":"2500.00"}]'::jsonb,(select tok from lease)); raise exception 'FAIL amount'; exception when sqlstate '42501' then null; end;
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'disbursement',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000e1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"credit","amount":"25.00"}]'::jsonb,(select tok from lease)); raise exception 'FAIL type'; exception when sqlstate '42501' then null; end;
+  -- the cash leg on the wrong side: money arriving may not be posted as a credit to the pot
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"credit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000e1","direction":"debit","amount":"25.00"}]'::jsonb,(select tok from lease)); raise exception 'FAIL cash direction'; exception when sqlstate '42501' then null; end;
+  -- the other leg must be the group's CONTRIBUTION_INCOME account, not just any account
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a2","direction":"credit","amount":"25.00"}]'::jsonb,(select tok from lease)); raise exception 'FAIL counter account (liability)'; exception when sqlstate '42501' then null; end;
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000e2","direction":"credit","amount":"25.00"}]'::jsonb,(select tok from lease)); raise exception 'FAIL counter account (expense for an inbound)'; exception when sqlstate '42501' then null; end;
+  -- the lease token must be the claimed job's current one
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000e1","direction":"credit","amount":"25.00"}]'::jsonb,'99999999-9999-4999-8999-999999999999'::uuid); raise exception 'FAIL wrong lease token'; exception when sqlstate '42501' then null; end;
+  begin perform public.post_ledger_entry_for_reconciliation_v1('11111111-1111-4111-8111-111111111111','aaaaaaaa-0000-4000-8000-000000000001','bank-verified-bank-intent-9',now(),'contribution',null,null,'[{"accountId":"aaaaaaaa-0000-4000-8000-0000000000a1","direction":"debit","amount":"25.00"},{"accountId":"aaaaaaaa-0000-4000-8000-0000000000e1","direction":"credit","amount":"25.00"}]'::jsonb,null::uuid); raise exception 'FAIL null lease token'; exception when sqlstate '22023' then null; end;
 end $$;
 -- 4. grants: authenticated cannot call
 reset role; set local role authenticated;
@@ -2583,11 +2645,15 @@ declare
   cycle_id constant uuid := current_setting('sened.test.cycle')::uuid;
   nonce1 constant text := 'mb1-secret-nonce-0123456789-AAAA';
   nonce2 constant text := 'mb2-secret-nonce-0123456789-BBBB';
+  nonce_own constant text := 'own-secret-nonce-0123456789-CCCC';
+  nonce_tre constant text := 'tre-secret-nonce-0123456789-DDDD';
   commit_seed constant text := 'treasurer-seed-0123456789-ZZZZ';
   commit_nonce constant text := 'treasurer-commit-nonce-0123456789';
   draw uuid;
   seal1 text;
   seal2 text;
+  seal_own text;
+  seal_tre text;
   other_seal text;
   participants jsonb;
   member_digest text;
@@ -2634,6 +2700,8 @@ begin
   -- NONCE 1. A nonce is refused before the commitment exists, whatever it is.
   seal1 := public.sened_draw_member_seal_hash(draw, mb1, nonce1);
   seal2 := public.sened_draw_member_seal_hash(draw, mb2, nonce2);
+  seal_own := public.sened_draw_member_seal_hash(draw, own, nonce_own);
+  seal_tre := public.sened_draw_member_seal_hash(draw, tre, nonce_tre);
   perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
     'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce1)), 'draw_nonce_too_early', 'NONCE 1');
   if exists (select 1 from public.draw_nonces where draw_id = draw) then
@@ -2649,11 +2717,13 @@ begin
     from public.sened_draw_eligible_members(group_a, cycle_id, 1) as e(member_id));
   member_digest := public.sened_draw_member_set_digest(draw, jsonb_build_array(
     jsonb_build_object('memberId', mb1, 'sealed', seal1),
-    jsonb_build_object('memberId', mb2, 'sealed', seal2)));
+    jsonb_build_object('memberId', mb2, 'sealed', seal2),
+    jsonb_build_object('memberId', own, 'sealed', seal_own),
+    jsonb_build_object('memberId', tre, 'sealed', seal_tre)));
   commitment := public.sened_draw_commit_hash_v3(
     group_a, cycle_id, 1, draw, roster_digest, commit_nonce, member_digest, commit_seed);
   stmt := format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     draw, commitment, commit_nonce, roster_digest, member_digest, participants, 'commit-r1', 'v3');
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', stmt), 'draw_member_commitment_missing', 'SEAL 1');
 
@@ -2720,6 +2790,22 @@ begin
   perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
     'select public.get_draw_session_v1(%L)::text', draw)), 'draw_forbidden', 'SEAL 5 outsider session');
 
+  -- QUORUM. Two of four eligible members have sealed. The commit is refused even with a
+  -- digest that is correct for the two stored seals: EVERY eligible member must seal.
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
+    draw, commitment, commit_nonce, roster_digest,
+    public.sened_draw_member_set_digest(draw, jsonb_build_array(
+      jsonb_build_object('memberId', mb1, 'sealed', seal1),
+      jsonb_build_object('memberId', mb2, 'sealed', seal2))),
+    participants, 'commit-quorum', 'v3')), 'draw_member_commitment_missing', 'QUORUM 2 of 4');
+  perform pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, seal_own)), 'QUORUM own seals');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', stmt),
+    'draw_member_commitment_missing', 'QUORUM 3 of 4');
+  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', draw, seal_tre)), 'QUORUM tre seals');
+
   -- COMMIT 1. Only an owner/treasurer commits; the roster is not typed.
   perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', stmt), 'draw_forbidden', 'COMMIT 1 member');
   perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', stmt), 'draw_forbidden', 'COMMIT 1 outsider');
@@ -2734,21 +2820,21 @@ begin
   -- COMMIT 2. A roster the caller typed is refused: a member missing, a ticket
   -- swapped, a different contribution. Nothing is written.
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     draw, commitment, commit_nonce, roster_digest, member_digest, participants - 0, 'commit-bad-1', 'v3')),
     'draw_roster_mismatch', 'COMMIT 2 missing member');
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     draw, commitment, commit_nonce, roster_digest, member_digest,
     jsonb_set(participants, '{0,ticket}', to_jsonb(repeat('0', 64))), 'commit-bad-2', 'v3')),
     'draw_roster_mismatch', 'COMMIT 2 swapped ticket');
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     draw, commitment, commit_nonce, roster_digest, member_digest,
     jsonb_set(participants, '{1,contributionAmount}', to_jsonb('5000.00'::text)), 'commit-bad-3', 'v3')),
     'draw_roster_mismatch', 'COMMIT 2 changed contribution');
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     draw, commitment, commit_nonce, roster_digest, member_digest,
     participants || jsonb_build_array(jsonb_build_object('memberId', out, 'displayName', 'x',
       'contributionAmount', '1000.00', 'ticket', public.sened_draw_ticket(group_a, cycle_id, out))),
@@ -2758,7 +2844,7 @@ begin
   -- COMMIT 3. A digest over seals other than the stored ones is refused, and so
   -- is a grindable v2 commitment. The caller cannot choose the sealed set.
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     draw, commitment, commit_nonce, roster_digest,
     public.sened_draw_member_set_digest(draw, jsonb_build_array(
       jsonb_build_object('memberId', mb1, 'sealed', seal1),
@@ -2766,7 +2852,7 @@ begin
     participants, 'commit-bad-5', 'v3')),
     'draw_member_commitment_mismatch', 'COMMIT 3 forged sealed set');
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     draw, commitment, commit_nonce, roster_digest, member_digest, participants, 'commit-bad-6', 'v2')),
     'draw_protocol_version_unsupported', 'COMMIT 3 v2');
   if exists (select 1 from public.draw_commitments where draw_id = draw) then
@@ -2782,19 +2868,19 @@ begin
      or j -> 'round' -> 'commitment' ->> 'potAmount' <> '4000.00'
      or (j -> 'round' -> 'commitment' ->> 'totalRounds')::int <> 4
      or (j -> 'round' -> 'commitment' ->> 'reserveRatioBps')::int <> 1000
-     or jsonb_array_length(j -> 'round' -> 'commitment' -> 'memberCommitments') <> 2
+     or jsonb_array_length(j -> 'round' -> 'commitment' -> 'memberCommitments') <> 4
      or j -> 'round' -> 'commitment' ->> 'protocolVersion' <> 'v3' then
     raise exception 'COMMIT 4 FAILED: unexpected commit result %', j;
   end if;
   if (select member_commitments from public.draw_commitments where draw_id = draw)
-     <> jsonb_build_array(
-          jsonb_build_object('memberId', mb2, 'sealed', seal2),
-          jsonb_build_object('memberId', mb1, 'sealed', seal1))
-     and (select member_commitments from public.draw_commitments where draw_id = draw)
-     <> jsonb_build_array(
-          jsonb_build_object('memberId', mb1, 'sealed', seal1),
-          jsonb_build_object('memberId', mb2, 'sealed', seal2)) then
+     is distinct from (
+       select jsonb_agg(jsonb_build_object('memberId', se.member_id, 'sealed', se.sealed)
+              order by se.member_id::text collate "C")
+       from public.draw_seals se where se.draw_id = draw) then
     raise exception 'COMMIT 4 FAILED: the committed set is not the stored seals';
+  end if;
+  if (select nonce_deadline - committed_at from public.draw_commitments where draw_id = draw) <> interval '48 hours' then
+    raise exception 'COMMIT 4 FAILED: the nonce deadline is not the cycle window';
   end if;
 
   -- STATE 3. COMMITTED: seals are closed, a retry replays, a different commit
@@ -2804,7 +2890,7 @@ begin
   j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', stmt), 'STATE 3 replay');
   if j ->> 'replayed' <> 'true' then raise exception 'STATE 3 FAILED: the commit retry did not replay'; end if;
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     draw, repeat('1', 64), commit_nonce, roster_digest, member_digest, participants, 'commit-other', 'v3')),
     'draw_already_committed', 'STATE 3 second commit');
   if (select state from (select public.sened_draw_state(draw) as state) s) <> 'committed' then
@@ -2821,7 +2907,7 @@ begin
     'draw_member_commitment_mismatch', 'NONCE 2 another member''s nonce');
   perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
     'select public.submit_draw_nonce_v1(%L, %L)::text', draw, 'owner-never-sealed-0123456789')),
-    'draw_member_commitment_missing', 'NONCE 2 never sealed');
+    'draw_member_commitment_mismatch', 'NONCE 2 wrong nonce for the owner');
   perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
     'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce1)), 'draw_forbidden', 'NONCE 2 outsider');
   perform pg_temp.expect_err(pg_temp.call_as(null, 'anon', format(
@@ -2889,14 +2975,7 @@ begin
 
   -- REVEAL 2. reveal_draw_v1 on a session-backed draw needs the published
   -- opening: without one it is refused, whatever nonces the caller supplies.
-  winner := public.sened_draw_ordered_participant(participants, 0);
-  stmt := format(
-    'select public.reveal_draw_v1(%L, %L, %L, %L, %L::jsonb, %L, %L, 0, %L, %L, 3600.00, 400.00, now())::text',
-    draw, commit_seed, commitment, member_digest,
-    jsonb_build_array(
-      jsonb_build_object('memberId', mb1, 'nonce', nonce1),
-      jsonb_build_object('memberId', mb2, 'nonce', nonce2)),
-    repeat('7', 64), repeat('8', 64), winner ->> 'memberId', winner ->> 'ticket');
+winner := pg_temp.derived_index_winner(draw, commit_seed, jsonb_build_array(      jsonb_build_object('memberId', mb1, 'nonce', nonce1),      jsonb_build_object('memberId', mb2, 'nonce', nonce2),      jsonb_build_object('memberId', own, 'nonce', nonce_own),      jsonb_build_object('memberId', tre, 'nonce', nonce_tre)));  stmt := pg_temp.derived_reveal_stmt(draw, commit_seed, jsonb_build_array(      jsonb_build_object('memberId', mb1, 'nonce', nonce1),      jsonb_build_object('memberId', mb2, 'nonce', nonce2),      jsonb_build_object('memberId', own, 'nonce', nonce_own),      jsonb_build_object('memberId', tre, 'nonce', nonce_tre)), 3600.00, 400.00);
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', stmt),
     'draw_member_commitment_missing', 'REVEAL 2 no opening');
 
@@ -2904,10 +2983,11 @@ begin
   -- nonces, and PUBLISHES them to the group in the same step.
   perform pg_temp.expect_ok(pg_temp.call_as(mb2, 'authenticated', format(
     'select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce2)), 'REVEAL 3 mb2 release');
+perform pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format('select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce_own)), 'REVEAL 3 own release');  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format('select public.submit_draw_nonce_v1(%L, %L)::text', draw, nonce_tre)), 'REVEAL 3 tre release');
   opened := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
     'select public.open_draw_reveal_v1(%L, %L)::text', draw, commit_seed)), 'REVEAL 3');
   if opened ->> 'replayed' <> 'false' or opened ->> 'seed' <> commit_seed
-     or jsonb_array_length(opened -> 'memberNonces') <> 2
+     or jsonb_array_length(opened -> 'memberNonces') <> 4
      or not (opened -> 'memberNonces') @> jsonb_build_array(jsonb_build_object('memberId', mb1, 'nonce', nonce1))
      or not (opened -> 'memberNonces') @> jsonb_build_array(jsonb_build_object('memberId', mb2, 'nonce', nonce2)) then
     raise exception 'REVEAL 3 FAILED: unexpected opening %', opened;
@@ -3010,7 +3090,7 @@ begin
     'select public.submit_draw_seal_v1(%L, %L)::text', (j -> 'draws' -> 1 ->> 'drawId')::uuid, repeat('d', 64))),
     'draw_forbidden', 'ISOLATION seal');
   perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     (j -> 'draws' -> 1 ->> 'drawId')::uuid, repeat('1', 64), commit_nonce, roster_digest, member_digest,
     participants, 'iso-commit', 'v3')), 'draw_forbidden', 'ISOLATION commit');
   perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
@@ -3081,7 +3161,7 @@ begin
     from public.sened_draw_eligible_members(group_a, cycle_id, 1) as e(member_id));
   digest := public.sened_draw_member_set_digest(draw, jsonb_build_array(jsonb_build_object('memberId', tre, 'sealed', seal)));
   perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, now(), %L)::text',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
     draw, repeat('2', 64), 'solo-commit-nonce-0123456789', repeat('3', 64), digest, participants, 'commit-solo', 'v3')),
     'draw_member_commitment_missing', 'SOLO committer holding the only seal');
   if exists (select 1 from public.draw_commitments where draw_id = draw) then
@@ -3134,14 +3214,14 @@ declare
   fn text;
 begin
   foreach fn in array array[
-    'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text)',
+    'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text, integer, integer)',
     'public.list_draw_cycles_v1(uuid)',
     'public.get_draw_cycle_v1(uuid)',
-    'public.open_draw_v1(uuid, integer, text, text)',
+    'public.open_draw_v1(uuid, integer, text, text, boolean)',
     'public.get_draw_session_v1(uuid)',
     'public.submit_draw_seal_v1(uuid, text)',
     'public.submit_draw_nonce_v1(uuid, text)',
-    'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text, text)',
+    'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, text, text)',
     'public.open_draw_reveal_v1(uuid, text)'
   ] loop
     if not has_function_privilege('authenticated', fn, 'EXECUTE') then
@@ -4192,12 +4272,12 @@ declare
 begin
   insert into public.draw_commitments (
     draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce,
-    roster_digest, participants, pot_amount, total_rounds, reserve_ratio_bps, actor_id, idempotency_key
+    roster_digest, participants, pot_amount, total_rounds, reserve_ratio_bps, actor_id, idempotency_key, protocol_version
   ) values (
     draw_uuid, p_group, p_tenant, p_cycle, p_round, repeat('a', 64), 'nonce-0123456789abcdef-XYZ',
     repeat('b', 64),
     jsonb_build_array(jsonb_build_object('memberId', p_winner, 'ticket', repeat('c', 64), 'contributionAmount', '100.00')),
-    500.00, 4, 1000, p_actor, 'fx-commit-' || draw_uuid::text
+    500.00, 4, 1000, p_actor, 'fx-commit-' || draw_uuid::text, 'v2'
   );
   insert into public.draw_reveals (
     draw_id, commitment, seed, transcript_digest, selection_digest, selected_index,
@@ -5863,8 +5943,8 @@ begin
   if has_function_privilege('anon', 'public.get_draw_cycle_contributions_v1(uuid)', 'EXECUTE')
      or has_function_privilege('anon', 'public.set_draw_cycle_contribution_gate_v1(uuid, text, text)', 'EXECUTE')
      or has_function_privilege('public', 'public.set_draw_cycle_contribution_gate_v1(uuid, text, text)', 'EXECUTE')
-     or has_function_privilege('anon', 'public.open_draw_v1(uuid, integer, text, text)', 'EXECUTE')
-     or has_function_privilege('anon', 'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.open_draw_v1(uuid, integer, text, text, boolean)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text, integer, integer)', 'EXECUTE')
      or has_function_privilege('authenticated', 'public.sened_draw_cycle_member_rounds(uuid, uuid)', 'EXECUTE')
      or has_function_privilege('authenticated', 'public.sened_draw_cycle_gate_flags(uuid, integer)', 'EXECUTE')
      or has_function_privilege('authenticated', 'public.sened_draw_cycle_gate(uuid)', 'EXECUTE') then
@@ -5872,8 +5952,8 @@ begin
   end if;
   if not has_function_privilege('authenticated', 'public.get_draw_cycle_contributions_v1(uuid)', 'EXECUTE')
      or not has_function_privilege('authenticated', 'public.set_draw_cycle_contribution_gate_v1(uuid, text, text)', 'EXECUTE')
-     or not has_function_privilege('authenticated', 'public.open_draw_v1(uuid, integer, text, text)', 'EXECUTE')
-     or not has_function_privilege('authenticated', 'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.open_draw_v1(uuid, integer, text, text, boolean)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.create_draw_cycle_v1(uuid, text, numeric, integer, integer, timestamptz, text, text, integer, integer)', 'EXECUTE')
      or not has_function_privilege('authenticated', 'public.get_draw_cycle_collateral_v1(uuid)', 'EXECUTE') then
     raise exception 'GATE 42 FAILED: authenticated cannot execute a grid or gate RPC';
   end if;
@@ -6170,7 +6250,8 @@ as $$
 declare
   u uuid;
 begin
-  foreach u in array p_users loop
+  -- Since the quorum rule every eligible member must seal, whoever the caller named.
+  for u in select e.member_id from public.sened_draw_session_eligible(p_draw) as e(member_id) loop
     perform pg_temp.call_as(u::text, format('select public.submit_draw_seal_v1(%L, %L)', p_draw,
       public.sened_draw_member_seal_hash(p_draw, u, 'cg-nonce-' || u::text || '-0123456789')));
   end loop;
@@ -6205,7 +6286,7 @@ begin
                   where e.member_id = se.member_id));
   digest := public.sened_draw_member_set_digest(p_draw, sealed_set);
   return format(
-    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, null, %L, %L)',
+    'select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L, %L)',
     p_draw, encode(sha256(convert_to('commitment-' || p_key, 'utf8')), 'hex'), 'commit-nonce-0123456789abcdef',
     repeat('b', 64), digest, participants, p_key, 'v3', p_override);
 end;
@@ -6491,14 +6572,14 @@ begin
   if (select count(*) from pg_proc where proname = 'commit_draw_from_seals_v1' and pronamespace = 'public'::regnamespace) <> 1 then
     raise exception 'COMMIT-GATE 22 FAILED: commit_draw_from_seals_v1 has more than one signature';
   end if;
-  if has_function_privilege('anon', 'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text, text)', 'EXECUTE')
-     or has_function_privilege('public', 'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text, text)', 'EXECUTE')
+  if has_function_privilege('anon', 'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, text, text)', 'EXECUTE')
+     or has_function_privilege('public', 'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, text, text)', 'EXECUTE')
      or has_function_privilege('authenticated', 'public.sened_draw_open_override_flags(uuid)', 'EXECUTE')
      or has_function_privilege('authenticated', 'public.sened_draw_flags_covered(jsonb, jsonb)', 'EXECUTE')
      or has_function_privilege('authenticated', 'public.sened_draw_cycle_member_rounds(uuid, uuid)', 'EXECUTE') then
     raise exception 'COMMIT-GATE 23 FAILED: a function is executable by a role that must not have it';
   end if;
-  if not has_function_privilege('authenticated', 'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text, text)', 'EXECUTE') then
+  if not has_function_privilege('authenticated', 'public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, text, text)', 'EXECUTE') then
     raise exception 'COMMIT-GATE 23 FAILED: authenticated cannot execute the commit';
   end if;
 end;
@@ -6927,3 +7008,568 @@ end;
 $chan$;
 rollback;
 select 'ALL PAYMENT CHANNEL AND NOTE CHECKS PASSED' as result;
+
+-- ===========================================================================
+-- DRAW-INTEGRITY (migration 20261014100000_draw_integrity.sql)
+--
+-- Each attack from the review, run against the real functions, must now FAIL; and the
+-- honest path must still work end to end:
+--   1  the winner is derived by the database (forged index / winner / digests refused)
+--   2  one live draw per round, no re-roll
+--   3  one reveal per round
+--   4  every eligible member must seal
+--   5  cancel is refused before the deadline, by a plain member, after the reveal is opened,
+--      and past the limit; a stalled opened reveal is finished by another manager
+--   6  the payout split is the cycle's ratio of the pot, rounded half up
+--   7  golden vectors shared with test/draw.sql-parity.test.ts
+-- ===========================================================================
+begin;
+
+insert into auth.users (id, email) values
+  ('b2b2b2b2-0000-4000-8000-000000000001', 'ix-owner@example.test'),
+  ('b2b2b2b2-0000-4000-8000-000000000002', 'ix-treasurer@example.test'),
+  ('b2b2b2b2-0000-4000-8000-000000000003', 'ix-member1@example.test'),
+  ('b2b2b2b2-0000-4000-8000-000000000004', 'ix-member2@example.test'),
+  ('b2b2b2b2-0000-4000-8000-000000000005', 'ix-outsider@example.test')
+on conflict (id) do nothing;
+
+create or replace function pg_temp.ix_nonce(p_u uuid) returns text
+  language sql immutable as $$ select 'ix-nonce-' || p_u::text || '-0123456789' $$;
+
+create or replace function pg_temp.ix_seal(p_draw uuid, p_users uuid[]) returns void
+language plpgsql as $$
+declare u uuid;
+begin
+  foreach u in array p_users loop
+    perform pg_temp.expect_ok(pg_temp.call_as(u, 'authenticated', format(
+      'select public.submit_draw_seal_v1(%L, %L)::text', p_draw,
+      public.sened_draw_member_seal_hash(p_draw, u, pg_temp.ix_nonce(u)))), 'ix seal');
+  end loop;
+end $$;
+
+create or replace function pg_temp.ix_release(p_draw uuid, p_users uuid[]) returns void
+language plpgsql as $$
+declare u uuid;
+begin
+  foreach u in array p_users loop
+    perform pg_temp.expect_ok(pg_temp.call_as(u, 'authenticated', format(
+      'select public.submit_draw_nonce_v1(%L, %L)::text', p_draw, pg_temp.ix_nonce(u))), 'ix release');
+  end loop;
+end $$;
+
+-- The commit statement for a draw: roster and sealed set read from the database, the
+-- commitment a real hash of the treasurer's seed.
+create or replace function pg_temp.ix_commit_stmt(p_draw uuid, p_key text) returns text
+language plpgsql as $$
+declare
+  sess public.draw_sessions;
+  cyc public.draw_cycles;
+  participants jsonb;
+  sealed jsonb;
+  digest text;
+  commitment text;
+begin
+  select * into sess from public.draw_sessions where draw_id = p_draw;
+  select * into cyc from public.draw_cycles where id = sess.cycle_id;
+  participants := (
+    select jsonb_agg(jsonb_build_object(
+      'memberId', e.member_id, 'displayName', 'M', 'contributionAmount', cyc.contribution_amount::text,
+      'ticket', public.sened_draw_ticket(sess.group_id, sess.cycle_id, e.member_id)) order by e.member_id::text)
+    from public.sened_draw_session_eligible(p_draw) as e(member_id));
+  sealed := coalesce((
+    select jsonb_agg(jsonb_build_object('memberId', se.member_id, 'sealed', se.sealed))
+    from public.draw_seals se
+    where se.draw_id = p_draw
+      and se.member_id in (select e.member_id from public.sened_draw_session_eligible(p_draw) as e(member_id))), '[]'::jsonb);
+  digest := public.sened_draw_member_set_digest(p_draw, sealed);
+  commitment := public.sened_draw_commit_hash_v3(
+    sess.group_id, sess.cycle_id, sess.round, p_draw, repeat('9', 64),
+    'ix-commit-nonce-0123456789', digest, 'ix-treasurer-seed-0123456789');
+  return format('select public.commit_draw_from_seals_v1(%L, %L, %L, %L, %L, %L::jsonb, %L, %L)::text',
+    p_draw, commitment, 'ix-commit-nonce-0123456789', repeat('9', 64), digest, participants, p_key, 'v3');
+end $$;
+
+-- The nonces every sealed member of a committed draw holds.
+create or replace function pg_temp.ix_nonces(p_draw uuid) returns jsonb
+language sql as $$
+  select jsonb_agg(jsonb_build_object('memberId', s.entry ->> 'memberId',
+                                      'nonce', pg_temp.ix_nonce((s.entry ->> 'memberId')::uuid)))
+  from public.draw_commitments c, jsonb_array_elements(c.member_commitments) as s(entry)
+  where c.draw_id = p_draw
+$$;
+
+-- Move a deadline into the past, as the database owner (no client role can).
+create or replace function pg_temp.ix_expire_seal(p_draw uuid) returns void language plpgsql as $$
+begin
+  alter table public.draw_sessions disable trigger draw_sessions_block_mutation;
+  update public.draw_sessions set seal_deadline = clock_timestamp() - interval '1 hour' where draw_id = p_draw;
+  alter table public.draw_sessions enable trigger draw_sessions_block_mutation;
+end $$;
+
+create or replace function pg_temp.ix_expire_nonce(p_draw uuid) returns void language plpgsql as $$
+begin
+  alter table public.draw_commitments disable trigger draw_commitments_block_mutation;
+  update public.draw_commitments set nonce_deadline = clock_timestamp() - interval '1 hour' where draw_id = p_draw;
+  alter table public.draw_commitments enable trigger draw_commitments_block_mutation;
+end $$;
+
+do $integrity$
+declare
+  own constant uuid := 'b2b2b2b2-0000-4000-8000-000000000001';
+  tre constant uuid := 'b2b2b2b2-0000-4000-8000-000000000002';
+  mb1 constant uuid := 'b2b2b2b2-0000-4000-8000-000000000003';
+  mb2 constant uuid := 'b2b2b2b2-0000-4000-8000-000000000004';
+  out constant uuid := 'b2b2b2b2-0000-4000-8000-000000000005';
+  ix_seed constant text := 'ix-treasurer-seed-0123456789';
+  everyone constant uuid[] := array[own, tre, mb1, mb2];
+  grp uuid;
+  tnt uuid;
+  cyc uuid;
+  cyc2 uuid;
+  cyc3 uuid;
+  d1 uuid; d2 uuid; d3 uuid; d4 uuid;
+  j jsonb;
+  com public.draw_commitments;
+  derived record;
+  nonces jsonb;
+  who jsonb;
+  other jsonb;
+  stmt text;
+  n integer;
+  lazy uuid;
+  second_lazy uuid;
+begin
+  -- Fixtures: a four-member group, a cycle of 3 rounds at 100.00 each (pot 400.00, reserve 10%).
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
+  perform set_config('request.jwt.claim.sub', own::text, false);
+  perform set_config('request.jwt.claims', '{"sub":"' || own::text || '"}', false);
+  set local role authenticated;
+  grp := (public.sened_ledger_provision_group_v1('Integrity equb') ->> 'groupId')::uuid;
+  reset role;
+  select tenant_id into tnt from public.ledger_groups where id = grp;
+  insert into public.ledger_group_memberships (group_id, tenant_id, user_id, role, status) values
+    (grp, tnt, tre, 'treasurer', 'active'), (grp, tnt, mb1, 'member', 'active'), (grp, tnt, mb2, 'member', 'active');
+
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 3, 1000, null, %L, %L, 6, 12)::text',
+    grp, 'Integrity cycle', '100.00', 'ix-cycle-1', 'off')), 'INT setup cycle');
+  cyc := (j -> 'cycle' ->> 'cycleId')::uuid;
+  if (j -> 'cycle' ->> 'sealWindowHours')::int <> 6 or (j -> 'cycle' ->> 'nonceWindowHours')::int <> 12 then
+    raise exception 'INT setup FAILED: the cycle did not keep its windows %', j;
+  end if;
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 3, 1000, null, %L, %L, 0, 12)::text',
+    grp, 'bad window', '100.00', 'ix-cycle-bad', 'off')), 'draw_invalid_request', 'INT windows out of range');
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 3, 1000, null, %L, %L, 6, 721)::text',
+    grp, 'bad window', '100.00', 'ix-cycle-bad2', 'off')), 'draw_invalid_request', 'INT windows out of range 2');
+
+  -- =====================================================================
+  -- DRAW-INTEGRITY 1-3: a committed draw, and the attacks on its reveal
+  -- =====================================================================
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cyc, 'ix-open-1')), 'INT open');
+  d1 := (j -> 'session' ->> 'drawId')::uuid;
+  if (select seal_deadline - opened_at from public.draw_sessions where draw_id = d1) <> interval '6 hours' then
+    raise exception 'DRAW-INTEGRITY 4 FAILED: the seal deadline is not opened_at + the cycle window';
+  end if;
+  perform pg_temp.ix_seal(d1, everyone);
+  stmt := pg_temp.ix_commit_stmt(d1, 'ix-commit-1');
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', stmt), 'INT commit');
+  select * into com from public.draw_commitments where draw_id = d1;
+  if com.nonce_deadline - com.committed_at <> interval '12 hours' then
+    raise exception 'DRAW-INTEGRITY 4 FAILED: the nonce deadline is not committed_at + the cycle window';
+  end if;
+
+  -- DRAW-INTEGRITY 2: re-opening a round that has a committed draw is refused.
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cyc, 'ix-open-reroll')), 'draw_round_has_live_draw',
+    'DRAW-INTEGRITY 2 re-open by the treasurer');
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.open_draw_v1(%L, 1, %L)::text', cyc, 'ix-open-reroll-2')), 'draw_round_has_live_draw',
+    'DRAW-INTEGRITY 2 re-open by the owner');
+  -- ... and a second commitment for the round is refused AT THE TABLE, whatever path it takes.
+  insert into public.draw_sessions (draw_id, group_id, tenant_id, cycle_id, round, opened_by, idempotency_key, seal_deadline)
+  values ('b2b2b2b2-0000-4000-8000-0000000000f1', grp, tnt, cyc, 1, tre, 'ix-forged-session', now() + interval '1 day');
+  begin
+    insert into public.draw_commitments (
+      draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce, member_digest,
+      member_commitments, roster_digest, participants, pot_amount, total_rounds, reserve_ratio_bps,
+      actor_id, idempotency_key
+    ) values (
+      'b2b2b2b2-0000-4000-8000-0000000000f1', grp, tnt, cyc, 1, repeat('a', 64), 'nonce-0123456789abcdef-XYZ',
+      repeat('e', 64), com.member_commitments, repeat('b', 64), com.participants, 400.00, 3, 1000, tre, 'ix-forged-commit');
+    raise exception 'DRAW-INTEGRITY 2 FAILED: a second live commitment for the round was ACCEPTED at the table';
+  exception when others then
+    if sqlerrm not like '%draw_round_has_live_draw%' then
+      raise exception 'DRAW-INTEGRITY 2 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+
+  -- The reveal: release the nonces, then the treasurer opens it.
+  perform pg_temp.ix_release(d1, everyone);
+  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_reveal_v1(%L, %L)::text', d1, ix_seed)), 'INT open reveal');
+  nonces := pg_temp.ix_nonces(d1);
+  select * into derived from public.sened_draw_derive_v3(com, ix_seed, nonces);
+  n := jsonb_array_length(com.participants);
+  who := public.sened_draw_ordered_participant(com.participants, derived.selected_index);
+  other := public.sened_draw_ordered_participant(com.participants, (derived.selected_index + 1) % n);
+
+  -- DRAW-INTEGRITY 1: a forged winner, index, ticket, transcript or selection digest is refused.
+  -- (a) another index, with the member and ticket that really stand at it
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.reveal_draw_v1(%L, %L, %L, %L, %L::jsonb, %L, %L, %s, %L, %L, 360.00, 40.00, now())::text',
+    d1, ix_seed, com.commitment, com.member_digest, nonces, derived.transcript_digest, derived.selection_digest,
+    (derived.selected_index + 1) % n, other ->> 'memberId', other ->> 'ticket')),
+    'draw_selection_mismatch', 'DRAW-INTEGRITY 1 forged index');
+  -- (b) the derived index, a different member named
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.reveal_draw_v1(%L, %L, %L, %L, %L::jsonb, %L, %L, %s, %L, %L, 360.00, 40.00, now())::text',
+    d1, ix_seed, com.commitment, com.member_digest, nonces, derived.transcript_digest, derived.selection_digest,
+    derived.selected_index, other ->> 'memberId', who ->> 'ticket')),
+    'draw_winner_binding_mismatch', 'DRAW-INTEGRITY 1 forged winner');
+  -- (c) a forged transcript digest, (d) a forged selection digest
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.reveal_draw_v1(%L, %L, %L, %L, %L::jsonb, %L, %L, %s, %L, %L, 360.00, 40.00, now())::text',
+    d1, ix_seed, com.commitment, com.member_digest, nonces, repeat('7', 64), derived.selection_digest,
+    derived.selected_index, who ->> 'memberId', who ->> 'ticket')),
+    'draw_transcript_mismatch', 'DRAW-INTEGRITY 1 forged transcript');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.reveal_draw_v1(%L, %L, %L, %L, %L::jsonb, %L, %L, %s, %L, %L, 360.00, 40.00, now())::text',
+    d1, ix_seed, com.commitment, com.member_digest, nonces, derived.transcript_digest, repeat('8', 64),
+    derived.selected_index, who ->> 'memberId', who ->> 'ticket')),
+    'draw_selection_mismatch', 'DRAW-INTEGRITY 1 forged selection digest');
+  -- (e) the same forgery straight into the table, bypassing the function
+  begin
+    insert into public.draw_reveals (
+      draw_id, commitment, seed, member_digest, member_nonces, transcript_digest, selection_digest,
+      selected_index, winner_member_id, winning_ticket, payout_amount, reserve_amount, actor_id
+    ) values (
+      d1, com.commitment, ix_seed, com.member_digest, nonces, derived.transcript_digest, derived.selection_digest,
+      (derived.selected_index + 1) % n, (other ->> 'memberId')::uuid, other ->> 'ticket', 360.00, 40.00, tre);
+    raise exception 'DRAW-INTEGRITY 1 FAILED: a forged direct insert was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_selection_mismatch%' then
+      raise exception 'DRAW-INTEGRITY 1 FAILED: direct insert refused for the wrong reason: %', sqlerrm;
+    end if;
+  end;
+  -- (f) a different seed, and an altered nonce set, cannot move the winner either
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.reveal_draw_v1(%L, %L, %L, %L, %L::jsonb, %L, %L, %s, %L, %L, 360.00, 40.00, now())::text',
+    d1, 'another-seed-0123456789-qqqq', com.commitment, com.member_digest, nonces, derived.transcript_digest,
+    derived.selection_digest, derived.selected_index, who ->> 'memberId', who ->> 'ticket')),
+    'draw_commitment_mismatch', 'DRAW-INTEGRITY 1 different seed');
+
+  -- DRAW-INTEGRITY 6: a wrong reserve split is refused (the cycle's ratio is 10% of 400.00).
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', pg_temp.derived_reveal_stmt(d1, ix_seed, nonces, 400.00, 0.00)),
+    'draw_payout_split_mismatch', 'DRAW-INTEGRITY 6 no reserve');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', pg_temp.derived_reveal_stmt(d1, ix_seed, nonces, 359.00, 41.00)),
+    'draw_payout_split_mismatch', 'DRAW-INTEGRITY 6 too much reserve');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', pg_temp.derived_reveal_stmt(d1, ix_seed, nonces, 361.00, 40.00)),
+    'draw_payout_split_mismatch', 'DRAW-INTEGRITY 6 does not add up');
+  if exists (select 1 from public.draw_reveals where draw_id = d1) then
+    raise exception 'DRAW-INTEGRITY 1/6 FAILED: a refused reveal left a row behind';
+  end if;
+
+  -- DRAW-INTEGRITY 5 (part): an owner/treasurer cannot cancel a draw whose reveal is OPENED,
+  -- even after the nonce deadline: it must be finished.
+  perform pg_temp.ix_expire_nonce(d1);
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d1, 'I do not like how this is going to turn out')),
+    'draw_reveal_opened', 'DRAW-INTEGRITY 5 cancel after the reveal is opened');
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d1, 'I do not like how this is going to turn out')),
+    'draw_reveal_opened', 'DRAW-INTEGRITY 5 cancel after the reveal is opened (owner)');
+  -- The seed was published by the opening, so a manager OTHER than the opener finishes the draw.
+  if (select o.seed from public.draw_reveal_openings o where o.draw_id = d1) <> ix_seed
+     or (pg_temp.call_as(mb1, 'authenticated', format('select public.get_draw_session_v1(%L)::text', d1))::jsonb
+         -> 'revealOpening' ->> 'seed') is distinct from ix_seed then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: members cannot see the published seed';
+  end if;
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', pg_temp.derived_reveal_stmt(d1, ix_seed, nonces, 360.00, 40.00)),
+    'DRAW-INTEGRITY 7 honest reveal by another manager');
+  if j ->> 'state' <> 'revealed' or j -> 'reveal' ->> 'winnerMemberId' <> who ->> 'memberId'
+     or j -> 'reveal' ->> 'payoutAmount' <> '360.00' or j -> 'reveal' ->> 'reserveAmount' <> '40.00' then
+    raise exception 'DRAW-INTEGRITY 7 FAILED: unexpected reveal %', j;
+  end if;
+
+  -- DRAW-INTEGRITY 3: a second reveal for the same round is refused.
+  perform pg_temp.expect_err(pg_temp.call_as(own, 'authenticated', pg_temp.derived_reveal_stmt(d1, ix_seed, nonces, 360.00, 40.00)),
+    'draw_already_revealed', 'DRAW-INTEGRITY 3 second reveal of the same draw');
+  -- Another draw in the same round (forced in past the commit guard) cannot reveal either ...
+  alter table public.draw_commitments disable trigger draw_commitments_one_live;
+  insert into public.draw_commitments (
+    draw_id, group_id, tenant_id, cycle_id, round, commitment, commitment_nonce, member_digest,
+    member_commitments, roster_digest, participants, pot_amount, total_rounds, reserve_ratio_bps,
+    actor_id, idempotency_key, nonce_deadline
+  ) values (
+    'b2b2b2b2-0000-4000-8000-0000000000f1', grp, tnt, cyc, 1,
+    public.sened_draw_commit_hash_v3(grp, cyc, 1, 'b2b2b2b2-0000-4000-8000-0000000000f1', repeat('b', 64),
+      'nonce-0123456789abcdef-XYZ', public.sened_draw_member_set_digest('b2b2b2b2-0000-4000-8000-0000000000f1', com.member_commitments), ix_seed),
+    'nonce-0123456789abcdef-XYZ', public.sened_draw_member_set_digest('b2b2b2b2-0000-4000-8000-0000000000f1', com.member_commitments),
+    com.member_commitments, repeat('b', 64), com.participants, 400.00, 3, 1000, tre, 'ix-forged-commit-2', now() + interval '1 day');
+  alter table public.draw_commitments enable trigger draw_commitments_one_live;
+  begin
+    insert into public.draw_reveals (
+      draw_id, commitment, seed, member_digest, member_nonces, transcript_digest, selection_digest,
+      selected_index, winner_member_id, winning_ticket, payout_amount, reserve_amount, actor_id
+    ) values (
+      'b2b2b2b2-0000-4000-8000-0000000000f1',
+      (select commitment from public.draw_commitments where draw_id = 'b2b2b2b2-0000-4000-8000-0000000000f1'),
+      ix_seed, com.member_digest, nonces, repeat('1', 64), repeat('2', 64), 0, (who ->> 'memberId')::uuid, who ->> 'ticket', 360.00, 40.00, tre);
+    raise exception 'DRAW-INTEGRITY 3 FAILED: a second reveal for the round was ACCEPTED';
+  exception when others then
+    if sqlerrm not like '%draw_round_already_revealed%' then
+      raise exception 'DRAW-INTEGRITY 3 FAILED: wrong rejection reason: %', sqlerrm;
+    end if;
+  end;
+  -- ... and the unique index is the last line even with the trigger out of the way.
+  alter table public.draw_reveals disable trigger draw_reveals_validate_insert;
+  begin
+    insert into public.draw_reveals (
+      draw_id, commitment, seed, member_digest, member_nonces, transcript_digest, selection_digest,
+      selected_index, winner_member_id, winning_ticket, payout_amount, reserve_amount, actor_id, cycle_id, round
+    ) values (
+      'b2b2b2b2-0000-4000-8000-0000000000f1',
+      (select commitment from public.draw_commitments where draw_id = 'b2b2b2b2-0000-4000-8000-0000000000f1'),
+      ix_seed, com.member_digest, nonces, repeat('1', 64), repeat('2', 64), 0, (who ->> 'memberId')::uuid, who ->> 'ticket', 360.00, 40.00, tre, cyc, 1);
+    raise exception 'DRAW-INTEGRITY 3 FAILED: the unique index let a second reveal in';
+  exception when unique_violation then
+    null;
+  end;
+  alter table public.draw_reveals enable trigger draw_reveals_validate_insert;
+  if (select count(*) from public.draw_reveals where cycle_id = cyc and round = 1) <> 1 then
+    raise exception 'DRAW-INTEGRITY 3 FAILED: round 1 has more than one reveal';
+  end if;
+
+  -- =====================================================================
+  -- DRAW-INTEGRITY 4: quorum, then the cancel path (round 2 of the same cycle)
+  -- =====================================================================
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cyc, 'ix-open-2')), 'INT open round 2');
+  d2 := (j -> 'session' ->> 'drawId')::uuid;
+  if (j -> 'session' ->> 'round')::int <> 2 or jsonb_array_length(j -> 'session' -> 'eligible') <> 3 then
+    raise exception 'DRAW-INTEGRITY 4 FAILED: round 2 should have 3 eligible members, %', j -> 'session' -> 'eligible';
+  end if;
+  -- the round-1 winner is not eligible; everyone else is
+  lazy := (select m from unnest(array[mb2, mb1, tre, own]) m where m <> (who ->> 'memberId')::uuid limit 1);
+  perform pg_temp.ix_seal(d2, (select array_agg(m) from unnest(everyone) m where m <> (who ->> 'memberId')::uuid and m <> lazy));
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', pg_temp.ix_commit_stmt(d2, 'ix-commit-2')),
+    'draw_member_commitment_missing', 'DRAW-INTEGRITY 4 commit with a missing seal');
+
+  -- cancel: before the deadline, by a plain member, with a thin reason: all refused
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d2, 'Waiting for the last member to answer')),
+    'draw_cancel_too_early', 'DRAW-INTEGRITY 5 cancel before the seal deadline');
+  perform pg_temp.ix_expire_seal(d2);
+  perform pg_temp.expect_err(pg_temp.call_as(mb1, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d2, 'Waiting for the last member to answer')),
+    'draw_forbidden', 'DRAW-INTEGRITY 5 cancel by a plain member');
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d2, 'Waiting for the last member to answer')),
+    'draw_forbidden', 'DRAW-INTEGRITY 5 cancel by an outsider');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d2, 'short')), 'draw_cancel_reason_invalid', 'DRAW-INTEGRITY 5 thin reason');
+  -- the treasurer cannot move the deadline, nor write a cancellation by hand
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'update public.draw_sessions set seal_deadline = now() - interval ''5 days'' where draw_id = %L', d2)),
+    'permission denied', 'DRAW-INTEGRITY 5 shorten the deadline');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'insert into public.draw_cancellations (draw_id, group_id, tenant_id, cycle_id, round, stage, reason, missed_members, deadline_at, cancelled_by) values (%L, %L, %L, %L, 2, ''sealing'', ''a hand written reason'', ''["x"]'', now(), %L)',
+    d2, grp, tnt, cyc, tre)), 'permission denied', 'DRAW-INTEGRITY 5 hand-written cancellation');
+
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d2, 'Member two did not answer within the window')), 'DRAW-INTEGRITY 5 cancel after the deadline');
+  if j -> 'cancellation' ->> 'stage' <> 'sealing' or j ->> 'replayed' <> 'false'
+     or (j -> 'cancellation' -> 'missedMembers') <> jsonb_build_array(lazy::text)
+     or (j -> 'cancellation' ->> 'cancelledBy')::uuid <> tre
+     or j -> 'cancellation' ->> 'ownerDecision' <> 'false' then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: unexpected cancellation %', j;
+  end if;
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d2, 'Member two did not answer within the window')), 'DRAW-INTEGRITY 5 cancel replay');
+  if j ->> 'replayed' <> 'true' then raise exception 'DRAW-INTEGRITY 5 FAILED: a repeat cancel was not a replay'; end if;
+  -- append-only, and visible to every member but not to an outsider
+  begin
+    delete from public.draw_cancellations where draw_id = d2;
+    raise exception 'DRAW-INTEGRITY 5 FAILED: a cancellation was deleted';
+  exception when others then
+    if sqlerrm not like '%draw_history_immutable%' then raise; end if;
+  end;
+  j := pg_temp.expect_ok(pg_temp.call_as(mb1, 'authenticated', format('select public.list_draw_cancellations_v1(%L)::text', cyc)), 'INT list cancellations');
+  if jsonb_array_length(j) <> 1 or j -> 0 ->> 'reason' <> 'Member two did not answer within the window' then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: members cannot read the cancellation %', j;
+  end if;
+  perform pg_temp.expect_err(pg_temp.call_as(out, 'authenticated', format('select public.list_draw_cancellations_v1(%L)::text', cyc)),
+    'draw_forbidden', 'DRAW-INTEGRITY 5 outsider reads cancellations');
+  if public.sened_draw_state(d2) <> 'cancelled' then raise exception 'DRAW-INTEGRITY 5 FAILED: the draw is not cancelled'; end if;
+  -- a cancelled draw takes no seal, no commit
+  perform pg_temp.expect_err(pg_temp.call_as(lazy, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', d2, repeat('a', 64))), 'draw_cancelled', 'DRAW-INTEGRITY 5 seal after cancel');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', pg_temp.ix_commit_stmt(d2, 'ix-commit-2b')),
+    'draw_cancelled', 'DRAW-INTEGRITY 5 commit after cancel');
+
+  -- Excluding non-responders: only the recorded ones, and only on a round that has a cancellation.
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L, null, true)::text', cyc, 'ix-open-2b')), 'INT reopen excluding');
+  d3 := (j -> 'session' ->> 'drawId')::uuid;
+  if d3 = d2 or (j -> 'session' -> 'excluded') <> jsonb_build_array(lazy::text)
+     or jsonb_array_length(j -> 'session' -> 'eligible') <> 2 or (j -> 'session' -> 'eligible') @> to_jsonb(lazy::text)
+     or (j -> 'session' ->> 'cancelsThisRound')::int <> 1 then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: unexpected re-opened session %', j -> 'session';
+  end if;
+  perform pg_temp.expect_err(pg_temp.call_as(lazy, 'authenticated', format(
+    'select public.submit_draw_seal_v1(%L, %L)::text', d3, repeat('a', 64))), 'draw_not_eligible', 'DRAW-INTEGRITY 5 excluded member cannot seal');
+  -- second cancel (treasurer): only one of the two eligible members seals
+  second_lazy := (select m from unnest(array[mb1, tre, own, mb2]) m where m <> (who ->> 'memberId')::uuid and m <> lazy limit 1);
+  perform pg_temp.ix_seal(d3, array[(select m from unnest(everyone) m where m <> (who ->> 'memberId')::uuid and m <> lazy and m <> second_lazy)]);
+  perform pg_temp.ix_expire_seal(d3);
+  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d3, 'The other member did not answer either')), 'INT second cancel');
+
+  -- THE LIMIT: two cancels in this round. A treasurer can neither open a third session nor cancel a third.
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L, null, true)::text', cyc, 'ix-open-2c')), 'draw_cancel_limit_reached',
+    'DRAW-INTEGRITY 5 treasurer opens past the limit');
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L, null, true)::text', cyc, 'ix-open-2c')), 'INT owner opens past the limit');
+  d4 := (j -> 'session' ->> 'drawId')::uuid;
+  if (j -> 'session' ->> 'cancelsThisRound')::int <> 2 then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: the cancel count is wrong %', j -> 'session';
+  end if;
+  perform pg_temp.ix_expire_seal(d4);
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d4, 'Nobody answered this time either')),
+    'draw_cancel_limit_reached', 'DRAW-INTEGRITY 5 treasurer cancels past the limit');
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d4, 'Nobody answered this time either')), 'INT owner cancels past the limit');
+  if j -> 'cancellation' ->> 'ownerDecision' <> 'true' then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: a cancel past the limit is not marked as an owner decision %', j;
+  end if;
+  -- the cancel never raises the number of draws that can be revealed in a round
+  if (select count(*) from public.draw_reveals where cycle_id = cyc and round = 2) <> 0 then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: a reveal exists for the cancelled round';
+  end if;
+
+  -- =====================================================================
+  -- DRAW-INTEGRITY 5: the cancel path AFTER the commit (a second cycle)
+  -- =====================================================================
+  j := pg_temp.expect_ok(pg_temp.call_as(own, 'authenticated', format(
+    'select public.create_draw_cycle_v1(%L, %L, %L, 2, 1000, null, %L)::text', grp, 'Second integrity cycle', '100.00', 'ix-cycle-2')), 'INT cycle 2');
+  cyc2 := (j -> 'cycle' ->> 'cycleId')::uuid;
+  if (j -> 'cycle' ->> 'sealWindowHours')::int <> 48 or (j -> 'cycle' ->> 'nonceWindowHours')::int <> 48 then
+    raise exception 'DRAW-INTEGRITY 4 FAILED: the default windows are not 48 hours %', j;
+  end if;
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format('select public.open_draw_v1(%L, null, %L)::text', cyc2, 'ix2-open-1')), 'INT open c2');
+  d1 := (j -> 'session' ->> 'drawId')::uuid;
+  perform pg_temp.ix_seal(d1, everyone);
+  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', pg_temp.ix_commit_stmt(d1, 'ix2-commit-1')), 'INT commit c2');
+  perform pg_temp.ix_release(d1, array[own, tre, mb1]);
+  -- a treasurer cannot cancel a committed draw early, whatever they think of it
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d1, 'I would rather have a different winner')),
+    'draw_cancel_too_early', 'DRAW-INTEGRITY 5 cancel a committed draw before the nonce deadline');
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.open_draw_v1(%L, null, %L)::text', cyc2, 'ix2-open-reroll')), 'draw_round_has_live_draw',
+    'DRAW-INTEGRITY 2 re-open while members still owe a nonce');
+  perform pg_temp.ix_expire_nonce(d1);
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d1, 'Member two never released the nonce')), 'DRAW-INTEGRITY 5 cancel after the nonce deadline');
+  if j -> 'cancellation' ->> 'stage' <> 'committed' or (j -> 'cancellation' -> 'missedMembers') <> jsonb_build_array(mb2::text) then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: unexpected committed-stage cancellation %', j;
+  end if;
+  -- the round is open again, but the abandoned commitment stays on the record
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format('select public.open_draw_v1(%L, null, %L, null, true)::text', cyc2, 'ix2-open-2')), 'INT reopen c2');
+  d2 := (j -> 'session' ->> 'drawId')::uuid;
+  perform pg_temp.ix_seal(d2, array[own, tre, mb1]);
+  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', pg_temp.ix_commit_stmt(d2, 'ix2-commit-2')), 'INT commit again');
+  if (select count(*) from public.draw_commitments where cycle_id = cyc2 and round = 1) <> 2 then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: the abandoned commitment is not on the record';
+  end if;
+  if public.count_draw_commitments_v1(d2) <> 1 then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: the abandoned commitment is not counted for the verifier';
+  end if;
+  -- nothing missing, nothing to cancel: a result cannot be a reason
+  perform pg_temp.ix_release(d2, array[own, tre, mb1]);
+  perform pg_temp.ix_expire_nonce(d2);
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', format(
+    'select public.cancel_draw_v1(%L, %L)::text', d2, 'I do not like the draw that is about to come out')),
+    'draw_cancel_nothing_missed', 'DRAW-INTEGRITY 5 cancel with every nonce in');
+  -- the happy path, end to end, on the re-opened draw
+  perform pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', format('select public.open_draw_reveal_v1(%L, %L)::text', d2, ix_seed)), 'INT open reveal c2');
+  nonces := pg_temp.ix_nonces(d2);
+  perform pg_temp.expect_err(pg_temp.call_as(tre, 'authenticated', pg_temp.derived_reveal_stmt(d2, ix_seed, nonces, 300.00, 33.33)),
+    'draw_payout_split_mismatch', 'DRAW-INTEGRITY 6 wrong split on the re-opened draw');
+  j := pg_temp.expect_ok(pg_temp.call_as(tre, 'authenticated', pg_temp.derived_reveal_stmt(d2, ix_seed, nonces, 360.00, 40.00)), 'INT honest reveal');
+  if j ->> 'state' <> 'revealed' or public.sened_draw_state(d2) <> 'revealed' then
+    raise exception 'DRAW-INTEGRITY 7 FAILED: the honest reveal did not complete %', j;
+  end if;
+  -- the abandoned commitment (cancelled) is shown as cancelled in the cycle listing
+  j := pg_temp.expect_ok(pg_temp.call_as(mb1, 'authenticated', format('select public.get_draw_cycle_v1(%L)::text', cyc2)), 'INT cycle listing');
+  if not exists (select 1 from jsonb_array_elements(j -> 'draws') x where x ->> 'state' = 'cancelled')
+     or not exists (select 1 from jsonb_array_elements(j -> 'draws') x where x ->> 'state' = 'revealed') then
+    raise exception 'DRAW-INTEGRITY 5 FAILED: the cycle listing does not show the cancelled and the revealed draw %', j;
+  end if;
+
+  -- =====================================================================
+  -- Golden vectors: the SAME literals are asserted in test/draw.sql-parity.test.ts
+  -- against the TypeScript engine.
+  -- =====================================================================
+  if public.sened_draw_nonce_set_digest('dddddddd-0000-4000-8000-0000000000d1', jsonb_build_array(
+       jsonb_build_object('memberId', '44444444-4444-4444-8444-444444444444', 'nonce', 'nonce-one-0123456789-abcdef'),
+       jsonb_build_object('memberId', '22222222-2222-4222-8222-222222222222', 'nonce', 'nonce-two-0123456789-abcdef')))
+     <> 'c92f4106697684fc08046f4287e3540375c212eb540c42169ccc29d300833103' then
+    raise exception 'PARITY 5 FAILED: the nonce set digest differs from the TypeScript engine';
+  end if;
+  if public.sened_draw_transcript_hash_v3(
+       'dddddddd-0000-4000-8000-0000000000d1', 'ce2934b0af978095526e317c3d13b37072517f55c1e827324ac4efb7c6a9f7bb',
+       repeat('ab', 32), '339c57dc558400ed5953ada9573a443af7a518f00bf770c49f4b8edc7091cf69',
+       'c92f4106697684fc08046f4287e3540375c212eb540c42169ccc29d300833103', 'seed-value-0123456789-xyz')
+     <> '5f5d648074655f62841bfb4681f6262071df3337dcc49dc110344d0b9a2108c1' then
+    raise exception 'PARITY 6 FAILED: the transcript digest differs from the TypeScript engine';
+  end if;
+  if public.sened_draw_selection_hash('5f5d648074655f62841bfb4681f6262071df3337dcc49dc110344d0b9a2108c1', 0)
+     <> '1ee94a7542ec48ff966542df6c5483b8bc302fdd7acc3468634adc801a08a56a'
+     or (select selected_index from public.sened_draw_select_index('5f5d648074655f62841bfb4681f6262071df3337dcc49dc110344d0b9a2108c1', 200)) <> 82
+     or (select selected_index from public.sened_draw_select_index('5f5d648074655f62841bfb4681f6262071df3337dcc49dc110344d0b9a2108c1', 3)) <> 0 then
+    raise exception 'PARITY 7 FAILED: the selection differs from the TypeScript engine';
+  end if;
+  -- rejection sampling: 2^256 - 1 is above the largest multiple of 3 that fits, so it is rejected.
+  if (select accepted from public.sened_draw_accept_digest(repeat('f', 64), 3))
+     or not (select accepted from public.sened_draw_accept_digest(lpad('2', 64, '0'), 3))
+     or (select selected_index from public.sened_draw_accept_digest(lpad('2', 64, '0'), 3)) <> 2
+     or (select selected_index from public.sened_draw_accept_digest(repeat('f', 64), 4)) <> 3 then
+    raise exception 'PARITY 8 FAILED: rejection sampling differs from the TypeScript engine';
+  end if;
+  -- the reserve rule: round half up to the cent
+  if public.sened_draw_reserve_amount(3000.00, 1000) <> 300.00
+     or public.sened_draw_reserve_amount(0.05, 5000) <> 0.03
+     or public.sened_draw_reserve_amount(0.10, 2500) <> 0.03
+     or public.sened_draw_reserve_amount(1.01, 5000) <> 0.51
+     or public.sened_draw_reserve_amount(1.00, 3333) <> 0.33
+     or public.sened_draw_reserve_amount(100.05, 333) <> 3.33
+     or public.sened_draw_reserve_amount(12000.00, 3333) <> 3999.60
+     or public.sened_draw_reserve_amount(5000.00, 0) <> 0.00 then
+    raise exception 'PARITY 9 FAILED: the reserve rounding differs from the TypeScript engine';
+  end if;
+
+  -- Grants: the new functions are callable by signed-in users only; the helpers by nobody.
+  if not has_function_privilege('authenticated', 'public.cancel_draw_v1(uuid, text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.cancel_draw_v1(uuid, text)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.list_draw_cancellations_v1(uuid)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.list_draw_cancellations_v1(uuid)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_draw_select_index(text, integer)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sened_draw_derive_v3(public.draw_commitments, text, jsonb)', 'EXECUTE')
+     or has_table_privilege('authenticated', 'public.draw_cancellations', 'INSERT')
+     or has_table_privilege('authenticated', 'public.draw_cancellations', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.draw_sessions', 'UPDATE') then
+    raise exception 'DRAW-INTEGRITY 8 FAILED: a privilege is wrong';
+  end if;
+  if to_regprocedure('public.commit_draw_from_seals_v1(uuid, text, text, text, text, jsonb, text, timestamptz, text, text)') is not null then
+    raise exception 'DRAW-INTEGRITY 10 FAILED: the commit still takes a client-supplied time';
+  end if;
+end;
+$integrity$;
+rollback;
+select 'ALL DRAW INTEGRITY CHECKS PASSED' as result;

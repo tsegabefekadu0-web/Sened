@@ -18,11 +18,12 @@ import { webDrawHasher, type DrawVerificationTranscript } from "./canonical";
 import { sealMemberContribution, verifyTranscript } from "./engine";
 import { parseCycleCollateral, parseGuarantee, type CycleCollateral, type Guarantee } from "./collateral";
 import { parseCycleContributions, type CycleContributions } from "./contributions";
-import { assessDrawRisk, planReserve } from "./risk";
+import { assessDrawRisk, planDrawReserve, planReserve } from "./risk";
 import {
   isDrawContributionGate,
   isDrawLifecycleState,
   isDrawProtocolVersion,
+  type DrawCancellation,
   type DrawContributionGate,
   type DrawCycleRecord,
   type DrawCommitGate,
@@ -112,7 +113,11 @@ export interface DrawFailure {
   readonly ok: false;
   readonly status: number;
   readonly code: string;
-  /** The server's own message, shown as detail next to the translated one. */
+  /**
+   * The server's own message. It is English, so the screen NEVER renders it: the code is said in the
+   * member's language through {@link drawErrorKey}. Kept for logs and tests only. For a storage,
+   * integrity or unavailable failure the server sends the code alone, so this is null.
+   */
   readonly message: string | null;
   /** Only for `contribution_gate_blocked`: who is flagged for which round. */
   readonly flagged?: readonly DrawGateFlag[];
@@ -138,6 +143,12 @@ const ERROR_KEYS: Readonly<Record<string, MessageKey>> = {
   repeat_winner: "drawLive.error.repeatWinner",
   contribution_gate_blocked: "drawLive.error.gateBlocked",
   not_eligible: "drawLive.error.notEligible",
+  round_has_live_draw: "drawLive.error.roundHasLiveDraw",
+  draw_cancelled: "drawLive.error.drawCancelled",
+  cancel_too_early: "drawLive.error.cancelTooEarly",
+  cancel_reveal_opened: "drawLive.error.cancelRevealOpened",
+  cancel_nothing_missed: "drawLive.error.cancelNothingMissed",
+  cancel_limit_reached: "drawLive.error.cancelLimitReached",
   nonce_too_early: "drawLive.error.nonceTooEarly",
   cycle_complete: "drawLive.error.cycleComplete",
   round_out_of_order: "drawLive.error.roundOutOfOrder",
@@ -354,7 +365,8 @@ function readCommitGate(value: unknown): DrawCommitGate | null {
 export async function revealDraw(
   input: {
     readonly drawId: string;
-    readonly seed: string;
+    /** Omit when the reveal was already opened: the seed is public then, and any manager can finish the draw. */
+    readonly seed?: string;
     readonly idempotencyKey: string;
   },
   deps: AuthedFetchDeps = {}
@@ -407,7 +419,21 @@ function withGate(cycle: DrawCycleRecord): DrawCycleRecord {
 }
 
 function withSessionGate(session: DrawSessionView): DrawSessionView {
-  return { ...session, cycle: withGate(session.cycle) };
+  // A server from before the integrity migration sends none of the deadline / cancel fields.
+  const partial = session as Partial<DrawSessionView> & DrawSessionView;
+  return {
+    ...session,
+    cycle: withGate(session.cycle),
+    sealDeadline: typeof partial.sealDeadline === "string" ? partial.sealDeadline : session.openedAt,
+    nonceDeadline: typeof partial.nonceDeadline === "string" ? partial.nonceDeadline : null,
+    excluded: Array.isArray(partial.excluded) ? partial.excluded : [],
+    cancelsThisRound: typeof partial.cancelsThisRound === "number" ? partial.cancelsThisRound : 0,
+    cancellation: isCancellation(partial.cancellation) ? partial.cancellation : null,
+    revealOpening:
+      typeof partial.revealOpening === "object" && partial.revealOpening !== null && isString(partial.revealOpening.seed)
+        ? partial.revealOpening
+        : null
+  };
 }
 
 function isListEntry(value: unknown): value is DrawListEntry {
@@ -461,6 +487,10 @@ export interface CreateCycleInput {
   readonly idempotencyKey: string;
   /** Chosen once, here: `off` when absent. Changed later with `setContributionGate`. */
   readonly contributionGate?: DrawContributionGate;
+  /** Hours after a draw opens before it may be cancelled for missing seals (1..720, default 48). */
+  readonly sealWindowHours?: number;
+  /** Hours after the commit before it may be cancelled for missing nonces (1..720, default 48). */
+  readonly nonceWindowHours?: number;
 }
 
 /** `POST /api/draw/cycles` — owner or treasurer. The server computes the pot. */
@@ -478,12 +508,59 @@ export async function createCycle(
 export async function readCycle(
   cycleId: string,
   deps: AuthedFetchDeps = {}
-): Promise<DrawResult<{ readonly cycle: DrawCycleRecord; readonly draws: readonly DrawListEntry[] }>> {
+): Promise<
+  DrawResult<{
+    readonly cycle: DrawCycleRecord;
+    readonly draws: readonly DrawListEntry[];
+    readonly cancellations: readonly DrawCancellation[];
+  }>
+> {
   const result = await call(`/api/draw/cycles/${encodeURIComponent(cycleId)}`, { method: "GET" }, deps);
   if (!result.ok) return result;
-  const { cycle, draws } = result.data;
+  const { cycle, draws, cancellations } = result.data;
   if (!isCycle(cycle) || !Array.isArray(draws) || !draws.every(isListEntry)) return badResponse(result.status);
-  return { ok: true, status: result.status, data: { cycle: withGate(cycle), draws } };
+  // A server from before cancellations sends none.
+  if (cancellations !== undefined && (!Array.isArray(cancellations) || !cancellations.every(isCancellation))) {
+    return badResponse(result.status);
+  }
+  return {
+    ok: true,
+    status: result.status,
+    data: { cycle: withGate(cycle), draws, cancellations: (cancellations as DrawCancellation[] | undefined) ?? [] }
+  };
+}
+
+function isCancellation(value: unknown): value is DrawCancellation {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    isString(row.drawId) &&
+    typeof row.round === "number" &&
+    (row.stage === "sealing" || row.stage === "committed") &&
+    isString(row.reason) &&
+    Array.isArray(row.missedMembers) &&
+    row.missedMembers.every(isString) &&
+    isString(row.cancelledBy) &&
+    isString(row.cancelledAt) &&
+    isString(row.deadlineAt) &&
+    typeof row.ownerDecision === "boolean"
+  );
+}
+
+/**
+ * `POST /api/draw/cancel` — owner or treasurer cancels a draw whose members did not respond, with a
+ * reason (10..1000 characters). The database decides: only after the seal deadline (still sealing) or
+ * the nonce-release deadline (committed, a nonce missing, the reveal NOT opened); a third cancel in one
+ * round needs a group owner.
+ */
+export async function cancelDraw(
+  input: { readonly drawId: string; readonly reason: string },
+  deps: AuthedFetchDeps = {}
+): Promise<DrawResult<{ readonly cancellation: DrawCancellation; readonly replayed: boolean }>> {
+  const result = await call("/api/draw/cancel", { method: "POST", body: JSON.stringify(input) }, deps);
+  if (!result.ok) return result;
+  if (!isCancellation(result.data.cancellation)) return badResponse(result.status);
+  return { ok: true, status: result.status, data: { cancellation: result.data.cancellation, replayed: result.data.replayed === true } };
 }
 
 /**
@@ -574,6 +651,8 @@ export async function openDraw(
     readonly round?: number;
     readonly idempotencyKey: string;
     readonly overrideReason?: string;
+    /** Re-opening a round after a cancel: leave out the members recorded as non-responders (only them). */
+    readonly excludeMissed?: boolean;
   },
   deps: AuthedFetchDeps = {}
 ): Promise<DrawResult<{ readonly session: DrawSessionView; readonly replayed: boolean; readonly gate: DrawOpenGate | null }>> {
@@ -782,7 +861,8 @@ function recomputeRisk(round: WireRound, transcript: DrawVerificationTranscript)
       contributionAmount: share,
       eligibleCount: transcript.participants.length
     };
-    return assessDrawRisk(request, planReserve(request));
+    // v3 draws split by the cycle's ratio (the database enforces it); v2 history was split by the older exposure model.
+    return assessDrawRisk(request, (transcript.protocolVersion ?? "v2") === "v2" ? planReserve(request) : planDrawReserve(request));
   } catch {
     return null;
   }

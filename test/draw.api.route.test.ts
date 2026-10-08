@@ -124,7 +124,9 @@ function request(body: unknown, bearer = "token", contentType = "application/jso
  */
 const commitBody = {
   drawId,
-  idempotencyKey: "draw-commit-1"
+  idempotencyKey: "draw-commit-1",
+  seed: "seed-value-abcdefghij-0123",
+  commitmentNonce: "commit-nonce-abcdefghij-0123"
 };
 
 beforeEach(() => {
@@ -345,6 +347,49 @@ describe("POST /api/draw/reveals", () => {
     const response = await createRevealHandler(() => service)(request(revealBody));
 
     expect(response.status).toBe(status);
+  });
+
+  it.each([
+    ["STORAGE_FAILURE", 502, "storage_failure"],
+    ["INTEGRITY_FAILURE", 502, "integrity_failure"],
+    ["UNAVAILABLE", 503, "unavailable"]
+  ])("answers %s with the code ONLY and keeps the detail in the server log", async (code, status, wire) => {
+    const secret = 'relation "draw_nonces" does not exist (internal detail)';
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const service = fakeService();
+      (service.reveal as unknown as { mockRejectedValue: (e: unknown) => void }).mockRejectedValue(
+        new DrawError(code as DrawErrorCode, secret)
+      );
+
+      const response = await createRevealHandler(() => service)(request(revealBody));
+
+      expect(response.status).toBe(status);
+      const text = await response.text();
+      expect(JSON.parse(text)).toEqual({ error: wire });
+      // The detail never reaches the client ...
+      expect(text).not.toContain("draw_nonces");
+      // ... but it is not lost: it goes to the server's log.
+      expect(log.mock.calls.flat().join(" ")).toContain("draw_nonces");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("still sends the message for an error whose text is safe to show (a refusal the member can act on)", async () => {
+    const service = fakeService();
+    (service.reveal as unknown as { mockRejectedValue: (e: unknown) => void }).mockRejectedValue(
+      new DrawError("COMMITMENT_MISMATCH", "draw_commitment_mismatch")
+    );
+    const response = await createRevealHandler(() => service)(request(revealBody));
+    expect(await response.json()).toEqual({ error: "commitment_mismatch", message: "draw_commitment_mismatch" });
+  });
+
+  it("the reveal body may leave the seed out once the reveal is opened (any manager can finish it)", async () => {
+    const service = fakeService();
+    const response = await createRevealHandler(() => service)(request({ drawId, idempotencyKey: "draw-reveal-1" }));
+    expect(response.status).toBe(200);
+    expect((service.reveal as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0]).toEqual({ drawId, seed: undefined });
   });
 });
 

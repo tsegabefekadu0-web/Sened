@@ -7,7 +7,7 @@ import {
   summarizeCollateral,
   type CycleCollateral
 } from "@/lib/draw/collateral";
-import { planReserve } from "@/lib/draw/risk";
+import { planDrawReserve } from "@/lib/draw/risk";
 
 const CYCLE = "66666666-6666-4666-8666-666666666666";
 const GROUP = "22222222-2222-4222-8222-222222222222";
@@ -180,10 +180,11 @@ describe("summarizeCollateral", () => {
 });
 
 describe("planNextReserve", () => {
-  it("is the existing reserve heuristic, planned for the next round with the roster that remains", () => {
+  // The reserve a draw actually withholds is the cycle's ratio of the pot (planDrawReserve), the same rule the database enforces.
+  it("is the draw's own split (the cycle's ratio, half up), planned for the next round with the roster that remains", () => {
     const view = parsed();
     const plan = planNextReserve(view)!;
-    const direct = planReserve({
+    const direct = planDrawReserve({
       drawId: CYCLE,
       round: 3,
       potAmount: "500.00",

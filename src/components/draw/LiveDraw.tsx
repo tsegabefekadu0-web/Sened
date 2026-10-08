@@ -5,6 +5,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { AuthedFetchDeps } from "@/lib/auth/authedFetch";
 import {
   canRunTreasurerSteps,
+  cancelDraw,
   clearSeal,
   commitDraw,
   createCycle,
@@ -48,7 +49,15 @@ import { triggerHaptic } from "@/lib/draw/haptics";
 import { useActiveGroupPreference } from "@/lib/groups/useActiveGroup";
 import { previewCommitGate, previewGate, type CommitGatePreview } from "@/lib/draw/contributions";
 import { DRAW_CONTRIBUTION_GATES } from "@/lib/draw/types";
-import type { DrawContributionGate, DrawCycleRecord, DrawGateFlag, DrawListEntry, DrawSessionView } from "@/lib/draw/types";
+import { DRAW_CANCEL_LIMIT } from "@/lib/draw/types";
+import type {
+  DrawCancellation,
+  DrawContributionGate,
+  DrawCycleRecord,
+  DrawGateFlag,
+  DrawListEntry,
+  DrawSessionView
+} from "@/lib/draw/types";
 import { translate, type MessageKey } from "@/lib/i18n";
 import { formatEtbDisplay, formatEtbMinorUnits, toEtbMinorUnits } from "@/lib/ledger/money";
 
@@ -83,6 +92,15 @@ interface Problem {
 interface CycleDetail {
   readonly cycle: DrawCycleRecord;
   readonly draws: readonly DrawListEntry[];
+  readonly cancellations: readonly DrawCancellation[];
+}
+
+/**
+ * A failure after which the request MAY have been applied: the connection dropped, the server
+ * answered 5xx, or its reply could not be trusted. Local secrets must survive these.
+ */
+function isAmbiguousFailure(failure: Pick<DrawFailure, "status" | "code">): boolean {
+  return failure.status === 0 || failure.status >= 500 || failure.code === "network" || failure.code === "bad_response";
 }
 
 const CARD = "sened-draw-shell rounded-[22px] border border-[#DCCFC7] p-4 shadow-card";
@@ -121,7 +139,7 @@ function potMembers(cycle: DrawCycleRecord): number | null {
 
 /** The draw a screen should open on: the live one, else the latest. */
 function pickDraw(draws: readonly DrawListEntry[]): DrawListEntry | null {
-  const live = [...draws].reverse().find((entry) => !entry.superseded && !entry.legacy && entry.state !== "paid");
+  const live = [...draws].reverse().find((entry) => !entry.superseded && !entry.legacy && entry.state !== "paid" && entry.state !== "cancelled");
   return live ?? draws[draws.length - 1] ?? null;
 }
 
@@ -203,6 +221,8 @@ function LiveDrawBody({
   /** The same two, for committing the sealed draw (the gate is checked again there). */
   const [commitConfirm, setCommitConfirm] = useState(false);
   const [commitReason, setCommitReason] = useState("");
+  const [cancelReason, setCancelReason] = useState("");
+  const [excludeMissed, setExcludeMissed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
 
@@ -549,7 +569,9 @@ function LiveDrawBody({
           cycleId: selectedCycle.cycleId,
           idempotencyKey: newKey("draw-open"),
           // Only sent when the gate asked for it; the database ignores a reason it does not need.
-          ...(gate !== null && gate.needsOverride ? { overrideReason: reason } : {})
+          ...(gate !== null && gate.needsOverride ? { overrideReason: reason } : {}),
+          // Leave out the members recorded as non-responders of this round's earlier cancels (only them).
+          ...(excludeMissed ? { excludeMissed: true } : {})
         },
         deps
       );
@@ -561,6 +583,7 @@ function LiveDrawBody({
       }
       setOverrideReason("");
       setGateConfirm(false);
+      setExcludeMissed(false);
       await loadCycle(selectedCycle.cycleId, result.data.session.drawId);
     });
 
@@ -581,6 +604,21 @@ function LiveDrawBody({
       setMySeal(made);
       const result = await submitSeal({ drawId: session.drawId, sealed: made.sealed }, deps);
       if (!result.ok) {
+        if (isAmbiguousFailure(result)) {
+          // The seal may have been stored. Clearing the nonce now could strand a seal the server holds,
+          // so ask the server first and keep the nonce unless it says the seal is not there.
+          const fresh = await readSession(session.drawId, deps);
+          if (!fresh.ok) {
+            setProblem({ key: "drawLive.sealUnsure" });
+            return;
+          }
+          setSession(fresh.data);
+          const stored = fresh.data.seals.find((seal) => seal.memberId === myUserId);
+          if (stored !== undefined && stored.sealed === made.sealed) {
+            triggerHaptic("commitSealed");
+            return;
+          }
+        }
         if (previous === null) clearSeal(session.drawId);
         else writeSeal(previous);
         setMySeal(previous);
@@ -658,9 +696,16 @@ function LiveDrawBody({
   const revealAction = () =>
     run("reveal", async () => {
       if (session === null) return;
-      if (draft === null || draft.seed === "") return setProblem({ key: "drawLive.revealNoSeed" });
+      const haveSeed = draft !== null && draft.seed !== "";
+      // Once the reveal is opened the seed is public and any manager can finish the draw, so a
+      // device without the seed can still do it. Before that, no seed means no reveal from here.
+      if (!haveSeed && session.revealOpening === null) return setProblem({ key: "drawLive.revealNoSeed" });
       const result = await revealDraw(
-        { drawId: session.drawId, seed: draft.seed, idempotencyKey: draft.revealKey },
+        {
+          drawId: session.drawId,
+          ...(haveSeed && draft !== null ? { seed: draft.seed } : {}),
+          idempotencyKey: draft?.revealKey ?? `draw-reveal.${session.drawId}`
+        },
         deps
       );
       if (!result.ok) return fail(result);
@@ -668,9 +713,22 @@ function LiveDrawBody({
       // The outcome buzz fires once this device has verified (see the effect above).
       announceOutcomeFor.current = session.drawId;
       // The seed is public now; there is nothing left to protect on this device.
-      const done = { ...draft, seed: "", revealed: true };
-      writeDraft(session.drawId, done);
-      setDraft(done);
+      if (draft !== null) {
+        const done = { ...draft, seed: "", revealed: true };
+        writeDraft(session.drawId, done);
+        setDraft(done);
+      }
+      await reloadSelected();
+    });
+
+  const cancelAction = () =>
+    run("cancel", async () => {
+      if (session === null) return;
+      const reason = cancelReason.trim();
+      if (reason.length < 10) return setProblem({ key: "drawLive.cancelReasonShort" });
+      const result = await cancelDraw({ drawId: session.drawId, reason }, deps);
+      if (!result.ok) return fail(result);
+      setCancelReason("");
       await reloadSelected();
     });
 
@@ -745,11 +803,22 @@ function LiveDrawBody({
     (contributions.kind === "loading" && cycle !== null && cycle.contributionGate !== "off") ||
     (gatePreview !== null && gatePreview.needsConfirm && !gateConfirm) ||
     (gatePreview !== null && gatePreview.needsOverride && overrideReason.trim().length < 10);
+  // The members recorded as non-responders in earlier cancels of the round about to be drawn.
+  const missedThisRound: readonly string[] =
+    detail === null || cycle === null || cycle.nextRound === null
+      ? []
+      : [
+          ...new Set(
+            detail.cancellations.filter((entry) => entry.round === cycle.nextRound).flatMap((entry) => [...entry.missedMembers])
+          )
+        ];
   const liveSealingForNext =
     detail !== null &&
     cycle !== null &&
     cycle.nextRound !== null &&
-    detail.draws.some((entry) => entry.round === cycle.nextRound && entry.state === "sealing" && !entry.superseded);
+    detail.draws.some(
+      (entry) => entry.round === cycle.nextRound && (entry.state === "sealing" || entry.state === "committed") && !entry.superseded
+    );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden no-scrollbar" data-testid="draw-live">
@@ -771,7 +840,6 @@ function LiveDrawBody({
         {problem ? (
           <div role="alert" className="rounded-xl border border-[#C6532B] bg-[#FDEDE6] px-3 py-2 text-[12px] font-semibold text-[#863214]">
             <p>{t(problem.key as DrawLiveKey, problem.vars)}</p>
-            {problem.detail ? <p className="mt-1 font-mono text-[11px] font-normal">{problem.detail}</p> : null}
           </div>
         ) : null}
 
@@ -1114,6 +1182,21 @@ function LiveDrawBody({
                     )}
                   </div>
                 ) : null}
+                {missedThisRound.length > 0 ? (
+                  <label data-testid="reopen-exclude" className="mt-2 flex items-start gap-2 text-[12px]">
+                    <input
+                      type="checkbox"
+                      data-testid="reopen-exclude-box"
+                      checked={excludeMissed}
+                      onChange={(event) => setExcludeMissed(event.target.checked)}
+                      className="mt-0.5 h-4 w-4 accent-[#C6532B]"
+                    />
+                    <span>
+                      {t("drawLive.reopenExclude", { members: missedThisRound.map((id) => labelFor(id)).join(", ") })}
+                      <span className={HINT}>{t("drawLive.reopenExcludeHint")}</span>
+                    </span>
+                  </label>
+                ) : null}
                 <button
                   type="button"
                   data-testid="open-draw"
@@ -1133,6 +1216,29 @@ function LiveDrawBody({
           </section>
         ) : null}
 
+        {detail !== null && detail.cancellations.length > 0 ? (
+          <section className={CARD} aria-label={t("drawLive.cancelledTitle")} data-draw-panel="cancellations" data-testid="cancellation-list">
+            <h3 className={HEADING}>{t("drawLive.cancelledTitle")}</h3>
+            <ul className="mt-2 space-y-2">
+              {detail.cancellations.map((entry) => (
+                <li key={entry.cancellationId} className="rounded-lg bg-[#F5EFEB] px-2.5 py-2 text-[12px]">
+                  <p className="font-semibold">
+                    {t("drawLive.cancelledRow", {
+                      round: entry.round,
+                      when: new Date(entry.cancelledAt).toLocaleString(locale),
+                      by: labelFor(entry.cancelledBy),
+                      stage: t(`drawLive.cancelStage.${entry.stage}`)
+                    })}
+                  </p>
+                  <p className="mt-1">{t("drawLive.cancelReasonLine", { reason: entry.reason })}</p>
+                  <p className="mt-1">{t("drawLive.cancelMissed", { members: entry.missedMembers.map((id) => labelFor(id)).join(", ") })}</p>
+                  {entry.ownerDecision ? <p className="mt-1 font-semibold">{t("drawLive.cancelOwnerDecision")}</p> : null}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
         {session !== null ? (
           <DrawPanel
             t={t}
@@ -1141,6 +1247,12 @@ function LiveDrawBody({
             mySeal={mySeal}
             draft={draft}
             isTreasurer={isTreasurer}
+            isOwner={readyGroup.role === "owner"}
+            locale={locale}
+            now={Date.now()}
+            cancelReason={cancelReason}
+            onCancelReason={setCancelReason}
+            onCancel={() => void cancelAction()}
             busy={busy}
             labelFor={labelFor}
             onSeal={() => void sealAction()}
@@ -1257,6 +1369,12 @@ function DrawPanel({
   mySeal,
   draft,
   isTreasurer,
+  isOwner,
+  locale,
+  now,
+  cancelReason,
+  onCancelReason,
+  onCancel,
   busy,
   labelFor,
   onSeal,
@@ -1276,6 +1394,13 @@ function DrawPanel({
   readonly mySeal: MySeal | null;
   readonly draft: DrawDraft | null;
   readonly isTreasurer: boolean;
+  readonly isOwner: boolean;
+  readonly locale: Locale;
+  /** The current time (ms), passed in so the deadline logic is a pure function of props. */
+  readonly now: number;
+  readonly cancelReason: string;
+  readonly onCancelReason: (value: string) => void;
+  readonly onCancel: () => void;
   readonly busy: string | null;
   readonly labelFor: (memberId: string) => string;
   readonly onSeal: () => void;
@@ -1302,10 +1427,22 @@ function DrawPanel({
   const iAmEligible = myUserId !== null && eligible.includes(myUserId);
   const standing = sealStanding(session, mySeal, myUserId);
   const iReleased = myUserId !== null && releasedIds.has(myUserId);
-  const othersSealed = eligible.filter((id) => id !== myUserId && sealedIds.has(id)).length;
-  // With nobody else to seal there is nothing to choose, so a lone committer may proceed.
-  const needsOther = eligible.length > 1 && othersSealed < 1;
+  // QUORUM: every eligible member must seal; "N of M sealed" and Commit enables only at M of M.
+  const unsealed = eligible.length - sealedCount;
+  const needsAll = unsealed > 0;
   const pending = sealedMembers.length - releasedCount;
+  const cancelled = session.state === "cancelled";
+  const when = (iso: string): string => new Date(iso).toLocaleString(locale);
+  // Cancel: only after the deadline, only for members who missed it, never once the reveal is opened.
+  const sealDeadlineAt = Date.parse(session.sealDeadline);
+  const nonceDeadlineAt = session.nonceDeadline === null ? Number.NaN : Date.parse(session.nonceDeadline);
+  const sealingCancelWaits = sealing && needsAll && now < sealDeadlineAt;
+  const sealingCancelOpen = sealing && needsAll && now >= sealDeadlineAt;
+  const committedCancelWaits = committed && !session.revealRequested && pending > 0 && now < nonceDeadlineAt;
+  const committedCancelOpen = committed && !session.revealRequested && pending > 0 && now >= nonceDeadlineAt;
+  const cancelOpen = sealingCancelOpen || committedCancelOpen;
+  const overLimit = session.cancelsThisRound >= DRAW_CANCEL_LIMIT && !isOwner;
+  const noSeed = (draft === null || draft.seed === "") && session.revealOpening === null;
 
   return (
     <section className={CARD} aria-label={t("drawLive.mineTitle")} data-draw-panel="draw" data-testid="draw-panel">
@@ -1338,6 +1475,30 @@ function DrawPanel({
           </li>
         ))}
       </ul>
+
+      {sealing ? (
+        <p data-testid="seal-deadline" className={HINT}>
+          {t("drawLive.sealDeadline", { date: when(session.sealDeadline) })}
+        </p>
+      ) : null}
+      {committed && !session.revealRequested && session.nonceDeadline !== null ? (
+        <p data-testid="nonce-deadline" className={HINT}>
+          {t("drawLive.nonceDeadline", { date: when(session.nonceDeadline) })}
+        </p>
+      ) : null}
+      {session.excluded.length > 0 ? (
+        <p data-testid="excluded-note" className={NOTICE}>
+          {t("drawLive.excludedNote", { members: session.excluded.map((id) => labelFor(id)).join(", ") })}
+        </p>
+      ) : null}
+      {cancelled && session.cancellation !== null ? (
+        <div data-testid="cancelled-note" role="status" className={NOTICE}>
+          <p>{t("drawLive.cancelReasonLine", { reason: session.cancellation.reason })}</p>
+          <p className="mt-1">
+            {t("drawLive.cancelMissed", { members: session.cancellation.missedMembers.map((id) => labelFor(id)).join(", ") })}
+          </p>
+        </div>
+      ) : null}
 
       {/* This member's part. The nonce itself is never rendered. */}
       <div data-testid="my-part" className="mt-3 border-t border-dashed border-[#E4D9CE] pt-3">
@@ -1404,9 +1565,9 @@ function DrawPanel({
         <div data-testid="commit-form" className="mt-3 space-y-2 border-t border-dashed border-[#E4D9CE] pt-3">
           <h4 className="text-[12px] font-bold text-[#1C1410]">{t("drawLive.ceremonyTitle")}</h4>
           <p className={HINT}>{t("drawLive.commitDetail")}</p>
-          {needsOther ? (
-            <p data-testid="commit-needs-other" role="status" className={NOTICE}>
-              {t("drawLive.commitNeedOther")}
+          {needsAll ? (
+            <p data-testid="commit-needs-all" role="status" className={NOTICE}>
+              {t("drawLive.commitNeedAll", { pending: unsealed, total: eligible.length })}
             </p>
           ) : null}
           {commitGate !== null && commitGate.flagged.length > 0 ? (
@@ -1469,7 +1630,7 @@ function DrawPanel({
             </div>
           ) : null}
           <p className={HINT}>{t("drawLive.seedNote")}</p>
-          <button type="button" data-testid="commit-button" className={BUTTON} disabled={busy !== null || needsOther || commitHeld} onClick={onCommit}>
+          <button type="button" data-testid="commit-button" className={BUTTON} disabled={busy !== null || needsAll || commitHeld} onClick={onCommit}>
             {busy === "commit"
               ? t("drawLive.working")
               : commitGate?.needsOverride
@@ -1489,20 +1650,72 @@ function DrawPanel({
               {t("drawLive.revealWaiting", { pending })}
             </p>
           ) : null}
-          {draft === null || draft.seed === "" ? (
+          {noSeed ? (
             <p role="alert" className={BAD}>
               {t("drawLive.revealNoSeed")}
+            </p>
+          ) : null}
+          {(draft === null || draft.seed === "") && session.revealOpening !== null ? (
+            <p data-testid="reveal-finish" className={HINT}>
+              {t("drawLive.revealFinish")}
             </p>
           ) : null}
           <button
             type="button"
             data-testid="reveal-button"
             className={BUTTON}
-            disabled={busy !== null || pending > 0 || draft === null || draft.seed === ""}
+            disabled={busy !== null || pending > 0 || noSeed}
             onClick={onReveal}
           >
             {busy === "reveal" ? t("drawLive.working") : t("drawLive.revealAction")}
           </button>
+        </div>
+      ) : null}
+
+      {isTreasurer && (sealing || committed) ? (
+        <div data-testid="cancel-form" className="mt-3 space-y-2 border-t border-dashed border-[#E4D9CE] pt-3">
+          <h4 className="text-[12px] font-bold text-[#1C1410]">{t("drawLive.cancelTitle")}</h4>
+          <p className={HINT}>{t("drawLive.cancelDetail")}</p>
+          {committed && session.revealRequested ? (
+            <p data-testid="cancel-reveal-opened" className={NOTICE}>
+              {t("drawLive.cancelRevealOpenedNote")}
+            </p>
+          ) : null}
+          {sealingCancelWaits ? (
+            <p data-testid="cancel-early" className={HINT}>{t("drawLive.cancelEarly", { date: when(session.sealDeadline) })}</p>
+          ) : null}
+          {committedCancelWaits && session.nonceDeadline !== null ? (
+            <p data-testid="cancel-early" className={HINT}>{t("drawLive.cancelEarly", { date: when(session.nonceDeadline) })}</p>
+          ) : null}
+          {session.cancelsThisRound >= DRAW_CANCEL_LIMIT ? (
+            <p data-testid="cancel-count" className={HINT}>
+              {t("drawLive.cancelLimitNote", { count: session.cancelsThisRound })}
+            </p>
+          ) : null}
+          {cancelOpen ? (
+            <>
+              <label className="block">
+                <span className={LABEL}>{t("drawLive.cancelReason")}</span>
+                <textarea
+                  data-testid="cancel-reason"
+                  className={FIELD}
+                  rows={2}
+                  maxLength={1000}
+                  value={cancelReason}
+                  onChange={(event) => onCancelReason(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                data-testid="cancel-button"
+                className={SECONDARY}
+                disabled={busy !== null || overLimit || cancelReason.trim().length < 10}
+                onClick={onCancel}
+              >
+                {busy === "cancel" ? t("drawLive.working") : t("drawLive.cancelAction")}
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
     </section>

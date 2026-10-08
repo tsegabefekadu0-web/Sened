@@ -263,6 +263,23 @@ describe("POST /api/draw/guarantees", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
+  it("accepts a full 1000-character Amharic reason (3 bytes a character) and still refuses a body over the 4096-byte cap", async () => {
+    // 1000 Ethiopic characters are 3000 bytes of UTF-8: the old 2048-byte cap refused an honest reason.
+    const amharic = "አ".repeat(1000);
+    expect(new TextEncoder().encode(amharic).byteLength).toBe(3000);
+    mocks.rpc.mockClear();
+    mocks.rpc.mockResolvedValue({ data: { guarantee: guarantee({ state: "released", reason: amharic }), replayed: false }, error: null });
+    const accepted = await POST(post({ action: "release", guaranteeId, reason: amharic }));
+    expect(accepted.status).not.toBe(400);
+    expect(mocks.rpc).toHaveBeenCalledWith("release_collateral_guarantee_v1", expect.objectContaining({ p_reason: amharic }));
+
+    mocks.rpc.mockClear();
+    const body = JSON.stringify({ action: "release", guaranteeId, reason: amharic, padding: "y".repeat(1200) });
+    expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(4096);
+    expect((await POST(post(body))).status).toBe(400);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
   it("401s without a token, 503s without configuration", async () => {
     expect((await POST(post({ action: "accept", guaranteeId }, { bearer: null }))).status).toBe(401);
     mocks.getUser.mockRejectedValue(new Error("network"));

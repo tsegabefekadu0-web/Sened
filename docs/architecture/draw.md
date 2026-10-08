@@ -229,12 +229,11 @@ the docs say so.
 ### 5.5 Residual properties (honest list)
 
 1. **Collusion.** The guarantee needs one honest sealed member whose nonce stays
-   secret until after the commit. A treasurer colluding with *every* sealed
-   member can grind. One seal is the enforced floor (`MIN_MEMBER_COMMITMENTS`);
-   a group that wants more should raise `minMemberCommitments`. Note the treasurer
-   also chooses *which* members' seals to include; that is a grinding dimension
-   only over subsets of members whose nonces the treasurer still does not know,
-   so it adds no information.
+   secret until after the commit. A treasurer colluding with *every* member can
+   grind. Since 20261014100000_draw_integrity.sql **every eligible member must
+   seal** before a commit (the database refuses otherwise, and the screen shows
+   "N of M sealed" and enables Commit at M of M), so the treasurer no longer
+   chooses which seals to include.
 2. **Last-revealer abort (withholding).** After the commit, whoever sees the
    other nonces and the seed can compute the outcome before deciding to
    proceed. Before M4.4 the treasurer collected the openings by hand and could do
@@ -1461,3 +1460,29 @@ covers the rounds when it does. If the grid was stale and the server refuses any
 and the reveal does not undo a commit that was allowed, and neither reveal nor payout re-reads it. The
 derivation is a snapshot at the moment of the call, not a lock on the ledger, so a payment recorded in the same
 instant may or may not be seen. The default stays `off`.
+
+
+### 5.6 Integrity rules added by 20261014100000_draw_integrity.sql
+
+* **The database derives the winner.** The reveal trigger recomputes the nonce
+  digest, the transcript digest, the rejection-sampled index and the winner from
+  the stored commitment and the opened nonces; whatever the caller typed must
+  equal it or the reveal is refused. Golden vectors are shared with
+  `test/draw.sql-parity.test.ts`.
+* **One live draw per round.** `open_draw_v1` refuses while a committed,
+  uncancelled, unrevealed draw exists for the round; the commitments table
+  refuses a second live commitment; the reveals table has one row per
+  (cycle, round).
+* **The payout split** is the cycle's `reserve_ratio_bps` of the committed pot,
+  rounded half up to the cent; payout = pot - reserve.
+* **Cancel, for members who do not respond.** A cycle carries a seal window and a
+  nonce-release window (default 48 hours each, 1 to 720). They are stamped on the
+  session and on the commitment and cannot be shortened. Before the commit, after
+  the seal deadline, an owner or treasurer may cancel with a reason; after the
+  commit, only after the nonce deadline, with a nonce still missing, and only if
+  the reveal has NOT been opened. Once the reveal is opened the seed is public and
+  any owner or treasurer can finish the draw, so it cannot be abandoned. Every
+  cancel is append-only (who, when, why, stage, the missed members) and visible to
+  all members. At most two cancels a round by a treasurer; a third needs a group
+  owner. A re-opened round may leave out only the recorded non-responders, and
+  that is shown to everyone.

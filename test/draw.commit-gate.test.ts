@@ -105,9 +105,10 @@ async function code(promise: Promise<unknown>): Promise<string> {
   return "none";
 }
 
+/** EVERY eligible member seals (the quorum is all of them, the treasurer included). */
 async function sealTwo(built: Built, drawId: string, eligible: readonly string[]) {
   const secrets = new Map<string, string>();
-  for (const id of eligible.filter((entry) => entry !== TREASURER).slice(0, 2)) {
+  for (const id of eligible) {
     const nonce = `nonce-${id.slice(0, 8)}-${drawId.slice(0, 8)}-0123456789`;
     const sealed = (await sealMemberContribution({ drawId, memberId: id, nonce }, hasher)).sealed;
     await built.service.submitSeal({ drawId, sealed }, as(id));
@@ -153,7 +154,7 @@ describe("a flag that appears AFTER the draw was opened (block)", () => {
     const made = await cycle(built, "block");
     const session = await roundTwoSealed(built, made.cycleId);
     const sealsBefore = (await built.service.getSession(session.drawId, as(M1))).seals;
-    expect(sealsBefore).toHaveLength(2);
+    expect(sealsBefore).toHaveLength(session.eligible.length);
 
     flags.current = [flag(M1, 1)];
     const error = await commit(built, session.drawId).catch((caught: unknown) => caught);
@@ -354,7 +355,7 @@ describe("the request, the route and the RPC", () => {
     });
 
   it("the body accepts an optional override reason of 10..1000 characters once trimmed, and still nothing about who or what", () => {
-    const base = { drawId: DRAW, idempotencyKey: "k1" };
+    const base = { drawId: DRAW, idempotencyKey: "k1", seed: SEED, commitmentNonce: NONCE };
     expect(drawCommitRequestSchema.safeParse(base).success).toBe(true);
     expect(drawCommitRequestSchema.safeParse({ ...base, overrideReason: REASON }).success).toBe(true);
     expect(drawCommitRequestSchema.safeParse({ ...base, overrideReason: "too short" }).success).toBe(false);
@@ -367,7 +368,7 @@ describe("the request, the route and the RPC", () => {
 
   it("authenticates first", async () => {
     const service = { commitFromSession: vi.fn() } as unknown as DrawService;
-    const response = await createCommitHandler(() => service)(request({ drawId: DRAW, idempotencyKey: "k" }, null));
+    const response = await createCommitHandler(() => service)(request({ drawId: DRAW, idempotencyKey: "k", seed: SEED, commitmentNonce: NONCE }, null));
     expect(response.status).toBe(401);
     expect(service.commitFromSession).not.toHaveBeenCalled();
   });
@@ -378,7 +379,7 @@ describe("the request, the route and the RPC", () => {
         new DrawError("CONTRIBUTION_GATE_BLOCKED", "draw_contribution_gate_blocked", undefined, [flag(M1, 1), flag(M2, 1)])
       )
     } as unknown as DrawService;
-    const response = await createCommitHandler(() => service)(request({ drawId: DRAW, idempotencyKey: "k" }));
+    const response = await createCommitHandler(() => service)(request({ drawId: DRAW, idempotencyKey: "k", seed: SEED, commitmentNonce: NONCE }));
     expect(response.status).toBe(409);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({
@@ -395,13 +396,13 @@ describe("the request, the route and the RPC", () => {
       .mockResolvedValueOnce({ round, replayed: false, gate: { policy: "block", flagged: [flag(M1, 1)], overridden: true, carriedOver: false } })
       .mockResolvedValueOnce({ round, replayed: true });
     const service = { commitFromSession } as unknown as DrawService;
-    const first = await createCommitHandler(() => service)(request({ drawId: DRAW, idempotencyKey: "k", overrideReason: `  ${REASON} ` }));
+    const first = await createCommitHandler(() => service)(request({ drawId: DRAW, idempotencyKey: "k", seed: SEED, commitmentNonce: NONCE, overrideReason: `  ${REASON} ` }));
     expect(first.status).toBe(201);
     const body = await first.json();
     expect(body.contributionGate).toEqual({ policy: "block", flagged: [flag(M1, 1)], overridden: true, carriedOver: false });
-    expect(commitFromSession.mock.calls[0]![0]).toEqual({ drawId: DRAW, idempotencyKey: "k", overrideReason: REASON });
+    expect(commitFromSession.mock.calls[0]![0]).toEqual({ drawId: DRAW, idempotencyKey: "k", seed: SEED, commitmentNonce: NONCE, overrideReason: REASON });
     expect(commitFromSession.mock.calls[0]![1]).toEqual({ userId: TREASURER });
-    const second = await createCommitHandler(() => service)(request({ drawId: DRAW, idempotencyKey: "k" }));
+    const second = await createCommitHandler(() => service)(request({ drawId: DRAW, idempotencyKey: "k", seed: SEED, commitmentNonce: NONCE }));
     expect(second.status).toBe(200);
     expect((await second.json()).contributionGate).toBeNull();
   });

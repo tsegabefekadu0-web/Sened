@@ -89,7 +89,7 @@ async function drawRound(built: Built, cycleId: string, extra: { overrideReason?
   const opened = await built.service.openDraw({ cycleId, idempotencyKey: key("open"), ...extra }, as(TREASURER));
   const session = opened.session;
   const secrets = new Map<string, string>();
-  for (const id of session.eligible.filter((entry) => entry !== TREASURER).slice(0, 2)) {
+  for (const id of session.eligible) {
     const nonce = `nonce-${id.slice(0, 8)}-${session.drawId.slice(0, 8)}-0123456789`;
     const sealed = (await sealMemberContribution({ drawId: session.drawId, memberId: id, nonce }, hasher)).sealed;
     await built.service.submitSeal({ drawId: session.drawId, sealed }, as(id));

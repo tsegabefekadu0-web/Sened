@@ -118,7 +118,8 @@ const sessionWire = (script: Script) => ({
   committedAt: null,
   cycle: cycleWire(script),
   eligible: [TREASURER, B, C],
-  seals: [{ memberId: B, sealed: "a".repeat(64), sealedAt: T0 }],
+  // EVERY eligible member has sealed, so Commit is not held by the quorum.
+  seals: [TREASURER, B, C].map((memberId, index) => ({ memberId, sealed: String(index + 1).repeat(64), sealedAt: T0 })),
   nonces: [],
   revealRequested: false
 });
@@ -164,7 +165,7 @@ function createScriptedServer(script: Script) {
     if (path === `/api/draw/cycles/${CYCLE}`) {
       return Response.json({
         cycle: cycleWire(script),
-        draws: [{ drawId: DRAW, round: 2, state: "sealing", openedAt: T0, committedAt: null, revealedAt: null, winnerMemberId: null, sealCount: 1, nonceCount: 0, revealRequested: false, superseded: false, legacy: false }]
+        draws: [{ drawId: DRAW, round: 2, state: "sealing", openedAt: T0, committedAt: null, revealedAt: null, winnerMemberId: null, sealCount: 3, nonceCount: 0, revealRequested: false, superseded: false, legacy: false }]
       });
     }
     if (path === `/api/draw/draws/${DRAW}`) return Response.json({ session: sessionWire(script) });

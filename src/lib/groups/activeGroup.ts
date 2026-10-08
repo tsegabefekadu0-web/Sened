@@ -1,4 +1,5 @@
 import { authedFetch, NotSignedInError, type AuthedFetchDeps } from "@/lib/auth/authedFetch";
+import { clearCachedPayerChoices } from "@/lib/ledger/payerChoiceCache";
 
 /**
  * The app-wide **active group**: which of the signed-in user's groups every
@@ -149,6 +150,21 @@ export function resolveActiveGroupId(groups: readonly GroupOption[], remembered:
   return null;
 }
 
+/**
+ * True when what the server just resolved for this caller is not the group the
+ * client believes is active: the server says "choose" (the remembered group is
+ * gone, or there are several and none is chosen), or it resolved a group other
+ * than the preference. The consumer then asks the store to reload, so the
+ * switcher, the forms and the ledger all name the same group.
+ */
+export function serverDisagreesWithActiveGroup(
+  result: { readonly status: string; readonly groupId?: string },
+  preferred: string | null
+): boolean {
+  if (result.status === "choose-group") return true;
+  return typeof result.groupId === "string" && result.groupId !== preferred;
+}
+
 /** A short, honest label for a group with no name: a piece of its id, not an invented name. */
 export function shortGroupId(groupId: string): string {
   return groupId.replace(/-/g, "").slice(0, 8);
@@ -229,6 +245,11 @@ export class ActiveGroupStore {
       return;
     }
     this.generation += 1;
+    if (this.state.identity !== null) {
+      // Leaving an identity (sign-out or a different account): the previous one's
+      // cached payer lists must not be offered to whoever comes next.
+      clearCachedPayerChoices();
+    }
     if (identity === null) {
       clearRemembered(this.userId, this.storage);
       this.userId = null;

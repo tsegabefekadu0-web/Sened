@@ -3,6 +3,17 @@
 import { useEffect } from "react";
 
 export const SERVICE_WORKER_URL = "/sw.js";
+
+/**
+ * The URL this build registers. The build id rides in the query so each deploy
+ * registers a distinct script URL: the browser installs the new worker, and the
+ * worker names its caches after the id (`public/sw.js`). With no id (tests, a
+ * build without one) it is the bare `/sw.js`.
+ */
+export function serviceWorkerUrl(): string {
+  const id = process.env.NEXT_PUBLIC_BUILD_ID;
+  return id && /^[A-Za-z0-9._-]{1,40}$/.test(id) ? `${SERVICE_WORKER_URL}?v=${id}` : SERVICE_WORKER_URL;
+}
 export const SERVICE_WORKER_SCOPE = "/";
 
 /**
@@ -36,7 +47,7 @@ export function ServiceWorkerRegistration(): null {
 
     const register = () => {
       navigator.serviceWorker
-        .register(SERVICE_WORKER_URL, { scope: SERVICE_WORKER_SCOPE })
+        .register(serviceWorkerUrl(), { scope: SERVICE_WORKER_SCOPE })
         .catch((error: unknown) => {
           console.warn("Sened: service worker registration failed; offline shell unavailable.", error);
         });

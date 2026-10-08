@@ -40,6 +40,19 @@ export function readCachedPayerChoices(groupId: string): CachedPayerChoices | nu
   };
 }
 
+/**
+ * Forget every cached payer list. Called when the signed-in identity ends or
+ * changes: the lists name a group's members (and, for an owner, their emails), so
+ * they must not outlive the session that was allowed to read them.
+ */
+export function clearCachedPayerChoices(): void {
+  try {
+    window.localStorage.removeItem(KEY);
+  } catch {
+    // Storage blocked: nothing was written either.
+  }
+}
+
 export function writeCachedPayerChoices(groupId: string, choices: CachedPayerChoices): void {
   try {
     window.localStorage.setItem(KEY, JSON.stringify({ ...readStore(), [groupId]: choices }));

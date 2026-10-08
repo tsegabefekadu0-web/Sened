@@ -47,6 +47,22 @@ export function ActiveGroupProvider({
     store.setIdentity(identity, userId);
   }, [store, identity, userId]);
 
+  // Membership changes on the server (removed from a group, a group joined on
+  // another device). Re-read the groups when the tab comes back to the front and
+  // when the connection returns, so a stale active group cannot linger.
+  useEffect(() => {
+    const refresh = () => store.reload();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", refresh);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", refresh);
+    };
+  }, [store]);
+
   const value = useMemo<ContextValue>(() => ({ store, identity }), [store, identity]);
   return <ActiveGroupContext.Provider value={value}>{children}</ActiveGroupContext.Provider>;
 }
@@ -113,10 +129,16 @@ export function useActiveGroup(): ActiveGroupApi {
  * `groupId` is a preference only; the read validates it against the groups the
  * server returns, and the server validates membership again.
  */
-export function useActiveGroupPreference(): { readonly ready: boolean; readonly groupId: string | null } {
+export function useActiveGroupPreference(): {
+  readonly ready: boolean;
+  readonly groupId: string | null;
+  /** Re-read the groups: a consumer calls it when the server disagrees with the active group. */
+  readonly reload: () => void;
+} {
   const api = useActiveGroup();
   return {
     ready: !api.provided || api.status !== "loading",
-    groupId: api.activeGroupId
+    groupId: api.activeGroupId,
+    reload: api.reload
   };
 }

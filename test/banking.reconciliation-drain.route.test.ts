@@ -175,24 +175,37 @@ afterEach(() => {
 });
 
 describe("authentication fails closed", () => {
-  it("is 503 and runs nothing when no secret is configured", async () => {
+  it("is 401, not 503, and runs nothing when no secret is configured (the deployment's state is not revealed)", async () => {
     vi.stubEnv("RECONCILIATION_CRON_SECRET", "");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const factory = vi.fn(() => null);
     const response = await call(createDrainHandler({ coordinatorFactory: factory }), bearer);
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(factory).not.toHaveBeenCalled();
+    // The operator can still see why, in the server log.
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining("RECONCILIATION_CRON_SECRET"));
+    logged.mockRestore();
   });
 
-  it("is 503 for an unset or too-short secret even if the caller presents it", async () => {
+  it("answers an unconfigured server and a wrong secret identically, with or without a header", async () => {
     const factory = vi.fn(() => null);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const wrong = await call(createDrainHandler({ coordinatorFactory: factory }), `Bearer ${"x".repeat(40)}`);
+    const wrongBody = await wrong.json();
     vi.stubEnv("RECONCILIATION_CRON_SECRET", "short");
-    expect((await call(createDrainHandler({ coordinatorFactory: factory }), "Bearer short")).status).toBe(503);
+    for (const header of ["Bearer short", "Bearer ", undefined]) {
+      const response = await call(createDrainHandler({ coordinatorFactory: factory }), header);
+      expect(response.status).toBe(wrong.status);
+      expect(await response.json()).toEqual(wrongBody);
+    }
     vi.unstubAllEnvs();
     delete process.env.RECONCILIATION_CRON_SECRET;
-    expect((await call(createDrainHandler({ coordinatorFactory: factory }), "Bearer ")).status).toBe(503);
+    expect((await call(createDrainHandler({ coordinatorFactory: factory }), "Bearer anything")).status).toBe(401);
     expect(factory).not.toHaveBeenCalled();
+    logged.mockRestore();
   });
 
   it("is 401 for a missing, malformed or wrong secret, and builds no database client", async () => {

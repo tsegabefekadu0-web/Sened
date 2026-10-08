@@ -335,7 +335,7 @@ export default function SenedHome() {
                 </p>
               )}
               <DebterCard potBalance={potBalance} onDrawClick={() => router.push("/draw")} />
-              <WorkspaceLinks />
+              <WorkspaceLinks locale={locale} />
               {/* Owner / treasurer only (the same gate as "attribute payer"): a quick way in
                   to the record-contribution form on the ledger page. */}
               {payerAttribution ? (

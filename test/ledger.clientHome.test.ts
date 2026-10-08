@@ -106,7 +106,7 @@ describe("loadHomeLedger", () => {
 
   it("is empty when the snapshot has no entries, without reading the feed", async () => {
     const d = deps([json(groupBody()), json(balancesBody("0.00", 0))]);
-    expect(await loadHomeLedger(d)).toEqual({ status: "empty" });
+    expect(await loadHomeLedger(d)).toEqual({ status: "empty", groupId: GROUP });
     expect(d.fetchImpl).toHaveBeenCalledTimes(2);
   });
 

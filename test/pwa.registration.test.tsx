@@ -77,3 +77,16 @@ describe("ServiceWorkerRegistration", () => {
     await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
   });
 });
+
+describe("ServiceWorkerRegistration build id", () => {
+  it("registers a distinct script URL per build, so a deploy installs a fresh worker", async () => {
+    const { serviceWorkerUrl } = await import("@/components/pwa/ServiceWorkerRegistration");
+    vi.stubEnv("NEXT_PUBLIC_BUILD_ID", "k3j2h1");
+    expect(serviceWorkerUrl()).toBe("/sw.js?v=k3j2h1");
+    vi.stubEnv("NEXT_PUBLIC_BUILD_ID", "bad id/../");
+    expect(serviceWorkerUrl()).toBe("/sw.js");
+    vi.stubEnv("NEXT_PUBLIC_BUILD_ID", "");
+    expect(serviceWorkerUrl()).toBe("/sw.js");
+    vi.unstubAllEnvs();
+  });
+});

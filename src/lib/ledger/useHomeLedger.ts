@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { SessionState } from "@/lib/auth/useSession";
+import { serverDisagreesWithActiveGroup } from "@/lib/groups/activeGroup";
 import { useActiveGroupPreference } from "@/lib/groups/useActiveGroup";
 import { loadHomeLedger, type HomeLedgerResult } from "./clientHome";
 
@@ -23,7 +24,7 @@ export function useHomeLedger(session: SessionState): HomeLedgerView & { readonl
   const signedIn = session.status === "signed-in";
   // The ledger read follows the app's active group; it waits for the groups to
   // resolve rather than reading once with no preference and again with one.
-  const { ready: groupReady, groupId } = useActiveGroupPreference();
+  const { ready: groupReady, groupId, reload: reloadGroups } = useActiveGroupPreference();
   const [result, setResult] = useState<HomeLedgerResult | null>(null);
   const [round, setRound] = useState(0);
   const loadedGroup = useRef<string | null>(null);
@@ -46,12 +47,17 @@ export function useHomeLedger(session: SessionState): HomeLedgerView & { readonl
     void loadHomeLedger({}, { groupId }).then((next) => {
       if (active) {
         setResult(next);
+        // The server resolved a different group than the switcher shows (or none):
+        // re-read the groups so the switcher and this ledger name the same one.
+        if (serverDisagreesWithActiveGroup(next as { status: string; groupId?: string }, groupId)) {
+          reloadGroups();
+        }
       }
     });
     return () => {
       active = false;
     };
-  }, [signedIn, groupReady, groupId, round]);
+  }, [signedIn, groupReady, groupId, round, reloadGroups]);
 
   if (session.status === "loading") {
     return { kind: "loading", reload };

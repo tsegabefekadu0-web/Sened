@@ -206,7 +206,7 @@ describe("/governance page and navigation", () => {
     const user = userEvent.setup();
     render(<GovernancePage />);
     expect(screen.getByText(am("governance.q.groupType"))).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Switch to English" }));
+    await user.click(screen.getByRole("button", { name: am("shell.switchToEnglish") }));
     expect(screen.getByText(en("governance.q.groupType"))).toBeInTheDocument();
   });
 

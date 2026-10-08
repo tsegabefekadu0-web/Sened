@@ -50,7 +50,7 @@ export type HomeLedgerResult =
       readonly feedTruncated: boolean;
     }
   /** The group exists and has no entries yet: the balance is genuinely zero. */
-  | { readonly status: "empty" }
+  | { readonly status: "empty"; readonly groupId: string }
   | { readonly status: "unauthorized" }
   | { readonly status: "no-group" }
   | { readonly status: "choose-group" }
@@ -267,7 +267,7 @@ export async function loadHomeLedger(
     return { status: "error" };
   }
   if (head === 0n) {
-    return potUnits === 0n ? { status: "empty" } : { status: "error" };
+    return potUnits === 0n ? { status: "empty", groupId: mine.groupId } : { status: "error" };
   }
 
   const page = await readEntriesPage(

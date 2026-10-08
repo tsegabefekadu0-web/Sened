@@ -10,11 +10,12 @@
  * Flags are purely mechanical; nothing here judges translation quality.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { dictionaries } from "../src/lib/i18n";
+import { filledReviewRows } from "./import-amharic-review";
 
 const BASELINE_COMMIT = "951e66f";
 const ROOT = resolve(__dirname, "..");
@@ -104,6 +105,20 @@ function walk(dir: string, out: string[] = []): string[] {
 
 async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
+  // A reviewer's work lives in this file. Regenerating it would erase every
+  // correction typed so far, so refuse unless the person says so.
+  const reviewCsv = join(OUT_DIR, "amharic-review.csv");
+  if (existsSync(reviewCsv) && !process.argv.includes("--force")) {
+    const filled = filledReviewRows(readFileSync(reviewCsv, "utf8"));
+    if (filled > 0) {
+      console.error(
+        `Refusing to overwrite ${reviewCsv}: ${filled} row(s) already have a reviewer's answer. ` +
+          "Apply them first (npm run i18n:apply-review), move the file aside, or pass --force to discard them."
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
   const { en, am } = dictionaries;
   const baseline = await loadBaselineAm();
 
@@ -157,4 +172,4 @@ async function main() {
   console.log(JSON.stringify({ total: stat.total, new: stat.new, flags: stat.flags, hardcodedLines: hard.length - 1 }, null, 2));
 }
 
-void main();
+if (/vite-node/.test(process.argv[1] ?? "") && !process.env.VITEST) void main();

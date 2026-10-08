@@ -1,5 +1,6 @@
 import "server-only";
 import { authenticateRead } from "@/lib/authRead";
+import { SYNC_PULL_RULE, SYNC_PUSH_ENTRIES_RULE, consumeRateLimit, type RateLimitRule } from "@/lib/rateLimit";
 import {
   LedgerService,
   SupabaseLedgerRepository,
@@ -48,25 +49,32 @@ function jsonError(error: string, status: number, message?: string): Response {
   });
 }
 
-async function readJsonBody(request: Request): Promise<{ ok: true; body: unknown } | { ok: false }> {
+async function readJsonBody(
+  request: Request
+): Promise<{ ok: true; body: unknown } | { ok: false; tooLarge: boolean }> {
   const contentType = request.headers.get("content-type")?.toLowerCase();
   if (
     !contentType?.startsWith("application/json") ||
     (contentType !== "application/json" && !contentType.startsWith("application/json;"))
   ) {
-    return { ok: false };
+    return { ok: false, tooLarge: false };
   }
   if (Number(request.headers.get("content-length") ?? "0") > MAX_BODY_BYTES) {
-    return { ok: false };
+    return { ok: false, tooLarge: true };
+  }
+  let raw: string;
+  try {
+    raw = await request.text();
+  } catch {
+    return { ok: false, tooLarge: false };
+  }
+  if (new TextEncoder().encode(raw).byteLength > MAX_BODY_BYTES) {
+    return { ok: false, tooLarge: true };
   }
   try {
-    const raw = await request.text();
-    if (new TextEncoder().encode(raw).byteLength > MAX_BODY_BYTES) {
-      return { ok: false };
-    }
     return { ok: true, body: JSON.parse(raw) as unknown };
   } catch {
-    return { ok: false };
+    return { ok: false, tooLarge: false };
   }
 }
 
@@ -160,7 +168,9 @@ async function pushOne(
     return rejected(envelope.mutationId, "invalid_request");
   }
   let attribution: ReturnType<typeof ledgerEntryAttributionSchema.parse> | undefined;
-  if (attributionPayload !== undefined && attributionPayload !== null) {
+  // Same rule as `POST /api/ledger/entries`: a present `attribution` must be a valid
+  // one. `null` is not "no payer" (leave the key out), it is a malformed request.
+  if (attributionPayload !== undefined) {
     const parsedAttribution = parse(ledgerEntryAttributionSchema, attributionPayload);
     // Only a contribution has a payer. A malformed one is that draft's rejection
     // before anything is written, the same as on the entries route.
@@ -262,9 +272,37 @@ async function authenticatedBody(
   }
   const body = await readJsonBody(request);
   if (!body.ok) {
-    return { ok: false, response: jsonError("bad_request", 400) };
+    return body.tooLarge
+      ? { ok: false, response: jsonError("payload_too_large", 413) }
+      : { ok: false, response: jsonError("bad_request", 400) };
   }
   return { ok: true, client: auth.client, userId: auth.userId, body: body.body };
+}
+
+/** Entries a push body claims to carry (a malformed body costs one; its own 400 follows). */
+function pushCost(body: unknown): number {
+  const mutations = (body as { mutations?: unknown } | null)?.mutations;
+  return Array.isArray(mutations) ? Math.max(1, Math.min(mutations.length, SYNC_PUSH_ENTRIES_RULE.limit)) : 1;
+}
+
+function meter(key: string, rule: RateLimitRule, cost: number): Response | null {
+  const result = consumeRateLimit(key, rule, Date.now(), cost);
+  if (result.allowed) {
+    return null;
+  }
+  return Response.json(
+    { error: "rate_limited" },
+    {
+      status: 429,
+      headers: {
+        "Cache-Control": "no-store",
+        "Retry-After": String(Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1000))),
+        "X-RateLimit-Limit": String(result.limit),
+        "X-RateLimit-Remaining": "0",
+        "X-RateLimit-Reset": String(Math.ceil(result.resetAt / 1000))
+      }
+    }
+  );
 }
 
 function isPullShaped(body: unknown): boolean {
@@ -280,7 +318,14 @@ export async function postSync(request: Request): Promise<Response> {
   if (!input.ok) {
     return input.response;
   }
-  return isPullShaped(input.body)
-    ? handlePull(input.client, input.body)
-    : handlePush(input.client, input.userId, input.body);
+  const pull = isPullShaped(input.body);
+  // Metered here, not in the middleware, because only here is the body known.
+  // A push spends one unit per entry it carries; a pull has a bucket of its own.
+  const limited = pull
+    ? meter(`sync:pull:${input.userId}`, SYNC_PULL_RULE, 1)
+    : meter(`sync:push:${input.userId}`, SYNC_PUSH_ENTRIES_RULE, pushCost(input.body));
+  if (limited) {
+    return limited;
+  }
+  return pull ? handlePull(input.client, input.body) : handlePush(input.client, input.userId, input.body);
 }

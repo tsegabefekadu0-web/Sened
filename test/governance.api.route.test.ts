@@ -10,7 +10,13 @@ vi.mock("@supabase/supabase-js", () => ({
 
 import { listCitations } from "@/lib/governance/citations";
 import { GovernanceProviderError } from "@/lib/governance/errors";
-import { createCitationsHandler, createRecommendationsHandler } from "@/lib/governance/routeHandlers";
+import {
+  CITATION_CONFIRMATION_TTL_MS,
+  citationCatalogueVersion,
+  createCitationsHandler,
+  createRecommendationsHandler,
+  resetCitationConfirmationCache
+} from "@/lib/governance/routeHandlers";
 import type { ScholarXivProvider } from "@/lib/governance/scholarxiv";
 import { UnconfiguredScholarXivProvider } from "@/lib/governance/scholarxiv";
 
@@ -44,6 +50,7 @@ function post(body: unknown, headers: Record<string, string> = {}): Request {
 beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://supabase.example.test");
   vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon");
+  resetCitationConfirmationCache();
   mocks.getUser.mockReset();
   mocks.getUser.mockResolvedValue({ data: { user: { id: "u" } }, error: null });
 });
@@ -214,5 +221,58 @@ describe("GET /api/governance/citations", () => {
     const response = await handler(get({ authorization: "Bearer t" }));
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ error: "governance_provider_failed" });
+  });
+});
+
+describe("GET /api/governance/citations caches the upstream confirmations", () => {
+  const ok = { authorization: "Bearer t" };
+
+  it("asks the provider once for many requests inside the TTL, and still checks the session each time", async () => {
+    const provider = configuredProvider();
+    const handler = createCitationsHandler(() => provider, { now: () => 1_000 });
+    expect((await handler(get(ok))).status).toBe(200);
+    expect((await handler(get(ok))).status).toBe(200);
+    expect((await handler(get(ok))).status).toBe(200);
+    expect(provider.confirmCitations).toHaveBeenCalledTimes(1);
+    expect(mocks.getUser).toHaveBeenCalledTimes(3);
+    // The cache is behind the session: no token, no cached answer.
+    expect((await handler(get())).status).toBe(401);
+  });
+
+  it("asks again once the TTL has passed", async () => {
+    const provider = configuredProvider();
+    let now = 0;
+    const handler = createCitationsHandler(() => provider, { now: () => now });
+    await handler(get(ok));
+    now = CITATION_CONFIRMATION_TTL_MS - 1;
+    await handler(get(ok));
+    expect(provider.confirmCitations).toHaveBeenCalledTimes(1);
+    now = CITATION_CONFIRMATION_TTL_MS + 1;
+    await handler(get(ok));
+    expect(provider.confirmCitations).toHaveBeenCalledTimes(2);
+    expect(CITATION_CONFIRMATION_TTL_MS).toBeGreaterThanOrEqual(60 * 60 * 1000);
+  });
+
+  it("shares one upstream fan-out between simultaneous requests", async () => {
+    const provider = configuredProvider();
+    const handler = createCitationsHandler(() => provider);
+    await Promise.all([handler(get(ok)), handler(get(ok)), handler(get(ok))]);
+    expect(provider.confirmCitations).toHaveBeenCalledTimes(1);
+  });
+
+  it("never caches a failure", async () => {
+    const confirmCitations = vi
+      .fn()
+      .mockRejectedValueOnce(new GovernanceProviderError("PROVIDER_TIMEOUT", "scholarxiv-papers", "x"))
+      .mockResolvedValue({ provider: "scholarxiv-papers", collectionId: "c", confirmations: [] });
+    const handler = createCitationsHandler(() => configuredProvider({ confirmCitations }));
+    expect((await handler(get(ok))).status).toBe(504);
+    expect((await handler(get(ok))).status).toBe(200);
+    expect(confirmCitations).toHaveBeenCalledTimes(2);
+  });
+
+  it("is keyed by the catalogue version (a changed catalogue is a different key)", () => {
+    expect(citationCatalogueVersion()).toMatch(/^[0-9a-f]{1,8}$/);
+    expect(citationCatalogueVersion()).toBe(citationCatalogueVersion());
   });
 });

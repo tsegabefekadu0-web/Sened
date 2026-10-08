@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const serverMocks = vi.hoisted(() => ({ getUser: vi.fn(), rpc: vi.fn() }));

@@ -36,6 +36,7 @@ interface WireAccount {
 }
 interface WireGroup {
   readonly groupId?: unknown;
+  readonly name?: unknown;
   readonly role?: unknown;
   readonly accounts?: readonly WireAccount[];
 }
@@ -122,6 +123,8 @@ export type MyGroupRead =
   | {
       readonly status: "ok";
       readonly groupId: string;
+      /** The group's name from the server; empty when it has none. */
+      readonly groupName: string;
       readonly role: string | null;
       readonly accounts: readonly { readonly id: string; readonly code: string }[];
     }
@@ -144,18 +147,17 @@ export interface GroupChoiceOptions {
 /**
  * Pick the group the caller is acting for from the groups the server returned
  * for them: the preferred one when it is among them, the only one when there
- * is exactly one, otherwise nothing (the caller must choose). Never guesses
- * among several, because that is how money lands on the wrong ledger.
+ * is exactly one and no preference was given, otherwise nothing (the caller
+ * must choose). Never guesses among several, and never substitutes another
+ * group for a preferred one that is missing (the caller left it, or the id is
+ * stale): the switcher would say group A while the money posted to group B.
  */
 export function pickGroup<T extends { readonly groupId?: unknown }>(
   groups: readonly T[],
   preferred: string | null | undefined
 ): T | null {
   if (preferred) {
-    const match = groups.find((group) => group.groupId === preferred);
-    if (match) {
-      return match;
-    }
+    return groups.find((group) => group.groupId === preferred) ?? null;
   }
   return groups.length === 1 ? groups[0] : null;
 }
@@ -197,6 +199,7 @@ export async function readMyGroup(
     return {
       status: "ok",
       groupId: group.groupId,
+      groupName: typeof group.name === "string" ? group.name.trim() : "",
       role: typeof group.role === "string" ? group.role : null,
       accounts
     };

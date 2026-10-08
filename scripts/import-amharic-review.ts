@@ -6,8 +6,11 @@
  *
  * Dry-run by default. Only rows with a non-empty `reviewer_amharic` are
  * considered. A row is refused when its key is unknown, its placeholders differ
- * from the English string, it repeats a key, or the text contains a line
- * break. The `en` block is never modified: only the exact string literal of the
+ * from the English string, it repeats a key, the text contains a line break, the
+ * text contains U+FFFD (a lossy copy), the current Amharic has Ethiopic letters
+ * and the reviewer's text has none, or it has more "?" than the current text and
+ * the English (Ethiopic letters replaced by "?" when a file was saved in the
+ * wrong encoding). The `en` block is never modified: only the exact string literal of the
  * matching key inside the `am` block is replaced, everything else is kept
  * byte for byte.
  */
@@ -18,6 +21,7 @@ export type ApplyChange = { key: string; before: string; after: string };
 export type ApplyRefusal = { key: string; reason: string };
 export type ApplyResult = { source: string; changes: ApplyChange[]; refused: ApplyRefusal[]; unchanged: string[] };
 
+const ETHIOPIC = /[ሀ-፿]/;
 const LITERAL = String.raw`"(?:[^"\\\n]|\\.)*"`;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -133,6 +137,20 @@ export function applyReview(source: string, csvText: string): ApplyResult {
       });
       continue;
     }
+    if (proposed.includes(String.fromCharCode(0xfffd))) {
+      refused.push({ key, reason: "contains U+FFFD (the file was saved or copied with a lossy encoding)" });
+      continue;
+    }
+    const current = decode(amLit.literal);
+    if (ETHIOPIC.test(current) && !ETHIOPIC.test(proposed)) {
+      refused.push({ key, reason: "the current Amharic has Ethiopic letters and the reviewer text has none" });
+      continue;
+    }
+    const questionMarks = (text: string) => text.split(String.fromCharCode(63)).length - 1;
+    if (questionMarks(proposed) > Math.max(questionMarks(current), questionMarks(decode(enLit.literal)))) {
+      refused.push({ key, reason: 'has more "?" than the current text and the English: Ethiopic letters replaced by "?"' });
+      continue;
+    }
     edits.push({ key, value: proposed });
   }
 
@@ -150,6 +168,19 @@ export function applyReview(source: string, csvText: string): ApplyResult {
   }
 
   return { source: source.slice(0, amFrom) + amBlock + source.slice(amTo), changes, refused, unchanged };
+}
+
+/**
+ * How many rows of a review CSV already hold a reviewer's work (any of the three
+ * reviewer columns filled). The export refuses to overwrite a file that does.
+ */
+export function filledReviewRows(csvText: string): number {
+  const rows = parseCsv(csvText);
+  const header = rows.shift() ?? [];
+  const columns = ["reviewer_amharic", "reviewer_ok", "reviewer_comment"]
+    .map((name) => header.indexOf(name))
+    .filter((index) => index >= 0);
+  return rows.filter((row) => columns.some((index) => (row[index] ?? "").trim() !== "")).length;
 }
 
 function main() {

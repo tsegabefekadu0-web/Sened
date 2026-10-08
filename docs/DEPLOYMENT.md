@@ -66,7 +66,7 @@ The full, commented list is [`.env.example`](../.env.example). Summary:
 | `LINKS_ET_TIMEOUT_MS` | server | optional (default 5000) | `linkset.ts` | default |
 | `LINKS_ET_ETB_OFFSET_MINUTES` | server | optional (default 180) | `linkset.ts` | default |
 | `LINKS_ET_TIMESTAMP_TOLERANCE_SECONDS` | server | optional (default 900) | `linkset.ts` | default |
-| `RECONCILIATION_CRON_SECRET` | server secret (>= 32 chars) | for the reconciliation drain | `src/lib/banking/reconciliationDrainRoute.ts` | `POST /api/reconciliation/drain` returns 503 and runs nothing |
+| `RECONCILIATION_CRON_SECRET` | server secret (>= 32 chars) | for the reconciliation drain | `src/lib/banking/reconciliationDrainRoute.ts` | `POST /api/reconciliation/drain` returns 401 (like a wrong secret, so the deployment's state is not revealed) and runs nothing |
 | `SUPABASE_SERVICE_ROLE_KEY` | server secret, **service role** | for the reconciliation drain | same | the drain returns 503 `not_configured` |
 | `RECONCILIATION_DRAIN_MAX_JOBS` | server | optional (default 25, max 100) | same | default |
 | `RECONCILIATION_DRAIN_BUDGET_MS` | server | optional (default 20000, 1000-50000) | same | default |
@@ -175,23 +175,37 @@ verifications stay pending forever.
 
 | Variable | Purpose |
 |---|---|
-| `RECONCILIATION_CRON_SECRET` | Shared secret the scheduler sends. At least 32 characters (`openssl rand -base64 32`). Unset or shorter: the route returns 503 and does nothing. |
+| `RECONCILIATION_CRON_SECRET` | Shared secret the scheduler sends. At least 32 characters (`openssl rand -base64 32`). Unset or shorter: the route returns 401 to everyone and does nothing (the server log says why). |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key, **runtime env var only**. The claim/reschedule/finalize RPCs are granted to `service_role` only, and a cron has no user session, so this is the one place the app uses it. It is never sent to the browser and is read only by the drain route. Do not pass it as a build arg. |
 | `RECONCILIATION_DRAIN_MAX_JOBS`, `RECONCILIATION_DRAIN_BUDGET_MS` | Optional per-call bounds (defaults 25 jobs, 20 s). A call stops starting new jobs after the budget; a job already started finishes (worst case: budget plus one provider call, about `LINKS_ET_TIMEOUT_MS`). Keep the budget comfortably under your platform's request timeout. |
 
 Apply `20261001100000_reconciliation_worker_rpcs.sql` first: without it the
 drain cannot read a binding or post to the ledger as the job's owner and every
-job would be rescheduled as unavailable.
+job would be rescheduled as unavailable. Then apply
+`20261014110000_review_hardening.sql`, which replaces the worker's ledger-post
+function with one that also checks the cash leg's direction, the group's own
+income/expense counter-account and the claimed job's lease token (the drain in
+this version sends the token, so deploy the app and this migration together).
 
 ### The request
 
+Do not put the secret on the command line: it would show in `ps`, shell history
+and CI logs. Keep it in a header file that only the scheduler's user can read,
+and let curl read the header from there (`-H @file`, curl 7.55 or later):
+
 ```
-curl -fsS -X POST https://<your-host>/api/reconciliation/drain \
-  -H "Authorization: Bearer $RECONCILIATION_CRON_SECRET"
+# once, as the scheduler's user
+umask 077
+printf 'Authorization: Bearer %s\n' "$RECONCILIATION_CRON_SECRET" > ~/.sened-cron-header
+
+# every call
+curl -fsS -X POST https://<your-host>/api/reconciliation/drain -H @"$HOME/.sened-cron-header"
 ```
 
-Responses: `200` with a JSON summary, `401` wrong or missing secret, `503`
-secret or service-role key not configured, `502` a storage failure mid-run (the
+Responses: `200` with a JSON summary, `401` wrong or missing secret (also when the
+server has no secret configured, so the route does not reveal how the deployment
+is set up), `503` the service-role key is not configured (shown only to a caller
+who authenticated), `502` a storage failure mid-run (the
 body carries the partial summary; the scheduler should alert and retry). All
 responses are `Cache-Control: no-store`. A `200` looks like:
 
@@ -223,7 +237,7 @@ already run: the host's scheduled-jobs feature, a GitHub Actions `schedule`,
 or a crontab on any machine that can reach the app:
 
 ```
-* * * * * curl -fsS -m 60 -X POST https://<your-host>/api/reconciliation/drain -H "Authorization: Bearer $RECONCILIATION_CRON_SECRET" >/dev/null
+* * * * * curl -fsS -m 60 -X POST https://<your-host>/api/reconciliation/drain -H @/home/sened/.sened-cron-header >/dev/null
 ```
 
 Note that the app's per-instance rate limiter allows the route 40 calls per
@@ -260,7 +274,7 @@ non-200s. Remove the schedule with `select cron.unschedule('sened-reconciliation
 
 ### Verify it works
 
-- Without the header: `401`. With `RECONCILIATION_CRON_SECRET` unset on the server: `503`.
+- Without the header: `401`. With `RECONCILIATION_CRON_SECRET` unset on the server: also `401` (the server log names the missing secret).
 - With the secret and an empty queue: `200` with all counts `0`.
 
 ## 6b. Backfilling masked bank references (one-off, after migration `20261008100000`)

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { applyReview, parseCsv } from "../scripts/import-amharic-review";
+import { applyReview, filledReviewRows, parseCsv } from "../scripts/import-amharic-review";
 
 const fixture = readFileSync(resolve(__dirname, "fixtures/i18n-mini.ts"), "utf8");
 const csv = (rows: string[][]) =>
@@ -69,5 +69,48 @@ describe("amharic review import", () => {
     const r = applyReview(fixture, csv([["a.one", "", "ሰላም"]]));
     expect(r.unchanged).toEqual(["a.one"]);
     expect(r.source).toBe(fixture);
+  });
+});
+
+describe("amharic review import: refuses lossy or non-Amharic text", () => {
+  const replacement = String.fromCharCode(0xfffd);
+  const qm = String.fromCharCode(63);
+
+  it("refuses a value containing U+FFFD", () => {
+    const r = applyReview(fixture, csv([["a.one", "", "ሰላ" + replacement + "ም"]]));
+    expect(r.changes).toHaveLength(0);
+    expect(r.refused).toEqual([{ key: "a.one", reason: expect.stringContaining("U+FFFD") }]);
+    expect(r.source).toBe(fixture);
+  });
+
+  it("refuses Ethiopic letters replaced by question marks", () => {
+    const r = applyReview(fixture, csv([["a.one", "", "ሰ" + qm + qm + "ም"]]));
+    expect(r.changes).toHaveLength(0);
+    expect(r.refused[0].reason).toContain(qm);
+    expect(r.source).toBe(fixture);
+  });
+
+  it("accepts a real question mark that the current text or the English already has", () => {
+    const withQuestion = fixture.replace('"b.one": "ተው"', '"b.one": "ተው' + qm + '"');
+    const r = applyReview(withQuestion, csv([["b.one", "", "እሺ" + qm]]));
+    expect(r.refused).toEqual([]);
+    expect(r.changes).toHaveLength(1);
+  });
+
+  it("requires Ethiopic when the current value has it", () => {
+    const r = applyReview(fixture, csv([["a.one", "", "Hello again"]]));
+    expect(r.changes).toHaveLength(0);
+    expect(r.refused[0].reason).toMatch(/Ethiopic/);
+  });
+});
+
+describe("amharic review export guard", () => {
+  const eol = String.fromCharCode(13, 10);
+  const header = "key,english,reviewer_amharic,reviewer_ok,reviewer_comment" + eol;
+
+  it("counts rows that hold a reviewer's work, in any reviewer column", () => {
+    expect(filledReviewRows(header + ["a,A,,,", "b,B,,,"].join(eol) + eol)).toBe(0);
+    expect(filledReviewRows(header + ["a,A,ሰላም,,", "b,B,,yes,", "c,C,,,looks odd", "d,D,,,"].join(eol) + eol)).toBe(3);
+    expect(filledReviewRows(header + 'a,A,"  ",,' + eol)).toBe(0);
   });
 });

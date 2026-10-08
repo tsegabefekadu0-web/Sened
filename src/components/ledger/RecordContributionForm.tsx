@@ -5,6 +5,7 @@ import { AlertCircle, BadgeCheck, HandCoins } from "lucide-react";
 
 import type { AuthedFetchDeps } from "@/lib/auth/authedFetch";
 import { useSession } from "@/lib/auth/useSession";
+import { serverDisagreesWithActiveGroup, shortGroupId } from "@/lib/groups/activeGroup";
 import { useActiveGroupPreference } from "@/lib/groups/useActiveGroup";
 import { createTranslator, type Locale, type MessageKey } from "@/lib/i18n";
 import { attributePayer, type AttributeResult } from "@/lib/ledger/clientAttribution";
@@ -135,7 +136,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
   const t = useMemo(() => createTranslator(locale), [locale]);
   const session = useSession();
   const signedIn = session.status === "signed-in";
-  const { ready: groupReady, groupId: activeGroupId } = useActiveGroupPreference();
+  const { ready: groupReady, groupId: activeGroupId, reload: reloadGroups } = useActiveGroupPreference();
 
   const [context, setContext] = useState<ContributionContext | "loading">("loading");
   const [amount, setAmount] = useState("");
@@ -151,7 +152,12 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
   const [failure, setFailure] = useState<Exclude<PostContributionResult["status"], "created"> | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<MessageKey | null>(null);
+  // A save that finished after the person switched groups: said once, never applied to the new group's form.
+  const [lateResult, setLateResult] = useState<{ readonly group: string; readonly saved: boolean } | null>(null);
 
+  // Bumped whenever the form is (re)pointed at a group. A response that carries an
+  // older value belongs to a form that no longer exists and must not touch this one.
+  const formEpoch = useRef(0);
   const inFlight = useRef(false);
   // One idempotency key (and one timestamp) per distinct attempt: a resubmit of
   // the same values after an unknown outcome sends the identical request, so the
@@ -166,6 +172,12 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
     let active = true;
     setContext("loading");
     // A different group is a different ledger: nothing typed or posted carries over.
+    formEpoch.current += 1;
+    inFlight.current = false;
+    setSubmitting(false);
+    setRetrying(false);
+    setRetryError(null);
+    setLateResult(null);
     attempt.current = null;
     setPayer("");
     setCycleId("");
@@ -175,7 +187,11 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
     setPosted(null);
     setFailure(null);
     void loadContributionContext(deps ?? {}, { groupId: activeGroupId }).then((next) => {
-      if (active) setContext(next);
+      if (!active) return;
+      setContext(next);
+      if (serverDisagreesWithActiveGroup(next as { status: string; groupId?: string }, activeGroupId)) {
+        reloadGroups();
+      }
     });
     return () => {
       active = false;
@@ -243,7 +259,18 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
     }
     setFieldError(null);
 
-    const fingerprint = [ready.groupId, trimmedAmount, date, payer, cycleId, roundNumber ?? ""].join("|");
+    // Everything that is sent is part of the attempt: a changed channel or note is a
+    // different request and must not reuse the key (the server would refuse it as a conflict).
+    const fingerprint = [
+      ready.groupId,
+      trimmedAmount,
+      date,
+      payer,
+      cycleId,
+      roundNumber ?? "",
+      channel,
+      cleanNote ?? ""
+    ].join("|");
     if (attempt.current?.fingerprint !== fingerprint) {
       attempt.current = { fingerprint, key: newContributionIdempotencyKey(), occurredAt: occurredAtFor(date, now) };
     }
@@ -271,12 +298,22 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
     };
     const member = ready.members.find((candidate) => candidate.userId === payer);
 
+    const epoch = formEpoch.current;
+    const groupLabel = ready.groupName || shortGroupId(ready.groupId);
     inFlight.current = true;
     setSubmitting(true);
     setFailure(null);
     setPosted(null);
     setRetryError(null);
+    setLateResult(null);
     const result = await postContribution(request, payerChoice, deps ?? {});
+    if (epoch !== formEpoch.current) {
+      // The person switched groups while this was saving. The money went to the
+      // group it was built for; the form in front of them is another ledger's, so
+      // leave its fields, key and results alone and only say what happened.
+      setLateResult({ group: groupLabel, saved: result.status === "created" });
+      return;
+    }
     inFlight.current = false;
     setSubmitting(false);
 
@@ -308,9 +345,13 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
 
   async function retryAttribution() {
     if (!posted || retrying) return;
+    const epoch = formEpoch.current;
     setRetrying(true);
     setRetryError(null);
     const result = await attributePayer({ groupId: posted.groupId, entryId: posted.entryId, ...posted.payer }, deps ?? {});
+    if (epoch !== formEpoch.current) {
+      return; // the person moved to another group's form: this result is not theirs to see
+    }
     setRetrying(false);
     if (result.status === "ok") {
       setPosted({ ...posted, attribution: { status: "recorded", replayed: result.replayed } });
@@ -364,6 +405,9 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
             </p>
           ) : (
             <form aria-labelledby="record-heading" onSubmit={(event) => void submit(event)} noValidate>
+              <p data-testid="record-target-group" className="mb-5 text-sm font-semibold text-coffee-900">
+                {t("record.targetGroup", { group: context.groupName || shortGroupId(context.groupId) })}
+              </p>
               <div className="grid gap-5 sm:grid-cols-2">
                 <div>
                   <label htmlFor="record-amount" className="text-sm font-bold text-coffee-900">
@@ -577,6 +621,12 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                 >
                   <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
                   {t(FAILURE_MESSAGES[failure])}
+                </p>
+              ) : null}
+
+              {lateResult ? (
+                <p role="status" data-testid="record-late-result" className="mt-4 text-xs font-semibold leading-5 text-inkMuted">
+                  {t(lateResult.saved ? "record.lateSaved" : "record.lateUnknown", { group: lateResult.group })}
                 </p>
               ) : null}
 

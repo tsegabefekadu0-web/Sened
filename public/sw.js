@@ -41,7 +41,14 @@
  * are network-first, so a new worker never pins an old HTML shell, (b) hashed
  * assets are keyed by name, so an old page's chunks and a new page's chunks live
  * side by side in the static cache, and (c) the worker holds no state the page
- * depends on. Bump VERSION to drop every cache this worker owns.
+ * depends on. The cache names carry the BUILD ID the page registered this worker
+ * with (`/sw.js?v=<build id>`, see ServiceWorkerRegistration), so every deploy
+ * gets fresh caches and the previous deploy's are deleted on activate. Nothing
+ * here is bumped by hand.
+ *
+ * The `/offline` page's own chunks live in a separate cache from the general
+ * static cache: the general one is trimmed oldest-first, and a trim must never
+ * be able to evict the chunks the offline desk needs to hydrate with no network.
  *
  * Background Sync is deliberately not used: the page owns the outbox and drains
  * it itself (and when asked via the message below), which works in every
@@ -51,10 +58,18 @@
  * served verbatim from `public/`. Keep it that way.
  */
 
-var VERSION = "sened-v2";
+/* The build id comes from the registration URL; anything unexpected is "dev". */
+function buildIdFromLocation() {
+  var match = /[?&]v=([A-Za-z0-9._-]{1,40})(?:&|$)/.exec(self.location.search || "");
+  return match ? match[1] : "dev";
+}
+
+var CACHE_PREFIX = "sened-";
+var VERSION = CACHE_PREFIX + buildIdFromLocation();
 var SHELL_CACHE = VERSION + "-shell";
 var STATIC_CACHE = VERSION + "-static";
-var CACHE_PREFIX = "sened-";
+/* The /offline document's chunks. Never trimmed. */
+var OFFLINE_ASSET_CACHE = VERSION + "-offline-assets";
 var OFFLINE_URL = "/offline";
 var SHELL_URLS = [OFFLINE_URL, "/manifest.json", "/icons/icon-192.png", "/icons/icon-512.png"];
 var STATIC_PREFIX = "/_next/static/";
@@ -77,7 +92,7 @@ function precacheStaticAssets(html) {
   var unique = found.filter(function (value, index) {
     return found.indexOf(value) === index;
   });
-  return caches.open(STATIC_CACHE).then(function (cache) {
+  return caches.open(OFFLINE_ASSET_CACHE).then(function (cache) {
     return Promise.all(
       unique.map(function (assetUrl) {
         return cache.add(assetUrl).catch(function () {
@@ -130,7 +145,8 @@ self.addEventListener("activate", function (event) {
           keys.map(function (key) {
             // Only touch caches this worker family owns.
             var owned = key.indexOf(CACHE_PREFIX) === 0;
-            return owned && key !== SHELL_CACHE && key !== STATIC_CACHE ? caches.delete(key) : null;
+            var current = key === SHELL_CACHE || key === STATIC_CACHE || key === OFFLINE_ASSET_CACHE;
+            return owned && !current ? caches.delete(key) : null;
           })
         );
       })
@@ -181,9 +197,12 @@ function handleNavigation(request, url) {
     function (response) {
       if (url.pathname.replace(/\/$/, "") === OFFLINE_URL && isCacheable(response)) {
         var copy = response.clone();
+        var forAssets = response.clone();
         caches.open(SHELL_CACHE).then(function (cache) {
           return cache.put(OFFLINE_URL, copy);
         });
+        // Keep the cached document's chunks in step with the document itself.
+        forAssets.text().then(precacheStaticAssets).catch(function () {});
       }
       return response;
     },
@@ -201,6 +220,15 @@ function handleNavigation(request, url) {
 }
 
 function handleStatic(request) {
+  // The offline desk's own chunks first: they are pinned and never trimmed.
+  return caches.open(OFFLINE_ASSET_CACHE).then(function (pinned) {
+    return pinned.match(request);
+  }).then(function (pinnedHit) {
+    return pinnedHit || handleGeneralStatic(request);
+  });
+}
+
+function handleGeneralStatic(request) {
   return caches.open(STATIC_CACHE).then(function (cache) {
     return cache.match(request).then(function (cached) {
       if (cached) {

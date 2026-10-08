@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { isMaskedReference } from "../banking/referenceMask";
 import { LedgerError } from "./errors";
-import { formatEtbAmount } from "./money";
+import { formatEtbAmount, toEtbMinorUnits } from "./money";
 import { isContributionChannel, type ContributionChannel } from "./paymentChannel";
 import { isUuid } from "./rules";
 import {
@@ -541,6 +541,9 @@ async function readAttributions(
   return found;
 }
 
+/** Entries whose postings are fetched per request. */
+const POSTING_FETCH_CHUNK = 25;
+
 /** Fetch the postings, provenance and attribution for already-read entry rows and join them on. */
 async function attachPostings(
   client: SupabaseClient,
@@ -548,23 +551,27 @@ async function attachPostings(
   rows: readonly unknown[]
 ): Promise<readonly PublicLedgerEntry[]> {
   const entryIds = rows.map((row) => uuid(isRecord(row) ? row : {}, "id"));
-  const postings = await client
-    .from("ledger_entry_postings")
-    .select(POSTING_COLUMNS)
-    .eq("group_id", groupId)
-    .in("entry_id", entryIds)
-    .order("ordinal", { ascending: true });
-  if (postings.error) {
-    throw storageFailure(postings.error);
-  }
-  if (!Array.isArray(postings.data)) {
-    throw integrity("Ledger read returned an invalid posting list");
-  }
-
+  // Postings are read a few entries at a time: one request for a whole page can
+  // exceed the API's row cap (an entry may carry many postings), and a silently
+  // truncated list would look like a short entry.
   const byEntry = new Map<string, PublicLedgerPosting[]>();
-  for (const raw of postings.data) {
-    const { entryId, ...posting } = parsePosting(raw);
-    byEntry.set(entryId, [...(byEntry.get(entryId) ?? []), posting]);
+  for (let offset = 0; offset < entryIds.length; offset += POSTING_FETCH_CHUNK) {
+    const postings = await client
+      .from("ledger_entry_postings")
+      .select(POSTING_COLUMNS)
+      .eq("group_id", groupId)
+      .in("entry_id", entryIds.slice(offset, offset + POSTING_FETCH_CHUNK))
+      .order("ordinal", { ascending: true });
+    if (postings.error) {
+      throw storageFailure(postings.error);
+    }
+    if (!Array.isArray(postings.data)) {
+      throw integrity("Ledger read returned an invalid posting list");
+    }
+    for (const raw of postings.data) {
+      const { entryId, ...posting } = parsePosting(raw);
+      byEntry.set(entryId, [...(byEntry.get(entryId) ?? []), posting]);
+    }
   }
   const plainRows = rows.map((row) => (isRecord(row) ? row : {}));
   const provenance = await readProvenance(client, groupId, plainRows);
@@ -574,6 +581,16 @@ async function attachPostings(
     const entryPostings = byEntry.get(parsed.id);
     if (!entryPostings || entryPostings.length === 0) {
       throw integrity("Ledger entry has no postings");
+    }
+    // A posted entry always balances. If it does not here, postings were lost on
+    // the way (a row cap, a partial read): refuse rather than return a short entry.
+    let net = 0n;
+    for (const posting of entryPostings) {
+      const units = toEtbMinorUnits(posting.amount);
+      net += posting.direction === "debit" ? units : -units;
+    }
+    if (net !== 0n) {
+      throw integrity("Ledger entry postings do not balance");
     }
     return {
       ...parsed,

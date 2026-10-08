@@ -22,9 +22,10 @@ test-results
 
 # Local environment. A `.env.local` on a developer machine is the single most
 # dangerous thing to bake into an image, and the build stage must not read it.
-.env
-.env.local
-.env.*.local
+# `.env*` catches every variant (.env.production, .env.staging, .env.development.local
+# ...), which the three names listed before it did not. Only the template is let back in.
+.env*
+!.env.example
 
 # Developer scratch
 test-results

@@ -8,6 +8,7 @@ import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
 import { useSession } from "@/lib/auth/useSession";
 import { useActiveGroup } from "@/lib/groups/useActiveGroup";
 import { readMyGroup } from "@/lib/ledger/clientRead";
+import { serverDisagreesWithActiveGroup, shortGroupId } from "@/lib/groups/activeGroup";
 import { loadPayerChoices, type PayerChoices } from "@/lib/ledger/clientContribution";
 import { readCachedPayerChoices, writeCachedPayerChoices } from "@/lib/ledger/payerChoiceCache";
 import { attributionFromPayload } from "@/lib/db/attribution";
@@ -79,6 +80,7 @@ type GroupState =
   | {
       readonly status: "ready";
       readonly groupId: string;
+      readonly groupName: string;
       readonly role: string | null;
       readonly cashAccountId: string | null;
       readonly incomeAccountId: string | null;
@@ -86,6 +88,7 @@ type GroupState =
   | { readonly status: "no-group" | "choose-group" | "unresolved" };
 
 interface CachedGroup {
+  readonly name?: string;
   readonly role: string | null;
   readonly cashAccountId: string | null;
   readonly incomeAccountId: string | null;
@@ -133,6 +136,7 @@ function readCachedGroup(email: string | null, preferredGroupId: string | null):
   return {
     status: "ready",
     groupId,
+    groupName: typeof value.name === "string" ? value.name : "",
     role: typeof value.role === "string" ? value.role : null,
     cashAccountId: typeof value.cashAccountId === "string" ? value.cashAccountId : null,
     incomeAccountId: typeof value.incomeAccountId === "string" ? value.incomeAccountId : null
@@ -145,10 +149,13 @@ function writeCachedGroup(email: string | null, group: Extract<GroupState, { sta
   }
   try {
     const previous = readGroupCache(email);
-    const { groupId, role, cashAccountId, incomeAccountId } = group;
+    const { groupId, groupName, role, cashAccountId, incomeAccountId } = group;
     window.localStorage.setItem(
       GROUP_CACHE_KEY,
-      JSON.stringify({ email, groups: { ...(previous?.groups ?? {}), [groupId]: { role, cashAccountId, incomeAccountId } } })
+      JSON.stringify({
+        email,
+        groups: { ...(previous?.groups ?? {}), [groupId]: { name: groupName, role, cashAccountId, incomeAccountId } }
+      })
     );
   } catch {
     // Best effort.
@@ -169,6 +176,36 @@ const CONTRIBUTION_CHANNEL_LABEL_KEYS: Readonly<Record<ContributionChannel, Mess
 const ENTRY_TYPES = ["contribution", "disbursement", "journal"] as const;
 
 type Connectivity = "online" | "offline" | "unknown";
+
+interface StrandedGroup {
+  readonly groupId: string;
+  readonly count: number;
+}
+
+function StrandedDraftsPanel({ stranded, t }: { readonly stranded: readonly StrandedGroup[]; readonly t: TFn }) {
+  if (stranded.length === 0) {
+    return null;
+  }
+  return (
+    <section
+      aria-labelledby="offline-stranded-heading"
+      data-testid="stranded-drafts"
+      className="rounded-2xl border border-offline-rejected/60 bg-offline-raised p-5"
+    >
+      <h2 id="offline-stranded-heading" className="text-lg font-semibold">
+        {t("offline.stranded.title")}
+      </h2>
+      <p className="mt-2 text-sm text-offline-quiet">{t("offline.stranded.body")}</p>
+      <ul className="mt-3 flex flex-col gap-1 text-sm">
+        {stranded.map((entry) => (
+          <li key={entry.groupId} data-testid="stranded-group">
+            {t("offline.stranded.group", { group: shortGroupId(entry.groupId), count: entry.count })}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 interface DeskState {
   readonly roster: readonly RosterMemberRow[];
@@ -264,6 +301,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
   const groupReady = !activeGroup.provided || activeGroup.status !== "loading";
   const activeGroupId = activeGroup.activeGroupId;
   const needsChoice = activeGroup.needsChoice;
+  const reloadGroups = activeGroup.reload;
 
   useEffect(() => {
     if (!accessToken) {
@@ -284,14 +322,23 @@ export function OfflineConsole(props: OfflineConsoleProps) {
         const ready = {
           status: "ready" as const,
           groupId: read.groupId,
+          groupName: read.groupName,
           role: read.role,
           cashAccountId: accountByCode.get("POT_CASH") ?? null,
           incomeAccountId: accountByCode.get("CONTRIBUTION_INCOME") ?? null
         };
         writeCachedGroup(email, ready);
         setGroup(ready);
+        // The server resolved a group the switcher does not show: re-read the groups.
+        if (serverDisagreesWithActiveGroup(read, activeGroupId)) {
+          reloadGroups();
+        }
       } else if (read.status === "no-group" || read.status === "choose-group") {
         setGroup({ status: read.status });
+        // The remembered group is gone or none is chosen: make the switcher say so too.
+        if (serverDisagreesWithActiveGroup(read, activeGroupId)) {
+          reloadGroups();
+        }
       } else {
         // Could not look (offline, 401, 5xx). The group this account chose and
         // resolved before is still its group; with several and none chosen, or
@@ -304,11 +351,44 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     return () => {
       active = false;
     };
-    // `needsChoice` only matters inside the failure branch of a read this effect already made.
+    // `needsChoice` only matters inside the failure branch of a read this effect already made;
+    // `reloadGroups` is stable for the life of the store.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken, email, groupReady, activeGroupId]);
 
   const GROUP_ID = group.status === "ready" ? group.groupId : LOCAL_GROUP_ID;
+
+  // Drafts saved under a group this account is no longer in. The desk lists only the
+  // active group's drafts and the server refuses a group the caller has left, so they
+  // would sit on the device unseen. Only judged against a list read from the server.
+  const [stranded, setStranded] = useState<readonly StrandedGroup[]>([]);
+  const knownGroupIds = activeGroup.groups.map((option) => option.groupId).join(",");
+  const groupsAreCurrent = activeGroup.provided && activeGroup.status === "ready" && !activeGroup.stale;
+  useEffect(() => {
+    if (!db || !groupsAreCurrent) {
+      setStranded([]);
+      return;
+    }
+    let live = true;
+    const known = new Set(knownGroupIds.split(",").filter((id) => id !== ""));
+    void listDraftsWithQueueState(db)
+      .then((all) => {
+        if (!live) return;
+        const counts = new Map<string, number>();
+        for (const { draft, outbox } of all) {
+          const groupId = draft.groupId;
+          if (known.has(groupId) || groupId === LOCAL_GROUP_ID || outbox?.state === "synced") continue;
+          counts.set(groupId, (counts.get(groupId) ?? 0) + 1);
+        }
+        setStranded([...counts].map(([groupId, count]) => ({ groupId, count })));
+      })
+      .catch(() => {
+        // A closed database: nothing to report this time.
+      });
+    return () => {
+      live = false;
+    };
+  }, [db, groupsAreCurrent, knownGroupIds, desk.drafts]);
 
   // The members and cycles a treasurer can name as a payer on a draft. Read from
   // the server when the device is online and cached per group, so a draft can still
@@ -875,7 +955,13 @@ export function OfflineConsole(props: OfflineConsoleProps) {
 
         <RosterPanel desk={desk} t={t} onRecord={recordNote} />
         <NotesPanel notes={desk.notes} t={t} onDelete={deleteNote} />
+        <StrandedDraftsPanel stranded={stranded} t={t} />
         <DraftsPanel
+          groupLabel={
+            group.status === "ready"
+              ? (activeGroup.active?.name || group.groupName || shortGroupId(group.groupId))
+              : null
+          }
           desk={desk}
           t={t}
           onRecord={recordDraft}
@@ -1089,8 +1175,11 @@ function DraftsPanel({
   connectivity,
   busy,
   defaultCashAccountId,
-  defaultIncomeAccountId
+  defaultIncomeAccountId,
+  groupLabel
 }: {
+  /** The group a new draft will be recorded to, so nobody queues money for the wrong ledger. */
+  readonly groupLabel: string | null;
   readonly defaultCashAccountId: string | null;
   readonly defaultIncomeAccountId: string | null;
   readonly desk: DeskState;
@@ -1314,6 +1403,11 @@ function DraftsPanel({
           submit(true);
         }}
       >
+        {groupLabel ? (
+          <p data-testid="draft-target-group" className="text-xs font-semibold">
+            {t("offline.drafts.targetGroup", { group: groupLabel })}
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-3">
           <label className="flex flex-1 flex-col gap-1 text-xs">
             <span className="text-offline-quiet">{t("offline.drafts.amountLabel")}</span>

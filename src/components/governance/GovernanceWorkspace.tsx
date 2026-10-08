@@ -30,7 +30,7 @@ export function GovernanceWorkspace() {
             type="button"
             onClick={() => setLocale((value) => (value === "am" ? "en" : "am"))}
             aria-pressed={locale === "en"}
-            aria-label={locale === "am" ? "Switch to English" : "Switch to Amharic"}
+            aria-label={locale === "am" ? t("shell.switchToEnglish") : t("shell.switchToAmharic")}
             className="min-h-9 rounded-xl border border-[#453630] px-3 font-sans text-[11px] font-semibold tracking-wide text-[#EBE2D8] transition-colors hover:border-[#D4A244] active:scale-95"
           >
             {locale === "am" ? "EN" : "አማ"}

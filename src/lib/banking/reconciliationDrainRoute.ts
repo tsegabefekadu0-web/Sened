@@ -11,8 +11,11 @@ import { drainReconciliationQueue, type ReconciliationCoordinator } from "./reco
  * AUTH. This is not a user route. It is called by a cron with a dedicated
  * shared secret (`RECONCILIATION_CRON_SECRET`, `Authorization: Bearer ...`).
  * The secret is read per request, compared in constant time, and the route
- * fails closed: no (or a too-short) secret configured is 503 and nothing runs;
- * a missing or wrong one is 401. A user's Supabase JWT is not accepted here.
+ * fails closed: a missing or wrong secret is 401, and so is the same call when the
+ * server has no (or a too-short) secret configured, so an unauthenticated caller
+ * cannot tell whether the deployment is set up (the operator sees it in the log).
+ * The 503 `not_configured` is only ever shown to a caller who authenticated, when
+ * the service-role credentials are missing. A user's Supabase JWT is not accepted here.
  *
  * DATABASE ROLE. The queue RPCs (`claim`/`reschedule`/`finalize`) are granted
  * to `service_role` only, so the drain needs the service-role key
@@ -114,12 +117,16 @@ export function createDrainHandler(
   const nowMs = dependencies.nowMs ?? (() => Date.now());
 
   return async function post(request: Request): Promise<Response> {
+    // Authenticate first, and answer an unauthenticated caller the same way
+    // whether or not the secret is configured: "not configured" is a fact about
+    // the deployment that only the scheduler holding the secret may learn.
     const expected = process.env.RECONCILIATION_CRON_SECRET?.trim();
-    if (!expected || expected.length < MIN_SECRET_LENGTH) {
-      return jsonResponse({ error: "not_configured" }, 503);
-    }
     const presented = bearerToken(request);
-    if (!presented || !secretsMatch(presented, expected)) {
+    if (!presented || !expected || expected.length < MIN_SECRET_LENGTH || !secretsMatch(presented, expected)) {
+      if (presented && (!expected || expected.length < MIN_SECRET_LENGTH)) {
+        // Visible to the operator in the server log, never to the caller.
+        console.error("reconciliation drain: RECONCILIATION_CRON_SECRET is missing or shorter than 32 characters");
+      }
       return jsonResponse({ error: "unauthorized" }, 401, { "WWW-Authenticate": "Bearer" });
     }
 

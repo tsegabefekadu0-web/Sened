@@ -206,6 +206,8 @@ export type ContributionContext =
   | {
       readonly status: "ready";
       readonly groupId: string;
+      /** The group's name, so the form can say which ledger it records to; empty when unnamed. */
+      readonly groupName: string;
       readonly cashAccountId: string;
       readonly incomeAccountId: string;
       readonly members: readonly PayerMemberChoice[];
@@ -288,6 +290,7 @@ export async function loadContributionContext(
     return {
       status: "ready",
       groupId: mine.groupId,
+      groupName: mine.groupName,
       cashAccountId,
       incomeAccountId,
       members: choices.members,

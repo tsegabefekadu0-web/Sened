@@ -118,6 +118,12 @@ function emptyDrainReport(): DrainReport {
   };
 }
 
+/**
+ * The most entries one pull asks for. The server refuses more
+ * (`SYNC_PULL_MAX_LIMIT` in `src/lib/validation.ts`; a test keeps the two equal).
+ */
+export const SYNC_PULL_PAGE_LIMIT = 100;
+
 function count(outcomes: readonly DrainOutcome[], state: DrainOutcome["state"]): number {
   return outcomes.filter((outcome) => outcome.state === state).length;
 }
@@ -439,7 +445,7 @@ export class OfflineSyncEngine {
     options: { readonly groupId: string; readonly limit?: number }
   ): Promise<PullReport> {
     const groupId = options.groupId;
-    const limit = options.limit ?? 200;
+    const limit = Math.min(options.limit ?? 100, SYNC_PULL_PAGE_LIMIT);
     const base: PullReport = {
       groupId,
       fetched: 0,

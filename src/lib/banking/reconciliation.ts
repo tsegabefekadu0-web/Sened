@@ -98,7 +98,8 @@ export class ReconciliationCoordinator {
     private readonly store: ReconciliationJobStore,
     private readonly verifier: {
       verifyIntent(
-        intent: BankVerificationIntent
+        intent: BankVerificationIntent,
+        context?: { readonly leaseToken?: string }
       ): Promise<ReconciliationCoordinatorOutcome>;
     },
     private readonly clock: () => Date = () => new Date(),
@@ -134,7 +135,7 @@ export class ReconciliationCoordinator {
     }
     let outcome: ReconciliationCoordinatorOutcome;
     try {
-      outcome = await this.verifier.verifyIntent(claim.intent);
+      outcome = await this.verifier.verifyIntent(claim.intent, { leaseToken: claim.job.leaseToken });
     } catch {
       outcome = {
         state: "PENDING_RECONCILIATION",

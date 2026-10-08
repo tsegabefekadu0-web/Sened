@@ -730,3 +730,67 @@ describe("offline console — several groups", () => {
     expect(await db.drafts.count()).toBe(0);
   });
 });
+
+describe("offline console - target group and stranded drafts", () => {
+  const G1 = "77777777-7777-4777-8777-777777777771";
+  const G2 = "77777777-7777-4777-8777-777777777772";
+  const LEFT = "77777777-7777-4777-8777-777777777779";
+  const SESSION = { status: "signed-in", accessToken: "tok", email: "t@example.com", userId: "u1" };
+  const wire = (ids: string[]) => ({
+    groups: ids.map((groupId) => ({
+      groupId,
+      role: "treasurer",
+      accounts: [
+        { id: "88888888-8888-4888-8888-888888888811", code: "POT_CASH" },
+        { id: "88888888-8888-4888-8888-888888888812", code: "CONTRIBUTION_INCOME" }
+      ]
+    }))
+  });
+  const options = (ids: string[]): FetchedGroups => ({
+    kind: "ok",
+    userId: "u1",
+    groups: ids.map((groupId, index) => ({ groupId, name: index === 0 ? "Bole Equb" : "Family Iddir", role: "treasurer" as const }))
+  });
+
+  beforeEach(() => {
+    hoisted.session = SESSION as never;
+    window.localStorage.clear();
+  });
+
+  function mount(ids: string[]) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => (url === "/api/my-groups" ? Response.json(wire(ids)) : Response.json({ results: [] })))
+    );
+    return render(
+      <ActiveGroupProvider fetchGroups={async () => options(ids)} storage={window.localStorage}>
+        <OfflineConsole database={db} />
+      </ActiveGroupProvider>
+    );
+  }
+
+  it("names the group a new draft will be recorded to", async () => {
+    mount([G1]);
+    expect(await screen.findByTestId("draft-target-group")).toHaveTextContent(
+      offlineCopy("en", "offline.drafts.targetGroup", { group: "Bole Equb" })
+    );
+  });
+
+  it("surfaces unsent drafts that belong to a group the user has left, and not the ones in their groups", async () => {
+    await saveDraft(db, { request: { ...contributionRequest("15.00", "stranded-1"), groupId: LEFT }, updatedBy: ACTOR_ID });
+    await saveDraft(db, { request: { ...contributionRequest("16.00", "mine-1"), groupId: G1 }, updatedBy: ACTOR_ID });
+    mount([G1]);
+    const panel = await screen.findByTestId("stranded-drafts");
+    expect(within(panel).getByRole("heading")).toHaveTextContent(OFFLINE_COPY["offline.stranded.title"].en);
+    const rows = within(panel).getAllByTestId("stranded-group");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent(offlineCopy("en", "offline.stranded.group", { group: LEFT.replace(/-/g, "").slice(0, 8), count: 1 }));
+  });
+
+  it("shows no stranded panel when every draft is in one of the user's groups", async () => {
+    await saveDraft(db, { request: { ...contributionRequest("16.00", "mine-2"), groupId: G1 }, updatedBy: ACTOR_ID });
+    mount([G1]);
+    await screen.findByTestId("draft-target-group");
+    expect(screen.queryByTestId("stranded-drafts")).toBeNull();
+  });
+});

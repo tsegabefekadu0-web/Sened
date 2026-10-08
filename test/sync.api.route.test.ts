@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type Result = { data: unknown; error: unknown };
@@ -23,6 +24,9 @@ vi.mock("@supabase/supabase-js", () => ({
 import { POST as POST_SYNC } from "@/app/api/sync/route";
 import { buildLedgerEntry, type LedgerEntryRequest } from "@/lib/ledger";
 import { HttpSyncTransport } from "@/lib/offline/transport";
+import { SYNC_PULL_RULE, SYNC_PUSH_ENTRIES_RULE, resetRateLimits } from "@/lib/rateLimit";
+import { SYNC_PULL_MAX_LIMIT, SYNC_PUSH_MAX_BATCH } from "@/lib/validation";
+import { SYNC_PULL_PAGE_LIMIT } from "@/lib/offline/engine";
 import type { SyncPushEnvelope } from "@/lib/offline/contract";
 
 const actorId = "11111111-1111-4111-8111-111111111111";
@@ -174,6 +178,7 @@ beforeEach(() => {
   mocks.getUser.mockReset().mockResolvedValue({ data: { user: { id: actorId } }, error: null });
   mocks.rpc.mockReset().mockResolvedValue({ data: [], error: null });
   mocks.calls.length = 0;
+  resetRateLimits();
   mocks.from.mockReset().mockImplementation((table: string) => builder(table));
   setChain([1, 2, 3]);
 });
@@ -197,7 +202,7 @@ describe("POST /api/sync — push", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
-  it("400s on a non-JSON content type and an oversized body", async () => {
+  it("400s on a non-JSON content type and 413s an oversized body", async () => {
     const wrongType = new Request("http://localhost/api/sync", {
       method: "POST",
       headers: { "content-type": "text/plain", authorization: "Bearer token" },
@@ -205,7 +210,16 @@ describe("POST /api/sync — push", () => {
     });
     expect((await POST_SYNC(wrongType)).status).toBe(400);
     const huge = post(POST_SYNC, { mutations: [], pad: "x".repeat(300_000) });
-    expect((await POST_SYNC(huge)).status).toBe(400);
+    const tooBig = await POST_SYNC(huge);
+    expect(tooBig.status).toBe(413);
+    expect(await tooBig.json()).toEqual({ error: "payload_too_large" });
+    // A declared length over the cap is refused before the body is read.
+    const declared = new Request("http://localhost/api/sync", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer token", "content-length": "999999" },
+      body: "{}"
+    });
+    expect((await POST_SYNC(declared)).status).toBe(413);
   });
 
   it("503s when auth is unavailable", async () => {
@@ -318,7 +332,7 @@ describe("POST /api/sync — push", () => {
 });
 
 describe("POST /api/sync — pull", () => {
-  const pullBody = { groupId, sinceSequence: "0", limit: 200 };
+  const pullBody = { groupId, sinceSequence: "0", limit: 100 };
 
   it("401s without a token and 400s on a bad body", async () => {
     expect((await POST_SYNC(post(POST_SYNC, pullBody, ""))).status).toBe(401);
@@ -326,7 +340,8 @@ describe("POST /api/sync — pull", () => {
       { ...pullBody, sinceSequence: "-1" },
       { ...pullBody, sinceSequence: 0 },
       { ...pullBody, limit: 0 },
-      { ...pullBody, limit: 501 },
+      { ...pullBody, limit: 101 },
+      { ...pullBody, limit: 500 },
       { ...pullBody, extra: true },
       { groupId: "nope", sinceSequence: "0", limit: 1 },
       { sinceSequence: "0", limit: 1 }
@@ -495,7 +510,7 @@ describe("the real client transport against the real handler", () => {
     const second = await t.push("Bearer token", [batch[0]!]);
     expect(second[0]).toMatchObject({ outcome: "REPLAYED", serverEntryId: first[0]?.serverEntryId });
 
-    const pulled = await t.pull("Bearer token", { groupId, sinceSequence: "0", limit: 200 });
+    const pulled = await t.pull("Bearer token", { groupId, sinceSequence: "0", limit: 100 });
     expect(pulled.head).toEqual({ groupId, tenantId, lastSequence: "3", lastHash: hashOf(3) });
     expect(pulled.entries.map((e) => e.sequence)).toEqual(["1", "2", "3"]);
     expect(pulled.hasMore).toBe(false);
@@ -506,5 +521,79 @@ describe("the real client transport against the real handler", () => {
     await expect(transport().push("Bearer stale", [envelope("m1", draft("k-1")) as SyncPushEnvelope])).rejects.toMatchObject({
       code: "SYNC_UNAUTHENTICATED"
     });
+  });
+});
+
+describe("POST /api/sync - metering", () => {
+  const manyEnvelopes = (count: number, prefix: string) =>
+    Array.from({ length: count }, (_, index) => envelope(`${prefix}-${index}`, draft(`${prefix}-key-${index}`)));
+  const fullBatches = SYNC_PUSH_ENTRIES_RULE.limit / SYNC_PUSH_MAX_BATCH;
+
+  it("charges a push by the entries it carries, so one token cannot push 1000 entries a minute", async () => {
+    installFakeLedger();
+    expect(SYNC_PUSH_MAX_BATCH).toBe(25);
+    for (let batch = 0; batch < fullBatches; batch += 1) {
+      const ok = await POST_SYNC(post(POST_SYNC, { mutations: manyEnvelopes(SYNC_PUSH_MAX_BATCH, `b${batch}`) }));
+      expect(ok.status).toBe(200);
+    }
+    const refused = await POST_SYNC(post(POST_SYNC, { mutations: manyEnvelopes(SYNC_PUSH_MAX_BATCH, "late") }));
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    expect(await refused.json()).toEqual({ error: "rate_limited" });
+    const posted = mocks.rpc.mock.calls.filter(([name]) => name === "post_ledger_entry_v1").length;
+    expect(posted).toBe(SYNC_PUSH_ENTRIES_RULE.limit);
+  });
+
+  it("a single-entry push costs one unit", async () => {
+    installFakeLedger();
+    for (let call = 0; call < SYNC_PUSH_ENTRIES_RULE.limit; call += 1) {
+      expect((await POST_SYNC(post(POST_SYNC, { mutations: [envelope(`s-${call}`, draft(`s-key-${call}`))] }))).status).toBe(200);
+    }
+    expect((await POST_SYNC(post(POST_SYNC, { mutations: [envelope("s-over", draft("s-key-over"))] }))).status).toBe(429);
+  });
+
+  it("gives pulls a bucket of their own: an exhausted push budget does not stop a pull", async () => {
+    installFakeLedger();
+    for (let batch = 0; batch < fullBatches; batch += 1) {
+      await POST_SYNC(post(POST_SYNC, { mutations: manyEnvelopes(SYNC_PUSH_MAX_BATCH, `p${batch}`) }));
+    }
+    expect((await POST_SYNC(post(POST_SYNC, { mutations: manyEnvelopes(1, "x") }))).status).toBe(429);
+    const pulled = await POST_SYNC(post(POST_SYNC, { groupId, sinceSequence: "0", limit: 10 }));
+    expect(pulled.status).toBe(200);
+  });
+
+  it("throttles pulls on their own limit, and keeps users apart", async () => {
+    const pullOnce = (bearer: string) => POST_SYNC(post(POST_SYNC, { groupId, sinceSequence: "0", limit: 1 }, bearer));
+    let last: Response | null = null;
+    for (let call = 0; call <= SYNC_PULL_RULE.limit; call += 1) {
+      last = await pullOnce("token");
+    }
+    expect(last?.status).toBe(429);
+    mocks.getUser.mockResolvedValue({ data: { user: { id: "88888888-8888-4888-8888-888888888888" } }, error: null });
+    expect((await pullOnce("other-token")).status).toBe(200);
+  });
+});
+
+describe("POST /api/sync - pull page size and integrity", () => {
+  it("caps a pull page at 100 entries, and the client page limit is the same number", async () => {
+    expect(SYNC_PULL_MAX_LIMIT).toBe(100);
+    expect(SYNC_PULL_PAGE_LIMIT).toBe(SYNC_PULL_MAX_LIMIT);
+    expect((await POST_SYNC(post(POST_SYNC, { groupId, sinceSequence: "0", limit: 100 }))).status).toBe(200);
+    expect((await POST_SYNC(post(POST_SYNC, { groupId, sinceSequence: "0", limit: 101 }))).status).toBe(400);
+  });
+
+  it("refuses an entry whose postings do not balance (truncated postings cannot pass silently)", async () => {
+    const rest = postingRows([1, 2, 3]).slice(1);
+    mocks.results.ledger_entry_postings = { data: rest, error: null };
+    const response = await POST_SYNC(post(POST_SYNC, { groupId, sinceSequence: "0", limit: 100 }));
+    expect(response.status).toBe(502);
+  });
+
+  it("treats attribution null like the entries route does (a malformed request), not as no payer", async () => {
+    installFakeLedger();
+    const withNull = { ...envelope("m-null", draft("k-null")), payload: { ...draft("k-null"), attribution: null } };
+    const { results } = await (await POST_SYNC(post(POST_SYNC, { mutations: [withNull] }))).json();
+    expect(results[0]).toMatchObject({ mutationId: "m-null", outcome: "REJECTED", error: "invalid_request" });
+    expect(mocks.rpc.mock.calls.filter(([name]) => name === "post_ledger_entry_v1")).toHaveLength(0);
   });
 });

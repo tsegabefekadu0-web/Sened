@@ -355,6 +355,11 @@ test.describe("the mic dock records a spoken contribution for real", () => {
   }) => {
     await page.goto("/");
 
+    // The reference rows only render once the session has resolved to signed-out
+    // (until then the page is in its "loading" state with no feed). The sample
+    // notice is shown in exactly that state, so waiting on it is the real signal
+    // that hydration finished; counting earlier reads 0 and races the sample rows.
+    await expect(page.getByText(/የናሙና መረጃ — ይህ የቡድንዎ መዝገብ አይደለም/)).toBeVisible();
     const before = await page.getByText("በመጠባበቅ ላይ").count();
 
     // The mic dock opens the modal.

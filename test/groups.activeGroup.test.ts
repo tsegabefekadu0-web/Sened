@@ -6,6 +6,7 @@ import {
   parseGroupOptions,
   readRemembered,
   resolveActiveGroupId,
+  serverDisagreesWithActiveGroup,
   writeRemembered,
   type FetchedGroups,
   type GroupOption
@@ -254,5 +255,43 @@ describe("ActiveGroupStore", () => {
     expect(store.getState().activeGroupId).toBe(B);
     store.setIdentity(null);
     expect(clearRemembered("u1", broken)).toBeUndefined();
+  });
+});
+
+describe("review fixes: payer cache and server disagreement", () => {
+  it("clears the cached payer lists on sign-out and when the account changes", async () => {
+    window.localStorage.setItem("sened.payers.v1", JSON.stringify({ [A]: { members: [], cycles: [] } }));
+    const { store } = makeStore([ok([GA])]);
+    store.setIdentity("alice", "u1");
+    await settled(store);
+    expect(window.localStorage.getItem("sened.payers.v1")).not.toBeNull();
+    store.setIdentity(null);
+    expect(window.localStorage.getItem("sened.payers.v1")).toBeNull();
+
+    window.localStorage.setItem("sened.payers.v1", "{}");
+    const second = makeStore([ok([GA]), ok([GB], "u2")]).store;
+    second.setIdentity("alice", "u1");
+    await settled(second);
+    second.setIdentity("bob", "u2");
+    expect(window.localStorage.getItem("sened.payers.v1")).toBeNull();
+  });
+
+  it("serverDisagreesWithActiveGroup is true for choose-group and for a different resolved group", () => {
+    expect(serverDisagreesWithActiveGroup({ status: "choose-group" }, A)).toBe(true);
+    expect(serverDisagreesWithActiveGroup({ status: "ready", groupId: B }, A)).toBe(true);
+    expect(serverDisagreesWithActiveGroup({ status: "ready", groupId: A }, A)).toBe(false);
+    expect(serverDisagreesWithActiveGroup({ status: "ok", groupId: A }, null)).toBe(true);
+    expect(serverDisagreesWithActiveGroup({ status: "error" }, A)).toBe(false);
+  });
+
+  it("reload re-reads the groups and drops a group the user has left", async () => {
+    const { store, fetchGroups } = makeStore([ok([GA, GB]), ok([GA])]);
+    store.setIdentity("alice", "u1");
+    await settled(store);
+    store.select(B);
+    expect(store.getState().activeGroupId).toBe(B);
+    store.reload();
+    await vi.waitFor(() => expect(fetchGroups).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(store.getState().activeGroupId).toBe(A));
   });
 });

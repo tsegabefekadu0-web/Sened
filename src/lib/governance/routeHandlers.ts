@@ -5,7 +5,7 @@ import { governanceRecommendationRequestSchema, parse } from "@/lib/validation";
 import { listCitations } from "./citations";
 import { recommendGovernance } from "./engine";
 import { isGovernanceError, isGovernanceProviderError, retryAfterHeader } from "./errors";
-import type { ScholarXivProvider } from "./scholarxiv";
+import type { CitationCheckResult, ScholarXivProvider } from "./scholarxiv";
 
 /**
  * Route handlers for `/api/governance/**` (M5).
@@ -27,6 +27,66 @@ import type { ScholarXivProvider } from "./scholarxiv";
 const MAX_BODY_BYTES = 4_096;
 
 export type ScholarXivProviderFactory = () => ScholarXivProvider;
+
+/**
+ * How long a ScholarXIV confirmation is reused. The catalogue is six fixed
+ * references, so "is this paper still found" changes on the scale of days, not
+ * requests; without this every call fanned out one upstream search per citation.
+ */
+export const CITATION_CONFIRMATION_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** A short fingerprint of the catalogue, so editing a citation drops the cached answer. */
+export function citationCatalogueVersion(): string {
+  const text = JSON.stringify(listCitations());
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+interface CachedConfirmation {
+  readonly expiresAt: number;
+  readonly result: CitationCheckResult;
+}
+
+// Per server instance, in memory. Only a successful answer is kept; a failure is
+// never cached, so an outage ends as soon as ScholarXIV is back.
+const confirmationCache = new Map<string, CachedConfirmation>();
+const confirmationInFlight = new Map<string, Promise<CitationCheckResult>>();
+
+export function resetCitationConfirmationCache(): void {
+  confirmationCache.clear();
+  confirmationInFlight.clear();
+}
+
+async function confirmedCitations(
+  provider: ScholarXivProvider,
+  catalogue: ReturnType<typeof listCitations>,
+  now: number
+): Promise<CitationCheckResult> {
+  const key = `${provider.name}:${citationCatalogueVersion()}`;
+  const cached = confirmationCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.result;
+  }
+  const pending = confirmationInFlight.get(key);
+  if (pending) {
+    return pending;
+  }
+  const request = provider
+    .confirmCitations(catalogue)
+    .then((result) => {
+      confirmationCache.set(key, { expiresAt: now + CITATION_CONFIRMATION_TTL_MS, result });
+      return result;
+    })
+    .finally(() => {
+      confirmationInFlight.delete(key);
+    });
+  confirmationInFlight.set(key, request);
+  return request;
+}
 
 export function jsonError(error: string, status: number, message?: string): Response {
   return Response.json(message ? { error, message } : { error }, {
@@ -129,7 +189,8 @@ export function createRecommendationsHandler(): (request: Request) => Promise<Re
 }
 
 export function createCitationsHandler(
-  providerFactory: ScholarXivProviderFactory
+  providerFactory: ScholarXivProviderFactory,
+  options: { readonly now?: () => number } = {}
 ): (request: Request) => Promise<Response> {
   return async function citations(request: Request): Promise<Response> {
     const catalogue = listCitations();
@@ -145,7 +206,7 @@ export function createCitationsHandler(
       return sessionFailure;
     }
     try {
-      const result = await provider.confirmCitations(catalogue);
+      const result = await confirmedCitations(provider, catalogue, (options.now ?? Date.now)());
       return Response.json(
         {
           source: "scholarxiv",

@@ -278,8 +278,16 @@ export interface BankVerificationRepository {
   ): Promise<BankVerificationEvent>;
 }
 
+/** What the reconciliation drain knows about the job it is working: its current lease token. */
+export interface ReconciliationVerifyContext {
+  readonly leaseToken?: string;
+}
+
 export interface BankVerificationLedgerSink {
-  postVerifiedContribution(intent: BankVerificationIntent): Promise<string | null>;
+  postVerifiedContribution(
+    intent: BankVerificationIntent,
+    context?: ReconciliationVerifyContext
+  ): Promise<string | null>;
 }
 
 export interface ReconciliationJob {
@@ -354,5 +362,8 @@ export interface ReconciliationVerificationOutcome {
 }
 
 export interface ReconciliationVerifier {
-  verifyIntent(intent: BankVerificationIntent): Promise<ReconciliationVerificationOutcome>;
+  verifyIntent(
+    intent: BankVerificationIntent,
+    context?: ReconciliationVerifyContext
+  ): Promise<ReconciliationVerificationOutcome>;
 }

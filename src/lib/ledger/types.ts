@@ -71,6 +71,12 @@ export interface LedgerChainHead {
 
 export interface LedgerActorContext {
   readonly actorId: string;
+  /**
+   * Only for the cron-driven reconciliation drain: the lease token of the claimed
+   * job this post belongs to. `post_ledger_entry_for_reconciliation_v1` refuses a
+   * post whose token is not the job's current one. Never set by a user-scoped caller.
+   */
+  readonly reconciliationLeaseToken?: string;
 }
 
 export interface AppendLedgerEntryResult {

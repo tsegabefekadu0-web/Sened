@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { loadCorrectionTargets } from "@/lib/ledger/clientRead";
+import { loadCorrectionTargets, pickGroup } from "@/lib/ledger/clientRead";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -115,10 +115,22 @@ describe("loadCorrectionTargets", () => {
   it("ignores an active group the server did not return for this caller", async () => {
     const foreign = "44444444-4444-4444-8444-444444444444";
     expect(await loadCorrectionTargets(deps([json(TWO_GROUPS)]), { groupId: foreign })).toEqual({ status: "choose-group" });
-    // With exactly one group a stale preference falls back to that group.
-    const d = deps([json({ groups: [{ groupId: GROUP, role: "owner" }] }), json({ entries: [] })]);
-    expect((await loadCorrectionTargets(d, { groupId: foreign })).status).toBe("empty");
-    expect(String(d.fetchImpl.mock.calls[1]?.[0])).toContain(`groupId=${GROUP}`);
+    // Even with exactly one group a preference that is not among them is never
+    // replaced by it: the switcher would say one group while money posts to another.
+    const d = deps([json({ groups: [{ groupId: GROUP, role: "owner" }] })]);
+    expect(await loadCorrectionTargets(d, { groupId: foreign })).toEqual({ status: "choose-group" });
+    expect(d.fetchImpl).toHaveBeenCalledTimes(1);
+    // With no preference the only group is still used.
+    const only = deps([json({ groups: [{ groupId: GROUP, role: "owner" }] }), json({ entries: [] })]);
+    expect((await loadCorrectionTargets(only)).status).toBe("empty");
+  });
+
+  it("pickGroup returns null for a missing preference and the only group for none", () => {
+    const one = [{ groupId: GROUP }];
+    expect(pickGroup(one, "other")).toBeNull();
+    expect(pickGroup(one, null)).toBe(one[0]);
+    expect(pickGroup(one, GROUP)).toBe(one[0]);
+    expect(pickGroup([{ groupId: "a" }, { groupId: "b" }], null)).toBeNull();
   });
 
   it("returns read-only for a plain member without reading entries", async () => {

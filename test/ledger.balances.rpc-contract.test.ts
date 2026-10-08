@@ -10,7 +10,8 @@ import { describe, expect, it } from "vitest";
  */
 const sql = readFileSync(join(process.cwd(), "supabase/migrations/20261007100000_ledger_balances.sql"), "utf8");
 const reader = readFileSync(join(process.cwd(), "src/lib/ledger/reader.ts"), "utf8");
-const code = sql.replace(/--.*$/gm, "");
+// Windows checkouts convert to CRLF (core.autocrlf); the contract is about the SQL, not its line endings.
+const code = sql.split("\r\n").join("\n").replace(/--.*$/gm, "");
 
 describe("get_ledger_balances_v1", () => {
   it("takes exactly the argument the reader sends", () => {

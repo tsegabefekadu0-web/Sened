@@ -438,10 +438,15 @@ export class SupabaseLedgerRepository implements LedgerRepository {
     const request = normalizeLedgerEntryRequest(requestInput);
     const actorId = assertContext(context);
     const asWorker = this.options.postAsReconciliationWorker === true;
+    if (asWorker && !(typeof context.reconciliationLeaseToken === "string" && isUuid(context.reconciliationLeaseToken))) {
+      // The worker RPC acts on a claimed job's behalf; without the job's lease
+      // token there is nothing to act on behalf of.
+      throw new LedgerError("INVALID_REQUEST", "A reconciliation post needs the claimed job's lease token");
+    }
     const { data, error } = await this.client.rpc(
       asWorker ? "post_ledger_entry_for_reconciliation_v1" : "post_ledger_entry_v1",
       {
-      ...(asWorker ? { requested_actor_id: actorId } : {}),
+      ...(asWorker ? { requested_actor_id: actorId, requested_lease_token: context.reconciliationLeaseToken } : {}),
       requested_group_id: request.groupId,
       requested_idempotency_key: request.idempotencyKey,
       requested_occurred_at: request.occurredAt,
@@ -474,6 +479,9 @@ export class LedgerService {
     const actorId = assertContext(context);
     const request = normalizeLedgerEntryRequest(requestInput);
     validateBalancedPostings(request.postings);
-    return this.repository.append(request, { actorId });
+    return this.repository.append(request, {
+      actorId,
+      ...(context.reconciliationLeaseToken ? { reconciliationLeaseToken: context.reconciliationLeaseToken } : {})
+    });
   }
 }

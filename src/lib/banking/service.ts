@@ -29,7 +29,8 @@ import type {
   CreateBankIntentInput,
   PublicBankVerification,
   ReconciliationJobStore,
-  ReconciliationVerificationOutcome
+  ReconciliationVerificationOutcome,
+  ReconciliationVerifyContext
 } from "./types";
 import { maskBankReference } from "./referenceMask";
 import { InMemoryReferenceVault, createProviderReferenceHmac } from "./vault";
@@ -343,7 +344,10 @@ export class BankVerificationService {
     return toPublicBankVerification(intent);
   }
 
-  async verifyIntent(intent: BankVerificationIntent): Promise<ReconciliationVerificationOutcome> {
+  async verifyIntent(
+    intent: BankVerificationIntent,
+    context: ReconciliationVerifyContext = {}
+  ): Promise<ReconciliationVerificationOutcome> {
     const adapter = this.adapterResolver(intent.provider);
     if (!adapter.isConfigured()) {
       return {
@@ -388,7 +392,7 @@ export class BankVerificationService {
       : null;
     let ledgerEntryId: string | null = null;
     if (assessment.state === "VERIFIED" && this.ledgerSink) {
-      ledgerEntryId = await this.ledgerSink.postVerifiedContribution({ ...intent, state: "VERIFIED" });
+      ledgerEntryId = await this.ledgerSink.postVerifiedContribution({ ...intent, state: "VERIFIED" }, context);
     }
     return {
       state: assessment.state,

@@ -2,10 +2,21 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { bearerToken, getUserScopedClient } from "@/lib/supabaseServer";
-import { parse } from "@/lib/validation";
+import {
+  drawCycleCreateRequestSchema,
+  drawCycleIdSchema,
+  drawCancelRequestSchema,
+  drawCycleListQuerySchema,
+  drawGateRequestSchema,
+  drawNonceRequestSchema,
+  drawOpenRequestSchema,
+  drawSealRequestSchema,
+  drawSessionIdSchema,
+  parse
+} from "@/lib/validation";
 
 import { toVerificationTranscript } from "./canonical";
-import { isDrawError } from "./errors";
+import { hasServerOnlyDetail, isDrawError, publicDrawMessage } from "./errors";
 import { drawErrorStatus, type DrawActorContext } from "./repository";
 import {
   drawCommitRequestSchema,
@@ -15,7 +26,7 @@ import {
 } from "./schemas";
 import { createProductionDrawService } from "./server";
 import type { DrawService } from "./service";
-import type { DrawRound } from "./types";
+import type { DrawCancellation, DrawCycleRecord, DrawListEntry, DrawRound, DrawSessionView } from "./types";
 
 /** Matches the banking lane: 8 KiB. A commit carries a roster, nothing larger. */
 const MAX_BODY_BYTES = 8_192;
@@ -132,6 +143,7 @@ function publicTranscript(round: Parameters<typeof toVerificationTranscript>[0])
     cycleId: transcript.cycleId,
     round: transcript.round,
     commitment: transcript.commitment,
+    protocolVersion: transcript.protocolVersion,
     rosterDigest: transcript.rosterDigest,
     commitmentNonce: transcript.commitmentNonce,
     seed: transcript.seed,
@@ -141,14 +153,32 @@ function publicTranscript(round: Parameters<typeof toVerificationTranscript>[0])
 
 function mapError(error: unknown): Response {
   if (!isDrawError(error)) {
+    // Unknown failure: the code only. The cause stays in the server log.
+    console.error("draw: unexpected failure", error);
     return jsonError("draw_failed", 502);
   }
-  return jsonError(error.code.toLowerCase(), drawErrorStatus(error.code), error.message);
+  if (hasServerOnlyDetail(error.code)) {
+    // The detail (a database or ledger message) is for the server's log; the client gets the code.
+    console.error(`draw: ${error.code}`, error.message, error.cause ?? "");
+  }
+  if (error.code === "CONTRIBUTION_GATE_BLOCKED") {
+    // Who is flagged for which round travels with the refusal so the screen can say it.
+    return Response.json(
+      {
+        error: error.code.toLowerCase(),
+        message: error.message,
+        flagged: (error.flagged ?? []).map((flag) => ({ memberId: flag.memberId, round: flag.round }))
+      },
+      { status: drawErrorStatus(error.code), headers: { "Cache-Control": "no-store" } }
+    );
+  }
+  return jsonError(error.code.toLowerCase(), drawErrorStatus(error.code), publicDrawMessage(error));
 }
 
 /**
- * M4.1 step 1. Treasurer only: locks in the commitment, the eligible roster, and
- * every member's ticket *before* the ceremony.
+ * M4.1 step 1. Treasurer only: locks in the commitment over the roster, the
+ * stored seals and the cycle's terms, all read from the database, *before* the
+ * ceremony.
  */
 export function createCommitHandler(
   serviceFactory: DrawServiceFactory = productionFactory
@@ -172,26 +202,21 @@ export function createCommitHandler(
 
     try {
       const service = serviceFactory(supabase);
-      const priorWinnerIds = await service
-        .listCycle(parsed.data.cycleId, auth.context)
-        .then((rounds) =>
-          rounds
-            .filter((round) => round.round < parsed.data.round && round.reveal !== null)
-            .map((round) => round.reveal?.winnerMemberId ?? "")
-        );
-      const result = await service.commit(
-        {
-          ...parsed.data,
-          members: parsed.data.members.map((entry) => ({ ...entry, status: entry.status ?? "active" })),
-          priorWinnerIds
-        },
-        auth.context
-      );
+      const result = await service.commitFromSession(parsed.data, auth.context);
       return jsonOk(
         {
           round: publicRound(result.round),
           replayed: result.replayed,
-          transcript: publicTranscript(result.round)
+          transcript: publicTranscript(result.round),
+          // Present only when a new commitment was made: what the gate looked at.
+          contributionGate: result.gate
+            ? {
+                policy: result.gate.policy,
+                flagged: result.gate.flagged.map((flag) => ({ memberId: flag.memberId, round: flag.round })),
+                overridden: result.gate.overridden,
+                carriedOver: result.gate.carriedOver
+              }
+            : null
         },
         result.replayed ? 200 : 201
       );
@@ -224,12 +249,10 @@ export function createRevealHandler(
 
     try {
       const service = serviceFactory(supabase);
+      // The nonces are not in the request: the database holds the ones members
+      // released and hands them over only together with a seed that matches.
       const result = await service.reveal(
-        {
-          drawId: parsed.data.drawId,
-          seed: parsed.data.seed,
-          memberNonces: parsed.data.memberNonces
-        },
+        { drawId: parsed.data.drawId, seed: parsed.data.seed },
         auth.context
       );
       return jsonOk(
@@ -281,7 +304,10 @@ export function createVerifyHandler(
         {
           round: publicRound(result.round),
           verification: result.verification,
-          transcript: result.transcript
+          transcript: result.transcript,
+          // Published with the seed at reveal. A member's browser needs them to
+          // check that every sealed contribution was opened honestly.
+          memberNonces: result.round.reveal?.memberNonces ?? []
         },
         200
       );
@@ -361,6 +387,344 @@ export function createPayoutHandler(
         },
         result.replayed ? 200 : 201
       );
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+// -- cycles, draws, and the member side of the ceremony ----------------------------
+
+function publicCycle(cycle: DrawCycleRecord): Record<string, unknown> {
+  return {
+    cycleId: cycle.cycleId,
+    groupId: cycle.groupId,
+    name: cycle.name,
+    contributionAmount: cycle.contributionAmount,
+    potAmount: cycle.potAmount,
+    totalRounds: cycle.totalRounds,
+    reserveRatioBps: cycle.reserveRatioBps,
+    startedAt: cycle.startedAt,
+    closedAt: cycle.closedAt,
+    createdAt: cycle.createdAt,
+    roundsRevealed: cycle.roundsRevealed,
+    roundsPaid: cycle.roundsPaid,
+    nextRound: cycle.nextRound,
+    contributionGate: cycle.contributionGate
+  };
+}
+
+function publicListEntry(entry: DrawListEntry): Record<string, unknown> {
+  return {
+    drawId: entry.drawId,
+    round: entry.round,
+    state: entry.state,
+    openedAt: entry.openedAt,
+    committedAt: entry.committedAt,
+    revealedAt: entry.revealedAt,
+    winnerMemberId: entry.winnerMemberId,
+    sealCount: entry.sealCount,
+    nonceCount: entry.nonceCount,
+    revealRequested: entry.revealRequested,
+    superseded: entry.superseded,
+    legacy: entry.legacy
+  };
+}
+
+/** A cancellation is public to every member of the group: who, when, why, and who missed. */
+function publicCancellation(entry: DrawCancellation): Record<string, unknown> {
+  return {
+    cancellationId: entry.cancellationId,
+    drawId: entry.drawId,
+    cycleId: entry.cycleId,
+    round: entry.round,
+    stage: entry.stage,
+    reason: entry.reason,
+    missedMembers: entry.missedMembers,
+    deadlineAt: entry.deadlineAt,
+    ownerDecision: entry.ownerDecision,
+    cancelledBy: entry.cancelledBy,
+    cancelledAt: entry.cancelledAt
+  };
+}
+
+/**
+ * A draw in progress, as members may see it. Explicit field copy on purpose: seal
+ * HASHES, and per member only a boolean for "released a nonce". There is no field
+ * a nonce could travel in.
+ */
+function publicSession(session: DrawSessionView): Record<string, unknown> {
+  return {
+    drawId: session.drawId,
+    groupId: session.groupId,
+    cycleId: session.cycleId,
+    round: session.round,
+    state: session.state,
+    openedBy: session.openedBy,
+    openedAt: session.openedAt,
+    committedAt: session.committedAt,
+    cycle: publicCycle(session.cycle),
+    eligible: session.eligible,
+    seals: session.seals.map((seal) => ({ memberId: seal.memberId, sealed: seal.sealed })),
+    nonces: session.nonces.map((entry) => ({ memberId: entry.memberId, released: entry.released })),
+    revealRequested: session.revealRequested,
+    sealDeadline: session.sealDeadline,
+    nonceDeadline: session.nonceDeadline,
+    excluded: session.excluded,
+    cancelsThisRound: session.cancelsThisRound,
+    cancellation: session.cancellation === null ? null : publicCancellation(session.cancellation),
+    // Public from the instant the reveal is opened, so any manager can finish a stalled draw.
+    revealOpening:
+      session.revealOpening === null
+        ? null
+        : {
+            seed: session.revealOpening.seed,
+            openedBy: session.revealOpening.openedBy,
+            openedAt: session.revealOpening.openedAt
+          }
+  };
+}
+
+function searchParams(request: Request): Record<string, string | string[]> {
+  const params: Record<string, string | string[]> = {};
+  for (const [key, value] of new URL(request.url).searchParams) {
+    const existing = params[key];
+    params[key] = existing === undefined ? value : [...(Array.isArray(existing) ? existing : [existing]), value];
+  }
+  return params;
+}
+
+export type DrawCycleRouteContext = { readonly params: { readonly cycleId: string } };
+export type DrawSessionRouteContext = { readonly params: { readonly drawId: string } };
+
+/** Owner or treasurer creates a cycle for their group. The pot is computed by the database. */
+export function createCycleCreateHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request) => Promise<Response> {
+  return async function post(request: Request): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const payload = await readJsonBody(request);
+    if (!payload.ok) return payload.response;
+    const parsed = parse(drawCycleCreateRequestSchema, payload.body);
+    if (!parsed.ok) return jsonError("invalid_request", 400, parsed.message);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const result = await serviceFactory(supabase).createCycle(parsed.data, auth.context);
+      return jsonOk({ cycle: publicCycle(result.cycle), replayed: result.replayed }, result.replayed ? 200 : 201);
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+/**
+ * Owner or treasurer changes a cycle's contribution gate (`off` | `warn` | `block`). A reason of
+ * 10..1000 characters is required and recorded with who and when, append-only. Asking for the policy
+ * already in force is a 200 replay and records nothing.
+ */
+export function createGateSetHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request) => Promise<Response> {
+  return async function post(request: Request): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const payload = await readJsonBody(request);
+    if (!payload.ok) return payload.response;
+    const parsed = parse(drawGateRequestSchema, payload.body);
+    if (!parsed.ok) return jsonError("invalid_request", 400, parsed.message);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const result = await serviceFactory(supabase).setContributionGate(parsed.data, auth.context);
+      return jsonOk({ cycle: publicCycle(result.cycle), replayed: result.replayed }, 200);
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+/** Any member lists their group's cycles. */
+export function createCycleListHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request) => Promise<Response> {
+  return async function get(request: Request): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const parsed = parse(drawCycleListQuerySchema, searchParams(request));
+    if (!parsed.ok) return jsonError("invalid_request", 400, parsed.message);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const cycles = await serviceFactory(supabase).listCycles(parsed.data.groupId, auth.context);
+      return jsonOk({ cycles: cycles.map(publicCycle) }, 200);
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+/** Any member reads one cycle and every draw in it, with each draw's state. */
+export function createCycleReadHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request, context: DrawCycleRouteContext) => Promise<Response> {
+  return async function get(request: Request, context: DrawCycleRouteContext): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const parsed = parse(drawCycleIdSchema, context.params.cycleId);
+    if (!parsed.ok) return jsonError("not_found", 404);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const detail = await serviceFactory(supabase).getCycleDetail(parsed.data, auth.context);
+      return jsonOk(
+        {
+          cycle: publicCycle(detail.cycle),
+          draws: detail.draws.map(publicListEntry),
+          cancellations: (detail.cancellations ?? []).map(publicCancellation)
+        },
+        200
+      );
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+/** Owner or treasurer opens a draw (the server creates its id) for sealing. */
+export function createDrawOpenHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request) => Promise<Response> {
+  return async function post(request: Request): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const payload = await readJsonBody(request);
+    if (!payload.ok) return payload.response;
+    const parsed = parse(drawOpenRequestSchema, payload.body);
+    if (!parsed.ok) return jsonError("invalid_request", 400, parsed.message);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const result = await serviceFactory(supabase).openDraw(parsed.data, auth.context);
+      return jsonOk(
+        {
+          session: publicSession(result.session),
+          replayed: result.replayed,
+          // Present only when a new draw was opened: what the gate looked at.
+          contributionGate: result.gate
+            ? {
+                policy: result.gate.policy,
+                flagged: result.gate.flagged.map((flag) => ({ memberId: flag.memberId, round: flag.round })),
+                overridden: result.gate.overridden
+              }
+            : null
+        },
+        result.replayed ? 200 : 201
+      );
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+/**
+ * Owner or treasurer cancels a draw whose members did not respond, with a reason. The database
+ * decides whether the deadline has passed and whether the reveal was opened (it cannot be cancelled
+ * then). 200 for a repeat (replay), 201 for a new cancellation.
+ */
+export function createCancelHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request) => Promise<Response> {
+  return async function post(request: Request): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const payload = await readJsonBody(request);
+    if (!payload.ok) return payload.response;
+    const parsed = parse(drawCancelRequestSchema, payload.body);
+    if (!parsed.ok) return jsonError("invalid_request", 400, parsed.message);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const result = await serviceFactory(supabase).cancelDraw(parsed.data, auth.context);
+      return jsonOk(
+        { cancellation: publicCancellation(result.cancellation), replayed: result.replayed },
+        result.replayed ? 200 : 201
+      );
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+/** Any member reads a draw in progress: seal hashes, and who has released a nonce (never the nonce). */
+export function createSessionHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request, context: DrawSessionRouteContext) => Promise<Response> {
+  return async function get(request: Request, context: DrawSessionRouteContext): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const parsed = parse(drawSessionIdSchema, context.params.drawId);
+    if (!parsed.ok) return jsonError("not_found", 404);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const session = await serviceFactory(supabase).getSession(parsed.data, auth.context);
+      return jsonOk({ session: publicSession(session) }, 200);
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+/**
+ * A member seals THEIR OWN nonce for an open draw. The body names no member: the
+ * member is the signed-in user, resolved from their token here and from
+ * `auth.uid()` again in the database. A body that carries a `memberId` is a 400.
+ */
+export function createSealHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request) => Promise<Response> {
+  return async function post(request: Request): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const payload = await readJsonBody(request);
+    if (!payload.ok) return payload.response;
+    const parsed = parse(drawSealRequestSchema, payload.body);
+    if (!parsed.ok) return jsonError("invalid_request", 400, parsed.message);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const result = await serviceFactory(supabase).submitSeal(parsed.data, auth.context);
+      return jsonOk(
+        { drawId: parsed.data.drawId, memberId: result.memberId, sealed: result.sealed, replaced: result.replaced },
+        200
+      );
+    } catch (error) {
+      return mapError(error);
+    }
+  };
+}
+
+/**
+ * A member releases THEIR OWN nonce, only after the commitment is published (the
+ * database refuses it earlier). The response never contains the nonce.
+ */
+export function createNonceHandler(
+  serviceFactory: DrawServiceFactory = productionFactory
+): (request: Request) => Promise<Response> {
+  return async function post(request: Request): Promise<Response> {
+    const auth = await authenticate(request);
+    if (!auth.ok) return auth.response;
+    const payload = await readJsonBody(request);
+    if (!payload.ok) return payload.response;
+    const parsed = parse(drawNonceRequestSchema, payload.body);
+    if (!parsed.ok) return jsonError("invalid_request", 400, parsed.message);
+    const supabase = getUserScopedClient(bearerToken(request) ?? "");
+    if (!supabase) return jsonError("not_configured", 503);
+    try {
+      const result = await serviceFactory(supabase).submitNonce(parsed.data, auth.context);
+      return jsonOk({ drawId: parsed.data.drawId, memberId: result.memberId, released: true, replayed: result.replayed }, 200);
     } catch (error) {
       return mapError(error);
     }

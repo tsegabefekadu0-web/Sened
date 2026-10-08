@@ -1,4 +1,4 @@
-import { SyncError, type SyncPullQuery, type SyncPullResult, type SyncPushEnvelope, type SyncPushResult, type SyncTransport } from "./contract";
+import { SyncError, type SyncPushAttribution, type SyncPullQuery, type SyncPullResult, type SyncPushEnvelope, type SyncPushResult, type SyncTransport } from "./contract";
 import { parseRetryAfterMs } from "./backoff";
 
 /**
@@ -190,6 +190,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * The additive `attribution` report on an accepted result. Absent stays absent
+ * (an old server, or a draft with no payer). One this client cannot read is
+ * surfaced as a refusal with a reason, never as a recorded payer and never as a
+ * reason to doubt the entry itself, which is posted regardless.
+ */
+function parseAttribution(value: unknown): SyncPushAttribution | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (isRecord(value) && value.outcome === "RECORDED") {
+    return { outcome: "RECORDED" };
+  }
+  if (isRecord(value) && value.outcome === "REFUSED") {
+    return { outcome: "REFUSED", error: typeof value.error === "string" && value.error.length > 0 ? value.error : "attribution_failed" };
+  }
+  return { outcome: "REFUSED", error: "attribution_unreadable" };
+}
+
 function parsePushResult(value: unknown, fallbackMutationId: string | undefined): SyncPushResult {
   if (!isRecord(value) || typeof value.mutationId !== "string" || value.mutationId.length === 0) {
     throw new SyncError("SYNC_CORRUPT_PAYLOAD", "A sync result was missing its mutation id.");
@@ -200,12 +219,14 @@ function parsePushResult(value: unknown, fallbackMutationId: string | undefined)
   if (fallbackMutationId !== undefined && fallbackMutationId !== value.mutationId) {
     throw new SyncError("SYNC_CORRUPT_PAYLOAD", "The sync service returned a result for an unknown mutation.");
   }
+  const attribution = parseAttribution(value.attribution);
   const result: SyncPushResult = {
     mutationId: value.mutationId,
     outcome: value.outcome,
     ...(typeof value.serverEntryId === "string" ? { serverEntryId: value.serverEntryId } : {}),
     ...(typeof value.serverEntryHash === "string" ? { serverEntryHash: value.serverEntryHash } : {}),
     ...(typeof value.serverSequence === "string" ? { serverSequence: value.serverSequence } : {}),
+    ...(attribution === undefined ? {} : { attribution }),
     ...(typeof value.error === "string" ? { error: value.error } : {}),
     ...(typeof value.retryAfterMs === "number" ? { retryAfterMs: value.retryAfterMs } : {})
   };

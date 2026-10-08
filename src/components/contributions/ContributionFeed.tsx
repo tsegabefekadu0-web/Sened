@@ -2,9 +2,22 @@
 
 import React, { useMemo, useState } from "react";
 import Image from "next/image";
-import { Check, Clock, ShieldCheck, X } from "lucide-react";
+import { Check, Clock, FileText, ShieldCheck, X } from "lucide-react";
 
-import { createTranslator, type Locale } from "@/lib/i18n";
+import { MemberAvatar } from "@/components/cultural/MemberAvatar";
+import { isMaskedReference } from "@/lib/banking/referenceMask";
+import type { MemberAttire } from "@/lib/memberAvatarStyle";
+import { createTranslator, type Locale, type MessageKey } from "@/lib/i18n";
+import type { AttributeResult } from "@/lib/ledger/clientAttribution";
+import { formatEtbGrouped } from "@/lib/ledger/money";
+import {
+  CONTRIBUTION_CHANNELS,
+  CONTRIBUTION_NOTE_MAX,
+  checkContributionNote,
+  isBlankNote,
+  isContributionChannel,
+  type ContributionChannel
+} from "@/lib/ledger/paymentChannel";
 
 /**
  * A contribution's trust state.
@@ -27,11 +40,22 @@ export type ContributionStatus = "PROVISIONAL" | "VERIFIED";
 export interface MemberContribution {
   id: string;
   name: string;
-  avatar: string;
+  /** Absent when no photo is on record; the row draws a neutral placeholder. */
+  avatar?: string;
   secondaryAvatar?: string;
   amount?: number;
+  /**
+   * A ledger amount in ETB with two decimals, shown as written. Preferred over
+   * `amount`, which is a float and only for the on-device fixtures.
+   */
+  amountWire?: string;
+  /**
+   * `ledger` marks a row read from the group ledger. It is still not a bank
+   * verification: only `status` plus `verifiedBy` earn the badge.
+   */
+  source?: "ledger";
   /** The rail the member named. A claim, not a confirmation. */
-  channel?: "telebirr" | "cbe" | "awash" | "cash";
+  channel?: ContributionChannel;
   /** A bank reference, when one was read out. A claim, not a confirmation. */
   transactionId?: string;
   status: ContributionStatus;
@@ -39,14 +63,99 @@ export interface MemberContribution {
   verifiedBy?: string;
   /** Required for `VERIFIED`: when that provider answered. */
   verifiedAt?: string;
+  /**
+   * Who paid, from the verification's own user. Shown only on a verified row:
+   * naming a payer for an unverified one would be a claim nothing backs.
+   */
+  memberLabel?: string;
+  /**
+   * The paying member's opaque id, from the verification's own user. Seeds the
+   * avatar's Tibeb frame (deterministic, never derived from `name`). Absent when
+   * the payer is unknown: the neutral default frame is drawn.
+   */
+  memberId?: string;
+  /** The shawl this member chose for their avatar. No profile field exists yet, so nothing sets it today. */
+  attire?: MemberAttire;
+  /**
+   * Masked bank reference (`••••2F42`) from the verification. Shown on the
+   * verified badge only, and only if it is exactly the masked shape.
+   */
+  referenceMasked?: string;
+  /**
+   * Who the TREASURER recorded as the payer of a row that has no bank
+   * verification (cash, a manual entry). It is the treasurer's own record: the row
+   * stays "Recorded in ledger", the payer is labelled as recorded by the
+   * treasurer, and it never earns the verified badge or the verified "Paid by"
+   * line. Bank provenance wins, so a verified row never carries this.
+   */
+  treasurerPayer?: {
+    readonly memberId: string;
+    readonly memberLabel: string;
+    /** How many records the entry's history holds (1 = never corrected). */
+    readonly revision: number;
+    readonly recordedAtLabel: string;
+    /** How it was paid, in the treasurer's words (not a verification). Absent or `null` = not said. */
+    readonly channel?: ContributionChannel | null;
+    /**
+     * The treasurer's plain-text note. Rendered ONLY as text (React escapes it); it is
+     * never interpreted as markup, and a verified row never shows it.
+     */
+    readonly note?: string | null;
+  };
 }
 
-const CHANNEL_KEY: Readonly<Record<NonNullable<MemberContribution["channel"]>, string>> = {
+/**
+ * The owner's / treasurer's "attribute payer" action on a ledger row. Absent for
+ * everyone else, so a plain member sees no control (and the database refuses them
+ * regardless).
+ */
+export interface PayerAttribution {
+  /** Members who can be named as the payer: the group's active members. */
+  readonly members: readonly { readonly userId: string; readonly label: string }[];
+  /**
+   * `reason` is sent only when correcting an existing record. `channel` and `note` are
+   * sent only when there is something to say: on a first record, when given; on a
+   * correction, when CHANGED (`null` clears, a value sets, absent keeps). Resolves to
+   * the call's outcome.
+   */
+  readonly onAttribute: (input: {
+    readonly entryId: string;
+    readonly memberUserId: string;
+    readonly reason?: string;
+    readonly channel?: ContributionChannel | null;
+    readonly note?: string | null;
+  }) => Promise<AttributeResult>;
+}
+
+const ATTIRE_KEY: Readonly<Record<MemberAttire, string>> = {
+  gabi: "shell.feed.attireGabi",
+  netela: "shell.feed.attireNetela"
+};
+
+const CHANNEL_KEY: Readonly<Record<ContributionChannel, string>> = {
   telebirr: "shell.feed.channelTelebirr",
   cbe: "shell.feed.channelCbe",
   awash: "shell.feed.channelAwash",
-  cash: "shell.feed.channelCash"
+  cash: "shell.feed.channelCash",
+  other: "shell.feed.channelOther"
 };
+
+/**
+ * The channel to show for a row. A verified row shows the provider that answered; any
+ * other ledger row shows the treasurer's recorded channel (which is their word, shown
+ * as plain text beside the "recorded by the treasurer" label, never as a badge).
+ */
+function shownChannel(contribution: MemberContribution): ContributionChannel | undefined {
+  if (isVerified(contribution)) {
+    return contribution.channel;
+  }
+  return contribution.treasurerPayer?.channel ?? contribution.channel;
+}
+
+/** The note to show, only for a row that is not bank-verified. */
+function shownNote(contribution: MemberContribution): string | null {
+  return !isVerified(contribution) && contribution.treasurerPayer?.note ? contribution.treasurerPayer.note : null;
+}
 
 /**
  * Fail closed in the view.
@@ -63,25 +172,125 @@ function isVerified(contribution: MemberContribution): boolean {
   );
 }
 
+/** The masked reference to show: only on a verified row, and only in the masked shape. */
+function shownReference(contribution: MemberContribution): string | null {
+  return isVerified(contribution) && isMaskedReference(contribution.referenceMasked) ? contribution.referenceMasked : null;
+}
+
+/** The message key for each way recording a payer can fail. */
+function attributeErrorKey(result: Exclude<AttributeResult, { status: "ok" }>): MessageKey {
+  switch (result.status) {
+    case "refused":
+      return `shell.feed.attribute.error.${result.code}` as MessageKey;
+    case "forbidden":
+      return "shell.feed.attribute.error.forbidden";
+    case "unauthorized":
+      return "shell.feed.attribute.error.unauthorized";
+    case "rate-limited":
+      return "shell.feed.attribute.error.rate_limited";
+    case "error":
+      return "shell.feed.attribute.error.error";
+  }
+}
+
 export function ContributionFeed({
   contributions = [],
   onSelectMember,
-  locale = "am"
+  locale = "am",
+  attribution
 }: {
   contributions?: MemberContribution[];
   onSelectMember?: (c: MemberContribution) => void;
   locale?: Locale;
+  attribution?: PayerAttribution;
 }) {
   const t = useMemo(() => createTranslator(locale), [locale]);
-  const [selected, setSelected] = useState<MemberContribution | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<MemberContribution | null>(null);
+  const [payerChoice, setPayerChoice] = useState("");
+  const [payerReason, setPayerReason] = useState("");
+  const [payerChannel, setPayerChannel] = useState<ContributionChannel | "">("");
+  const [payerNote, setPayerNote] = useState("");
+  const [payerBusy, setPayerBusy] = useState(false);
+  const [payerMessage, setPayerMessage] = useState<{ readonly ok: boolean; readonly text: string } | null>(null);
+
+  // The open row is read from the current list, so a re-read that records a payer
+  // updates the open detail; the snapshot is only for a row that left the list.
+  const selected = selectedId === null ? null : (contributions.find((entry) => entry.id === selectedId) ?? snapshot);
+  const setSelected = (next: MemberContribution | null) => {
+    setSelectedId(next?.id ?? null);
+    setSnapshot(next);
+    setPayerChoice("");
+    setPayerReason("");
+    // A correction starts from what is recorded, so changing one thing keeps the rest.
+    setPayerChannel(next?.treasurerPayer?.channel ?? "");
+    setPayerNote(next?.treasurerPayer?.note ?? "");
+    setPayerMessage(null);
+  };
 
   const openReceipt = (contribution: MemberContribution) => {
     onSelectMember?.(contribution);
     setSelected(contribution);
   };
 
-  const channelLabel = (contribution: MemberContribution): string =>
-    contribution.channel ? t(CHANNEL_KEY[contribution.channel] as never) : t("shell.feed.channelNone");
+  const submitPayer = async (entry: MemberContribution) => {
+    if (!attribution || payerBusy) return;
+    const correcting = entry.treasurerPayer !== undefined;
+    const currentChannel = entry.treasurerPayer?.channel ?? "";
+    const currentNote = entry.treasurerPayer?.note ?? "";
+    const channelChanged = payerChannel !== currentChannel;
+    const noteChanged = payerNote.trim() !== currentNote;
+    // Correcting only how it was paid, or only the note: the payer stays as recorded.
+    const memberUserId = payerChoice !== "" ? payerChoice : correcting && (channelChanged || noteChanged) ? entry.treasurerPayer!.memberId : "";
+    if (memberUserId === "") {
+      setPayerMessage({ ok: false, text: t("shell.feed.attribute.pickMember") });
+      return;
+    }
+    let cleanNote: string | null = null;
+    if (!isBlankNote(payerNote)) {
+      const checked = checkContributionNote(payerNote);
+      if (!checked.ok) {
+        setPayerMessage({ ok: false, text: t("shell.feed.attribute.noteError") });
+        return;
+      }
+      cleanNote = checked.note;
+    }
+    const reason = payerReason.trim();
+    if (correcting && reason.length < 10) {
+      setPayerMessage({ ok: false, text: t("shell.feed.attribute.reasonLabel") });
+      return;
+    }
+    const channelValue: ContributionChannel | null = payerChannel === "" ? null : payerChannel;
+    setPayerBusy(true);
+    setPayerMessage(null);
+    const result = await attribution.onAttribute({
+      entryId: entry.id,
+      memberUserId,
+      ...(correcting
+        ? {
+            reason,
+            ...(channelChanged ? { channel: channelValue } : {}),
+            ...(noteChanged ? { note: cleanNote } : {})
+          }
+        : {
+            ...(channelValue === null ? {} : { channel: channelValue }),
+            ...(cleanNote === null ? {} : { note: cleanNote })
+          })
+    });
+    setPayerBusy(false);
+    if (result.status === "ok") {
+      setPayerChoice("");
+      setPayerReason("");
+      setPayerMessage({ ok: true, text: t("shell.feed.attribute.done") });
+    } else {
+      setPayerMessage({ ok: false, text: t(attributeErrorKey(result)) });
+    }
+  };
+
+  const channelLabel = (contribution: MemberContribution): string => {
+    const channel = shownChannel(contribution);
+    return channel ? t(CHANNEL_KEY[channel] as never) : t("shell.feed.channelNone");
+  };
 
   return (
     <section className="w-full max-w-md md:max-w-none mx-auto px-4 md:px-0 pt-4 md:pt-2 pb-20 md:pb-8 select-none">
@@ -109,24 +318,41 @@ export function ContributionFeed({
                 onClick={() => openReceipt(c)}
                 className="flex items-center justify-between gap-3.5 cursor-pointer group active:scale-[0.99] transition-transform"
               >
-                {/* Left: Authentic Portrait Photo */}
-                <div className="relative w-[70px] h-[76px] rounded-[16px] overflow-hidden shrink-0 shadow-sm border border-[#DECDBB] bg-[#EFE6D9]">
-                  <Image
-                    src={c.avatar}
-                    alt={c.name}
-                    fill
-                    sizes="70px"
-                    className="object-cover"
-                    priority
-                  />
-                </div>
+                {/* Left: portrait in a Tibeb border (frame chosen from the member id) */}
+                <MemberAvatar
+                  memberId={c.memberId}
+                  name={c.name}
+                  photo={c.avatar}
+                  attire={c.attire}
+                  attireLabel={c.attire ? t(ATTIRE_KEY[c.attire] as never) : undefined}
+                />
 
                 {/* Middle: Trust badge + Name + Reference */}
                 <div className="flex-1 min-w-0 pr-1">
                   {verified ? (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#138A4B] text-white text-[11px] font-semibold shadow-xs">
                       <Check className="w-3 h-3 stroke-[3]" />
-                      {channelLabel(c)}
+                      <span>{channelLabel(c)}</span>{" "}
+                      <span>{t("shell.feed.verifiedWord")}</span>
+                      {shownReference(c) ? (
+                        <>
+                          {" "}
+                          <span aria-hidden="true">·</span>{" "}
+                          {/* Bullets read badly aloud, so the visible mask is hidden from
+                              assistive tech and a plain-text equivalent is offered instead. */}
+                          <span className="font-mono tracking-tight" data-testid="feed-reference-masked" aria-hidden="true">
+                            {shownReference(c)}
+                          </span>{" "}
+                          <span className="sr-only">
+                            {t("shell.feed.referenceEnding", { last: shownReference(c)!.replace(/^\u2022+/, "") })}
+                          </span>
+                        </>
+                      ) : null}
+                    </span>
+                  ) : c.source === "ledger" ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-[11px] font-semibold">
+                      <FileText className="w-3 h-3 stroke-[3]" />
+                      {t("shell.feed.recorded")}
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-[11px] font-semibold">
@@ -138,6 +364,31 @@ export function ContributionFeed({
                   <h4 className="text-[15px] font-bold text-[#140E0A] leading-snug mt-1 truncate font-sans">
                     {c.name}
                   </h4>
+
+                  {verified && c.memberLabel ? (
+                    <p className="text-[12px] font-semibold text-[#4A3B32] mt-0.5 truncate font-sans" data-testid="feed-paid-by">
+                      {t("shell.feed.paidBy")}: {c.memberLabel}
+                    </p>
+                  ) : null}
+
+                  {/* The treasurer's own record of who paid an entry with no bank
+                      verification. Labelled as such and never styled as verified. */}
+                  {!verified && c.treasurerPayer ? (
+                    <p
+                      className="text-[12px] font-semibold text-[#6B5433] mt-0.5 truncate font-sans"
+                      data-testid="feed-paid-by-treasurer"
+                    >
+                      {t("shell.feed.paidBy")}: {c.treasurerPayer.memberLabel} · {t("shell.feed.recordedByTreasurer")}
+                    </p>
+                  ) : null}
+
+                  {!verified && c.treasurerPayer && (shownChannel(c) || shownNote(c)) ? (
+                    <p className="text-[12px] font-normal text-[#6B5433] mt-0.5 truncate font-sans" data-testid="feed-channel-note">
+                      {shownChannel(c) ? <span data-testid="feed-channel">{channelLabel(c)}</span> : null}
+                      {shownChannel(c) && shownNote(c) ? " · " : null}
+                      {shownNote(c) ? <span data-testid="feed-note">{shownNote(c)}</span> : null}
+                    </p>
+                  ) : null}
 
                   <p className="text-[12px] font-normal text-[#7D6F66] mt-0.5 truncate font-sans">
                     {c.transactionId
@@ -192,15 +443,19 @@ export function ContributionFeed({
               <span className="text-xs font-bold uppercase tracking-wider">
                 {isVerified(selected)
                   ? t("shell.feed.verifiedTitle")
-                  : t("shell.feed.unverifiedTitle")}
+                  : selected.source === "ledger"
+                    ? t("shell.feed.ledgerEntryTitle")
+                    : t("shell.feed.unverifiedTitle")}
               </span>
             </div>
 
             <h3 className="text-lg font-bold text-[#1F1714]">{selected.name}</h3>
             <p className="text-2xl font-extrabold text-[#1F1714] mt-1 font-sans">
-              {typeof selected.amount === "number"
-                ? `${selected.amount.toLocaleString(locale === "am" ? "am-ET" : "en-US")} ብር`
-                : "—"}
+              {selected.amountWire !== undefined
+                ? `${formatEtbGrouped(selected.amountWire)} ${t("shell.debter.currency")}`
+                : typeof selected.amount === "number"
+                  ? `${selected.amount.toLocaleString(locale === "am" ? "am-ET" : "en-US")} ብር`
+                  : "—"}
             </p>
 
             <div className="mt-4 pt-3 border-t border-[#E5DACD] space-y-2 text-xs">
@@ -213,11 +468,17 @@ export function ContributionFeed({
               <div className="flex justify-between gap-4">
                 <span className="text-[#7A6B60]">{t("shell.feed.reference")}:</span>
                 <span className="font-mono font-semibold text-[#1F1714] text-right break-all">
-                  {selected.transactionId ?? "—"}
+                  {shownReference(selected) ?? selected.transactionId ?? "—"}
                 </span>
               </div>
               {isVerified(selected) ? (
                 <>
+                  {selected.memberLabel ? (
+                    <div className="flex justify-between gap-4">
+                      <span className="text-[#7A6B60]">{t("shell.feed.paidBy")}:</span>
+                      <span className="font-semibold text-[#1F1714] text-right break-all">{selected.memberLabel}</span>
+                    </div>
+                  ) : null}
                   <div className="flex justify-between gap-4">
                     <span className="text-[#7A6B60]">{t("shell.feed.verifiedBy")}:</span>
                     <span className="font-semibold text-[#138A4B] text-right break-all">
@@ -230,13 +491,139 @@ export function ContributionFeed({
                       {selected.verifiedAt ?? "—"}
                     </span>
                   </div>
+                  {selected.source === "ledger" ? (
+                    <p className="pt-1 leading-relaxed text-[#6B5433]">{t("shell.feed.verifiedLedgerNote")}</p>
+                  ) : null}
                 </>
               ) : (
-                <p className="pt-1 leading-relaxed text-[#6B5433]">
-                  {t("shell.feed.notAContribution")}
-                </p>
+                <>
+                  {selected.treasurerPayer ? (
+                    <div data-testid="feed-treasurer-payer" className="space-y-2">
+                      <div className="flex justify-between gap-4">
+                        <span className="text-[#7A6B60]">{t("shell.feed.paidBy")}:</span>
+                        <span className="font-semibold text-[#1F1714] text-right break-all">{selected.treasurerPayer.memberLabel}</span>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <span className="text-[#7A6B60]">{t("shell.feed.treasurerRecordedAt")}:</span>
+                        <span className="font-semibold text-[#6B5433] text-right">
+                          {t("shell.feed.recordedByTreasurer")} · {selected.treasurerPayer.recordedAtLabel}
+                        </span>
+                      </div>
+                      {shownNote(selected) ? (
+                        <div className="flex justify-between gap-4">
+                          <span className="text-[#7A6B60]">{t("shell.feed.note")}:</span>
+                          <span className="font-semibold text-[#1F1714] text-right break-words" data-testid="feed-detail-note">
+                            {shownNote(selected)}
+                          </span>
+                        </div>
+                      ) : null}
+                      <p className="leading-relaxed text-[#6B5433]">{t("shell.feed.treasurerPayerNote")}</p>
+                      {selected.treasurerPayer.revision > 1 ? (
+                        <p className="leading-relaxed text-[#6B5433]">
+                          {t("shell.feed.treasurerRevision", { count: selected.treasurerPayer.revision - 1 })}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <p className="pt-1 leading-relaxed text-[#6B5433]">
+                    {selected.source === "ledger" ? t("shell.feed.ledgerEntryNote") : t("shell.feed.notAContribution")}
+                  </p>
+                </>
               )}
             </div>
+
+            {/* Owner / treasurer only, and only for a ledger row that no bank
+                receipt names (a verified row's payer cannot be overridden). */}
+            {attribution && selected.source === "ledger" && !isVerified(selected) ? (
+              <div className="mt-4 pt-3 border-t border-[#E5DACD] text-xs" data-testid="feed-attribute-payer">
+                <p className="font-bold text-[#1F1714]">
+                  {selected.treasurerPayer ? t("shell.feed.attribute.correctTitle") : t("shell.feed.attribute.title")}
+                </p>
+                <p className="mt-1 leading-relaxed text-[#6B5433]">
+                  {selected.treasurerPayer ? t("shell.feed.attribute.correctHelp") : t("shell.feed.attribute.help")}
+                </p>
+                <label className="mt-2 block">
+                  <span className="text-[#7A6B60]">{t("shell.feed.attribute.memberLabel")}</span>
+                  <select
+                    data-testid="feed-attribute-member"
+                    value={payerChoice}
+                    onChange={(event) => setPayerChoice(event.target.value)}
+                    className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                  >
+                    <option value="">{t("shell.feed.attribute.choose")}</option>
+                    {attribution.members.map((member) => (
+                      <option key={member.userId} value={member.userId}>
+                        {member.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="mt-2 block">
+                  <span className="text-[#7A6B60]">{t("shell.feed.attribute.channelLabel")}</span>
+                  <select
+                    data-testid="feed-attribute-channel"
+                    value={payerChannel}
+                    onChange={(event) => setPayerChannel(isContributionChannel(event.target.value) ? event.target.value : "")}
+                    className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                  >
+                    <option value="">{t("shell.feed.channelNone")}</option>
+                    {CONTRIBUTION_CHANNELS.map((option) => (
+                      <option key={option} value={option}>
+                        {t(CHANNEL_KEY[option] as never)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="mt-2 block">
+                  <span className="text-[#7A6B60]">{t("shell.feed.attribute.noteLabel")}</span>
+                  <input
+                    type="text"
+                    data-testid="feed-attribute-note"
+                    value={payerNote}
+                    onChange={(event) => setPayerNote(event.target.value)}
+                    maxLength={CONTRIBUTION_NOTE_MAX * 2}
+                    autoComplete="off"
+                    className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                  />
+                  <span className="mt-1 block text-[11px] leading-snug text-[#6B5433]">{t("shell.feed.attribute.noteHelp")}</span>
+                </label>
+                {selected.treasurerPayer ? (
+                  <label className="mt-2 block">
+                    <span className="text-[#7A6B60]">{t("shell.feed.attribute.reasonLabel")}</span>
+                    <textarea
+                      data-testid="feed-attribute-reason"
+                      value={payerReason}
+                      onChange={(event) => setPayerReason(event.target.value)}
+                      rows={2}
+                      maxLength={1000}
+                      className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                    />
+                  </label>
+                ) : null}
+                <button
+                  type="button"
+                  data-testid="feed-attribute-submit"
+                  disabled={payerBusy}
+                  onClick={() => void submitPayer(selected)}
+                  className="mt-3 w-full py-2 rounded-xl bg-[#6B5433] text-[#FAF7F2] font-semibold text-sm disabled:opacity-60"
+                >
+                  {payerBusy
+                    ? t("shell.feed.attribute.saving")
+                    : selected.treasurerPayer
+                      ? t("shell.feed.attribute.correctSubmit")
+                      : t("shell.feed.attribute.submit")}
+                </button>
+                {payerMessage ? (
+                  <p
+                    role={payerMessage.ok ? "status" : "alert"}
+                    data-testid="feed-attribute-message"
+                    className={`mt-2 leading-relaxed ${payerMessage.ok ? "text-[#138A4B]" : "text-[#9A3412]"}`}
+                  >
+                    {payerMessage.text}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
 
             <button
               onClick={() => setSelected(null)}

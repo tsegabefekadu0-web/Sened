@@ -104,6 +104,66 @@ describe("only a real verification result may produce a bank badge", () => {
   });
 });
 
+describe("a ledger contribution is verified only when it carries bank provenance", () => {
+  const LEDGER_ONLY: MemberContribution = {
+    id: "ledger-1",
+    name: "Contribution #7",
+    amountWire: "100.00",
+    transactionId: "#7",
+    source: "ledger",
+    status: "PROVISIONAL"
+  };
+  const LEDGER_BANK: MemberContribution = {
+    id: "ledger-2",
+    name: "Contribution #8",
+    amountWire: "250.00",
+    transactionId: "#8",
+    source: "ledger",
+    channel: "telebirr",
+    status: "VERIFIED",
+    verifiedBy: "Telebirr",
+    verifiedAt: "10/2/2026, 9:00:05 AM",
+    memberLabel: "Member 33333333"
+  };
+
+  it("renders the bank row as verified with the provider and the payer, and the plain row as recorded", () => {
+    render(<ContributionFeed locale="en" contributions={[LEDGER_BANK, LEDGER_ONLY]} />);
+
+    // One verified badge (the provider), one "Recorded in ledger".
+    expect(screen.getAllByText("Telebirr")).toHaveLength(1);
+    expect(screen.getAllByText("Recorded in ledger")).toHaveLength(1);
+    const paidBy = screen.getAllByTestId("feed-paid-by");
+    expect(paidBy).toHaveLength(1);
+    expect(paidBy[0]).toHaveTextContent("Paid by: Member 33333333");
+  });
+
+  it("shows the detail of a verified ledger row, saying only the last characters of the reference are shown", async () => {
+    const user = userEvent.setup();
+    render(<ContributionFeed locale="en" contributions={[LEDGER_BANK]} />);
+    await user.click(screen.getByText("Contribution #8"));
+
+    expect(screen.getByText("Verified bank settlement")).toBeInTheDocument();
+    expect(screen.getByText("10/2/2026, 9:00:05 AM")).toBeInTheDocument();
+    expect(screen.getByText(/Only the last characters of the bank reference are shown/)).toBeInTheDocument();
+    // This row carries no masked reference, so none is invented.
+    expect(screen.queryByText(/\u2022/)).not.toBeInTheDocument();
+  });
+
+  it("still fails closed: a ledger row marked verified with no verifier is recorded, and names no payer", () => {
+    render(<ContributionFeed locale="en" contributions={[{ ...LEDGER_BANK, verifiedBy: undefined }]} />);
+
+    expect(screen.getByText("Recorded in ledger")).toBeInTheDocument();
+    expect(screen.queryByTestId("feed-paid-by")).not.toBeInTheDocument();
+  });
+
+  it("says the plain ledger row is not verified in its detail", async () => {
+    const user = userEvent.setup();
+    render(<ContributionFeed locale="en" contributions={[LEDGER_ONLY]} />);
+    await user.click(screen.getByText("Contribution #7"));
+    expect(screen.getByText(/does not show a bank verification for it/)).toBeInTheDocument();
+  });
+});
+
 describe("an empty feed says so", () => {
   it("shows an honest empty state instead of fixture rows with bank badges", () => {
     render(<ContributionFeed contributions={[]} />);

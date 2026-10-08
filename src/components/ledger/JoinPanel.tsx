@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ArrowLeft, CircleAlert, CircleCheck, UsersRound } from "lucide-react";
 
 import { useSession } from "@/lib/auth/useSession";
+import { useActiveGroup } from "@/lib/groups/useActiveGroup";
 import {
   clearPendingInvite,
   parseTokenFromHash,
@@ -52,6 +53,8 @@ export function JoinPanel({ initialLocale = "am" }: { readonly initialLocale?: L
   const tokenRef = useRef<string | null>(null);
   const redeeming = useRef(false);
   const signedIn = session.status === "signed-in";
+  // Joining adds a group: re-read the user's groups and make the one just joined the active one.
+  const { reload: reloadGroups } = useActiveGroup();
 
   // Read the token once: fragment first, then whatever a sign-in round trip parked.
   useEffect(() => {
@@ -83,8 +86,11 @@ export function JoinPanel({ initialLocale = "am" }: { readonly initialLocale?: L
     if (!RETRYABLE.has(outcome.status) && outcome.status !== "unauthorized") {
       clearPendingInvite();
     }
+    if (outcome.status === "joined" || outcome.status === "already_member") {
+      reloadGroups(outcome.groupId);
+    }
     setPhase({ kind: "done", outcome });
-  }, []);
+  }, [reloadGroups]);
 
   useEffect(() => {
     if (signedIn && phase.kind === "joining") {

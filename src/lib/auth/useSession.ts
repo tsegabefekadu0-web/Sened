@@ -8,7 +8,13 @@ export type SessionState =
   | { readonly status: "loading" }
   | { readonly status: "unconfigured" }
   | { readonly status: "signed-out" }
-  | { readonly status: "signed-in"; readonly accessToken: string; readonly email: string | null };
+  | {
+      readonly status: "signed-in";
+      readonly accessToken: string;
+      readonly email: string | null;
+      /** The signed-in user's id when the auth client reports one. Keys per-user client state. */
+      readonly userId?: string | null;
+    };
 
 /**
  * The current session. Starts as `loading` on both server and first client
@@ -26,13 +32,18 @@ export function useSession(): SessionState {
       return;
     }
     let active = true;
-    const apply = (session: { access_token: string; user?: { email?: string | null } } | null) => {
+    const apply = (session: { access_token: string; user?: { email?: string | null; id?: string | null } } | null) => {
       if (!active) {
         return;
       }
       setState(
         session?.access_token
-          ? { status: "signed-in", accessToken: session.access_token, email: session.user?.email ?? null }
+          ? {
+              status: "signed-in",
+              accessToken: session.access_token,
+              email: session.user?.email ?? null,
+              userId: session.user?.id ?? null
+            }
           : { status: "signed-out" }
       );
     };

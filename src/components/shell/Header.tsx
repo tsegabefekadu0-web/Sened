@@ -7,6 +7,7 @@ import {
   VerticalTibebBorder,
   ScallopedPlaque,
 } from "@/components/cultural/CulturalIcons";
+import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
 import { createTranslator, type Locale } from "@/lib/i18n";
 
 interface HeaderProps {
@@ -61,6 +62,8 @@ export function Header({ onOpenDigest, isPlayingAudio = false, locale = "am" }: 
           <p className="mt-1 text-[11px] font-medium text-[#B8A08A] tracking-wide font-sans">
             {t("shell.header.subtitle")}
           </p>
+          {/* Which group the whole app is acting on; renders nothing unless signed in with a group. */}
+          <GroupSwitcher locale={locale} tone="dark" className="mx-auto mt-3 w-full max-w-[17rem] px-1 text-left [&>p]:text-center" />
         </div>
       </div>
 

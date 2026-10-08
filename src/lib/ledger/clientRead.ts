@@ -24,28 +24,38 @@ export type LiveLedgerResult =
   | { readonly status: "empty" }
   | { readonly status: "unauthorized" }
   | { readonly status: "no-group" }
-  | { readonly status: "multiple-groups" }
+  /** The caller is in several groups and none is chosen yet: the group switcher decides. */
+  | { readonly status: "choose-group" }
   /** The caller is a plain member: they may read but not record entries. */
   | { readonly status: "read-only" }
   | { readonly status: "error" };
 
+interface WireAccount {
+  readonly id?: unknown;
+  readonly code?: unknown;
+}
 interface WireGroup {
   readonly groupId?: unknown;
+  readonly name?: unknown;
   readonly role?: unknown;
+  readonly accounts?: readonly WireAccount[];
 }
-interface WirePosting {
+export interface WirePosting {
   readonly accountId?: unknown;
   readonly direction?: unknown;
   readonly amount?: unknown;
 }
-interface WireEntry {
+export interface WireEntry {
   readonly id?: unknown;
   readonly groupId?: unknown;
   readonly occurredAt?: unknown;
+  readonly recordedAt?: unknown;
   readonly sequence?: unknown;
   readonly entryType?: unknown;
   readonly correctsEntryId?: unknown;
   readonly postings?: unknown;
+  readonly provenance?: unknown;
+  readonly attribution?: unknown;
 }
 
 function minorUnits(amount: string): bigint | null {
@@ -94,67 +104,285 @@ function toTarget(entry: WireEntry): LiveCorrectionTarget | null {
   };
 }
 
+/** The active group's ledger: its chart of accounts and raw entries. */
+export type GroupLedgerRead =
+  | {
+      readonly status: "ok";
+      readonly groupId: string;
+      readonly accounts: readonly { readonly id: string; readonly code: string }[];
+      readonly entries: readonly WireEntry[];
+    }
+  | { readonly status: "unauthorized" }
+  | { readonly status: "no-group" }
+  | { readonly status: "choose-group" }
+  | { readonly status: "read-only" }
+  | { readonly status: "error" };
+
+/** One of the caller's groups (id, role, chart of accounts) from `GET /api/my-groups`. */
+export type MyGroupRead =
+  | {
+      readonly status: "ok";
+      readonly groupId: string;
+      /** The group's name from the server; empty when it has none. */
+      readonly groupName: string;
+      readonly role: string | null;
+      readonly accounts: readonly { readonly id: string; readonly code: string }[];
+    }
+  | { readonly status: "unauthorized" }
+  | { readonly status: "no-group" }
+  | { readonly status: "choose-group" }
+  | { readonly status: "error" };
+
+/** Which of the caller's groups to act on. */
+export interface GroupChoiceOptions {
+  /**
+   * The caller's active group (see `src/lib/groups`). It is only a preference:
+   * it is used when it is one of the groups the server just returned for this
+   * caller, and ignored otherwise (a stale or foreign id never takes effect).
+   * The server re-checks membership for every group id regardless.
+   */
+  readonly groupId?: string | null;
+}
+
 /**
- * Load the entries the correction form can target: the caller's group from
- * `GET /api/my-groups`, then `GET /api/ledger/entries` for it.
- *
- * Every non-success is a distinct result, because "you have nothing" and "we
- * could not look" must not render the same. With more than one group this
- * refuses rather than choosing: picking the group someone is acting for is
- * exactly the guess that puts money on the wrong ledger.
+ * Pick the group the caller is acting for from the groups the server returned
+ * for them: the preferred one when it is among them, the only one when there
+ * is exactly one and no preference was given, otherwise nothing (the caller
+ * must choose). Never guesses among several, and never substitutes another
+ * group for a preferred one that is missing (the caller left it, or the id is
+ * stale): the switcher would say group A while the money posted to group B.
  */
-export async function loadCorrectionTargets(deps: AuthedFetchDeps = {}): Promise<LiveLedgerResult> {
+export function pickGroup<T extends { readonly groupId?: unknown }>(
+  groups: readonly T[],
+  preferred: string | null | undefined
+): T | null {
+  if (preferred) {
+    return groups.find((group) => group.groupId === preferred) ?? null;
+  }
+  return groups.length === 1 ? groups[0] : null;
+}
+
+/**
+ * Resolve which group the caller is acting for: the preferred (active) group if
+ * they belong to it, else their only group. With none there is nothing to act
+ * on; with several and no valid preference this reports `choose-group` rather
+ * than choosing.
+ */
+export async function readMyGroup(
+  deps: AuthedFetchDeps = {},
+  options: GroupChoiceOptions = {}
+): Promise<MyGroupRead> {
   try {
-    const groupsResponse = await authedFetch("/api/my-groups", { method: "GET" }, deps);
-    if (groupsResponse.status === 401) {
+    const response = await authedFetch("/api/my-groups", { method: "GET" }, deps);
+    if (response.status === 401) {
       return { status: "unauthorized" };
     }
-    if (!groupsResponse.ok) {
+    if (!response.ok) {
       return { status: "error" };
     }
-    const groups = ((await groupsResponse.json()) as { groups?: readonly WireGroup[] }).groups ?? [];
+    const groups = ((await response.json()) as { groups?: readonly WireGroup[] }).groups ?? [];
     if (groups.length === 0) {
       return { status: "no-group" };
     }
-    if (groups.length > 1) {
-      return { status: "multiple-groups" };
+    const group = pickGroup(groups, options.groupId);
+    if (group === null) {
+      return { status: "choose-group" };
     }
-    const groupId = groups[0].groupId;
-    if (typeof groupId !== "string") {
+    if (typeof group.groupId !== "string") {
       return { status: "error" };
     }
-    // Only the owner and treasurer may record entries (the database enforces
-    // it). Say so up front rather than letting a submit fail with a 403.
-    if (groups[0].role === "member") {
-      return { status: "read-only" };
-    }
-
-    const entriesResponse = await authedFetch(
-      `/api/ledger/entries?groupId=${encodeURIComponent(groupId)}`,
-      { method: "GET" },
-      deps
+    const accounts = (Array.isArray(group.accounts) ? group.accounts : []).flatMap((account: WireAccount) =>
+      typeof account?.id === "string" && typeof account.code === "string"
+        ? [{ id: account.id, code: account.code }]
+        : []
     );
-    if (entriesResponse.status === 401) {
-      return { status: "unauthorized" };
-    }
-    if (!entriesResponse.ok) {
-      return { status: "error" };
-    }
-    const wire = ((await entriesResponse.json()) as { entries?: readonly WireEntry[] }).entries;
-    if (!Array.isArray(wire)) {
-      return { status: "error" };
-    }
-    const alreadyCorrected = new Set(wire.map((entry) => entry.correctsEntryId));
-    const targets = wire
-      .filter((entry) => entry.entryType !== "correction" && !alreadyCorrected.has(entry.id))
-      .map(toTarget);
-    if (targets.some((target) => target === null)) {
-      return { status: "error" };
-    }
-    return targets.length === 0
-      ? { status: "empty" }
-      : { status: "ready", targets: targets as LiveCorrectionTarget[] };
+    return {
+      status: "ok",
+      groupId: group.groupId,
+      groupName: typeof group.name === "string" ? group.name.trim() : "",
+      role: typeof group.role === "string" ? group.role : null,
+      accounts
+    };
   } catch (error) {
     return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
   }
+}
+
+/** One page of `GET /api/ledger/entries`, newest first. */
+export type EntriesPageRead =
+  | {
+      readonly status: "ok";
+      readonly entries: readonly WireEntry[];
+      readonly hasMore: boolean;
+      /** The `beforeSequence` for the next older page; `null` on the last page. */
+      readonly nextCursor: string | null;
+    }
+  | { readonly status: "unauthorized" }
+  | { readonly status: "error" };
+
+/**
+ * One page of a group's entries. `beforeSequence` pages back through history
+ * (exclusive upper bound). A server that predates the cursor omits `hasMore`;
+ * that is read as "no more", which is only wrong for the older, capped route
+ * and is what those callers already assumed.
+ */
+export async function readEntriesPage(
+  groupId: string,
+  options: { readonly limit?: number; readonly beforeSequence?: string } = {},
+  deps: AuthedFetchDeps = {}
+): Promise<EntriesPageRead> {
+  try {
+    const query =
+      `groupId=${encodeURIComponent(groupId)}` +
+      (options.limit === undefined ? "" : `&limit=${options.limit}`) +
+      (options.beforeSequence === undefined ? "" : `&beforeSequence=${encodeURIComponent(options.beforeSequence)}`);
+    const response = await authedFetch(`/api/ledger/entries?${query}`, { method: "GET" }, deps);
+    if (response.status === 401) {
+      return { status: "unauthorized" };
+    }
+    if (!response.ok) {
+      return { status: "error" };
+    }
+    const body = (await response.json()) as { entries?: readonly WireEntry[]; hasMore?: unknown; nextCursor?: unknown };
+    if (!Array.isArray(body.entries)) {
+      return { status: "error" };
+    }
+    const hasMore = body.hasMore === true;
+    if (hasMore && (typeof body.nextCursor !== "string" || !/^[1-9]\d{0,18}$/.test(body.nextCursor))) {
+      return { status: "error" };
+    }
+    return {
+      status: "ok",
+      entries: body.entries,
+      hasMore,
+      nextCursor: hasMore ? (body.nextCursor as string) : null
+    };
+  } catch (error) {
+    return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
+  }
+}
+
+export interface WireBalance {
+  readonly accountId: string;
+  readonly code: string;
+  readonly accountType: string;
+  /** Exact ETB decimal string, debit-positive. */
+  readonly balance: string;
+}
+
+/** A group's per-account balances at one chain head (`GET /api/ledger/balances`). */
+export type BalancesRead =
+  | {
+      readonly status: "ok";
+      readonly headSequence: string;
+      readonly entryCount: string;
+      readonly balances: readonly WireBalance[];
+    }
+  | { readonly status: "unauthorized" }
+  | { readonly status: "error" };
+
+/** Read and strictly validate the balances snapshot; anything malformed is `error`, never a guess. */
+export async function fetchLedgerBalances(groupId: string, deps: AuthedFetchDeps = {}): Promise<BalancesRead> {
+  try {
+    const response = await authedFetch(
+      `/api/ledger/balances?groupId=${encodeURIComponent(groupId)}`,
+      { method: "GET" },
+      deps
+    );
+    if (response.status === 401) {
+      return { status: "unauthorized" };
+    }
+    if (!response.ok) {
+      return { status: "error" };
+    }
+    const body = (await response.json()) as Record<string, unknown>;
+    if (
+      typeof body.headSequence !== "string" ||
+      !/^(0|[1-9]\d{0,18})$/.test(body.headSequence) ||
+      typeof body.entryCount !== "string" ||
+      !/^(0|[1-9]\d{0,18})$/.test(body.entryCount) ||
+      !Array.isArray(body.balances)
+    ) {
+      return { status: "error" };
+    }
+    const balances: WireBalance[] = [];
+    for (const item of body.balances as readonly Record<string, unknown>[]) {
+      if (
+        typeof item?.accountId !== "string" ||
+        typeof item.code !== "string" ||
+        typeof item.accountType !== "string" ||
+        typeof item.balance !== "string" ||
+        !/^-?\d+\.\d{2}$/.test(item.balance)
+      ) {
+        return { status: "error" };
+      }
+      balances.push({ accountId: item.accountId, code: item.code, accountType: item.accountType, balance: item.balance });
+    }
+    return { status: "ok", headSequence: body.headSequence, entryCount: body.entryCount, balances };
+  } catch (error) {
+    return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
+  }
+}
+
+/**
+ * Read the caller's group from `GET /api/my-groups`, then its entries from
+ * `GET /api/ledger/entries`. The one place that sequence lives, shared by the
+ * correction form and the home screen.
+ *
+ * Every non-success is a distinct result, because "you have nothing" and "we
+ * could not look" must not render the same. The group is the caller's active
+ * one (`options.groupId`) or their only one; with several and none chosen this
+ * reports `choose-group` rather than guessing.
+ *
+ * `writerOnly` is for callers that go on to record entries: only the owner and
+ * treasurer may (the database enforces it), so say so up front rather than
+ * letting a submit fail with a 403. Readers pass nothing: any member may read.
+ */
+export async function readGroupLedger(
+  deps: AuthedFetchDeps = {},
+  options: GroupChoiceOptions & { readonly writerOnly?: boolean; readonly limit?: number } = {}
+): Promise<GroupLedgerRead> {
+  try {
+    const mine = await readMyGroup(deps, { groupId: options.groupId });
+    if (mine.status !== "ok") {
+      return { status: mine.status };
+    }
+    const { groupId, role } = mine;
+    if (options.writerOnly && role === "member") {
+      return { status: "read-only" };
+    }
+
+    const page = await readEntriesPage(groupId, { limit: options.limit }, deps);
+    if (page.status !== "ok") {
+      return { status: page.status };
+    }
+    return { status: "ok", groupId, accounts: mine.accounts, entries: page.entries };
+  } catch (error) {
+    return error instanceof NotSignedInError ? { status: "unauthorized" } : { status: "error" };
+  }
+}
+
+/**
+ * Load the entries the correction form can target: the caller's active group, then
+ * its entries (see `readGroupLedger`).
+ */
+export async function loadCorrectionTargets(
+  deps: AuthedFetchDeps = {},
+  options: GroupChoiceOptions = {}
+): Promise<LiveLedgerResult> {
+  const read = await readGroupLedger(deps, { writerOnly: true, groupId: options.groupId });
+  if (read.status !== "ok") {
+    return { status: read.status };
+  }
+  const wire = read.entries;
+  const alreadyCorrected = new Set(wire.map((entry) => entry.correctsEntryId));
+  const targets = wire
+    .filter((entry) => entry.entryType !== "correction" && !alreadyCorrected.has(entry.id))
+    .map(toTarget);
+  if (targets.some((target) => target === null)) {
+    return { status: "error" };
+  }
+  return targets.length === 0
+    ? { status: "empty" }
+    : { status: "ready", targets: targets as LiveCorrectionTarget[] };
 }

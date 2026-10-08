@@ -2,15 +2,32 @@ import { DrawError } from "./errors";
 import type {
   DrawCommitment,
   DrawHasher,
+  DrawMemberNonce,
   DrawParticipant,
+  DrawProtocolVersion,
   DrawReveal,
   DrawRosterEntry,
   DrawRound
 } from "./types";
 
-export const DRAW_COMMIT_SERIALIZATION_VERSION = "sened-draw-commit-v2";
+/**
+ * Serialization versions, per protocol version.
+ *
+ * v2 strings are frozen: they are what every historical draw was hashed under,
+ * and changing a byte would make those records unverifiable. v3 bumps both the
+ * commit and the transcript tag. Binding the version into the *commitment* hash
+ * matters: a v3 draw cannot be re-presented as v2 (its commitment would no longer
+ * reproduce), so the weaker rules cannot be reached by relabelling.
+ */
+export const DRAW_COMMIT_SERIALIZATION_VERSION_V2 = "sened-draw-commit-v2";
+export const DRAW_COMMIT_SERIALIZATION_VERSION_V3 = "sened-draw-commit-v3";
+export const DRAW_TRANSCRIPT_SERIALIZATION_VERSION_V2 = "sened-draw-reveal-v2";
+export const DRAW_TRANSCRIPT_SERIALIZATION_VERSION_V3 = "sened-draw-transcript-v3";
+/** The current (v3) tags. */
+export const DRAW_COMMIT_SERIALIZATION_VERSION = DRAW_COMMIT_SERIALIZATION_VERSION_V3;
+export const DRAW_TRANSCRIPT_SERIALIZATION_VERSION = DRAW_TRANSCRIPT_SERIALIZATION_VERSION_V3;
 export const DRAW_ROSTER_SERIALIZATION_VERSION = "sened-draw-roster-v1";
-export const DRAW_TRANSCRIPT_SERIALIZATION_VERSION = "sened-draw-reveal-v2";
+export const DRAW_NONCE_SET_SERIALIZATION_VERSION = "sened-draw-nonce-set-v1";
 export const DRAW_TICKET_SERIALIZATION_VERSION = "sened-draw-ticket-v1";
 export const DRAW_SELECTION_SERIALIZATION_VERSION = "sened-draw-selection-v1";
 export const DRAW_MEMBER_COMMITMENT_SERIALIZATION_VERSION = "sened-draw-member-v1";
@@ -144,17 +161,60 @@ export function canonicalSerializeMemberSet(input: {
   ]);
 }
 
-export function canonicalSerializeCommit(input: {
-  readonly groupId: string;
-  readonly cycleId: string;
-  readonly round: number;
+/**
+ * The member nonce set: every revealed `(memberId, nonce)` pair, in memberId
+ * order, bound to the draw.
+ *
+ * This is the value that makes the winner depend on randomness the treasurer
+ * does not have when they commit. Callers must pass only nonces that have already
+ * been checked against their seals; a duplicate member is refused rather than
+ * silently collapsed, because collapsing would let a revealer drop a member's
+ * nonce by repeating another's.
+ */
+export function canonicalSerializeNonceSet(input: {
   readonly drawId: string;
-  readonly rosterDigest: string;
-  readonly commitmentNonce: string;
-  readonly memberDigest: string;
-  readonly seed: string;
+  readonly nonces: readonly DrawMemberNonce[];
 }): string {
-  return joinVersion(DRAW_COMMIT_SERIALIZATION_VERSION, [
+  const ordered = [...input.nonces].sort((left, right) =>
+    left.memberId < right.memberId ? -1 : left.memberId > right.memberId ? 1 : 0
+  );
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (ordered[index]!.memberId === ordered[index - 1]!.memberId) {
+      throw new DrawError(
+        "MEMBER_COMMITMENT_MISMATCH",
+        "A member nonce appears more than once in the revealed set. The draw is refused."
+      );
+    }
+  }
+  return joinVersion(DRAW_NONCE_SET_SERIALIZATION_VERSION, [
+    canonicalLine("drawId", input.drawId),
+    ...ordered.map((entry, index) =>
+      [
+        canonicalLine(`nonce.${index}.memberId`, entry.memberId),
+        canonicalLine(`nonce.${index}.nonce`, entry.nonce)
+      ].join("\n")
+    )
+  ]);
+}
+
+export function canonicalSerializeCommit(
+  input: {
+    readonly groupId: string;
+    readonly cycleId: string;
+    readonly round: number;
+    readonly drawId: string;
+    readonly rosterDigest: string;
+    readonly commitmentNonce: string;
+    readonly memberDigest: string;
+    readonly seed: string;
+  },
+  protocolVersion: DrawProtocolVersion
+): string {
+  const version =
+    protocolVersion === "v3"
+      ? DRAW_COMMIT_SERIALIZATION_VERSION_V3
+      : DRAW_COMMIT_SERIALIZATION_VERSION_V2;
+  return joinVersion(version, [
     canonicalLine("groupId", input.groupId),
     canonicalLine("cycleId", input.cycleId),
     canonicalLine("round", String(input.round)),
@@ -166,18 +226,48 @@ export function canonicalSerializeCommit(input: {
   ]);
 }
 
-export function canonicalSerializeTranscript(input: {
-  readonly drawId: string;
-  readonly commitment: string;
-  readonly rosterDigest: string;
-  readonly memberDigest: string;
-  readonly seed: string;
-}): string {
-  return joinVersion(DRAW_TRANSCRIPT_SERIALIZATION_VERSION, [
+/**
+ * The transcript preimage whose digest selects the winner.
+ *
+ * v2: `(drawId, commitment, rosterDigest, memberDigest, seed)`. Every one of
+ * those is known to the treasurer before they commit, which is the grinding hole.
+ *
+ * v3: adds `nonceDigest`, the digest of the revealed member nonces. The treasurer
+ * does not know the nonces at commit time, so they cannot search for a winner.
+ */
+export function canonicalSerializeTranscript(
+  input: {
+    readonly drawId: string;
+    readonly commitment: string;
+    readonly rosterDigest: string;
+    readonly memberDigest: string;
+    readonly seed: string;
+    /** Required for v3, ignored for v2. */
+    readonly nonceDigest?: string | null;
+  },
+  protocolVersion: DrawProtocolVersion
+): string {
+  if (protocolVersion === "v2") {
+    return joinVersion(DRAW_TRANSCRIPT_SERIALIZATION_VERSION_V2, [
+      canonicalLine("drawId", input.drawId),
+      canonicalLine("commitment", input.commitment),
+      canonicalLine("rosterDigest", input.rosterDigest),
+      canonicalLine("memberDigest", input.memberDigest),
+      canonicalLine("seed", input.seed)
+    ]);
+  }
+  if (!isHex64(input.nonceDigest)) {
+    throw new DrawError(
+      "INTEGRITY_FAILURE",
+      "A v3 transcript needs the digest of the verified member nonces"
+    );
+  }
+  return joinVersion(DRAW_TRANSCRIPT_SERIALIZATION_VERSION_V3, [
     canonicalLine("drawId", input.drawId),
     canonicalLine("commitment", input.commitment),
     canonicalLine("rosterDigest", input.rosterDigest),
     canonicalLine("memberDigest", input.memberDigest),
+    canonicalLine("nonceDigest", input.nonceDigest),
     canonicalLine("seed", input.seed)
   ]);
 }
@@ -256,6 +346,13 @@ export async function computeMemberDigest(
   return sha256With(hasher, canonicalSerializeMemberSet(input));
 }
 
+export async function computeNonceDigest(
+  input: { readonly drawId: string; readonly nonces: readonly DrawMemberNonce[] },
+  hasher: DrawHasher
+): Promise<string> {
+  return sha256With(hasher, canonicalSerializeNonceSet(input));
+}
+
 export async function computeCommitment(
   input: {
     readonly groupId: string;
@@ -267,9 +364,10 @@ export async function computeCommitment(
     readonly memberDigest: string;
     readonly seed: string;
   },
+  protocolVersion: DrawProtocolVersion,
   hasher: DrawHasher
 ): Promise<string> {
-  return sha256With(hasher, canonicalSerializeCommit(input));
+  return sha256With(hasher, canonicalSerializeCommit(input, protocolVersion));
 }
 
 export async function computeTranscriptDigest(
@@ -279,10 +377,12 @@ export async function computeTranscriptDigest(
     readonly rosterDigest: string;
     readonly memberDigest: string;
     readonly seed: string;
+    readonly nonceDigest?: string | null;
   },
+  protocolVersion: DrawProtocolVersion,
   hasher: DrawHasher
 ): Promise<string> {
-  return sha256With(hasher, canonicalSerializeTranscript(input));
+  return sha256With(hasher, canonicalSerializeTranscript(input, protocolVersion));
 }
 
 /**
@@ -361,6 +461,13 @@ export interface DrawVerificationTranscript {
   readonly cycleId: string;
   readonly round: number;
   readonly commitment: string;
+  /**
+   * Which derivation the draw was committed under. Absent means a transcript
+   * published before versioning existed, i.e. `v2`. Absence can never be used to
+   * downgrade a v3 draw: the version is bound into the commitment hash, so a v3
+   * commitment does not reproduce under v2 rules.
+   */
+  readonly protocolVersion?: DrawProtocolVersion;
   readonly rosterDigest: string;
   readonly commitmentNonce: string;
   /**
@@ -374,6 +481,11 @@ export interface DrawVerificationTranscript {
   readonly memberDigest: string;
   readonly memberCommitments: readonly { readonly memberId: string; readonly sealed: string }[];
   readonly seed: string;
+  /**
+   * The nonces revealed with the seed. Optional for v2 (where they are checked
+   * only when supplied); required for v3, where they decide the winner.
+   */
+  readonly memberNonces?: readonly DrawMemberNonce[];
   readonly participants: readonly {
     readonly memberId: string;
     readonly ticket: string;
@@ -388,6 +500,7 @@ export function toVerificationTranscript(round: DrawRound): DrawVerificationTran
     cycleId: round.cycleId,
     round: round.round,
     commitment: round.commitment,
+    protocolVersion: round.protocolVersion,
     rosterDigest: round.rosterDigest,
     commitmentNonce: round.commitmentNonce,
     memberDigest: round.memberDigest,
@@ -396,6 +509,10 @@ export function toVerificationTranscript(round: DrawRound): DrawVerificationTran
       sealed: contribution.sealed
     })),
     seed: round.reveal?.seed ?? "",
+    memberNonces: (round.reveal?.memberNonces ?? []).map((entry) => ({
+      memberId: entry.memberId,
+      nonce: entry.nonce
+    })),
     participants: round.participants.map((participant) => ({
       memberId: participant.memberId,
       ticket: participant.ticket,

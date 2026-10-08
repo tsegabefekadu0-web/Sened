@@ -3,7 +3,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { toVerificationTranscript, webDrawHasher } from "@/lib/draw/canonical";
+import { isDrawError } from "@/lib/draw/errors";
 import { createCommitment, openReveal, sealMemberContribution, verifyRound } from "@/lib/draw/engine";
+import { triggerHaptic } from "@/lib/draw/haptics";
 import { excludePriorWinners } from "@/lib/draw/rotation";
 import { formatEtbDisplay } from "@/lib/ledger/money";
 import type {
@@ -62,7 +64,7 @@ function entropy(): string {
     .join("");
 }
 
-function usePrefersReducedMotion(): boolean {
+export function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(false);
   useEffect(() => {
     const query = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)");
@@ -79,9 +81,11 @@ export interface DrawBoardProps {
   readonly locale?: Locale;
   /** Rotated out by A1 during integration to link the real ceremony. */
   readonly defaultLocale?: Locale;
+  /** Why this is the demo (signed out, or no server), appended to the demo label. */
+  readonly demoNotice?: string;
 }
 
-export function DrawBoard({ locale = "am" }: DrawBoardProps) {
+export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
   const copy = useMemo(() => t(locale), [locale]);
   const reducedMotion = usePrefersReducedMotion();
 
@@ -162,6 +166,7 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
       setSealedSeed(seed);
       setSealedMember({ contribution, nonce: memberNonce });
       setPhase("sealed");
+      triggerHaptic("commitSealed");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setPhase("idle");
@@ -185,14 +190,19 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
         setReveal(opened.reveal);
         setRisk(opened.risk);
         setPhase("revealed");
+        triggerHaptic("revealStep");
 
         setIsVerifying(true);
         const asRound: DrawRound = { ...source, state: "revealed", reveal: opened.reveal, payout: null };
         const checked = await verifyRound(asRound, {}, webDrawHasher);
         setVerification(checked);
+        triggerHaptic(checked.verified ? "winnerRevealed" : "tamperDetected");
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
         setPhase("sealed");
+        // The engine refuses a seed that does not open the commitment: that
+        // refusal is the tamper being caught. Any other failure is not.
+        if (isDrawError(caught) && caught.code === "COMMITMENT_MISMATCH") triggerHaptic("tamperDetected");
       } finally {
         setIsVerifying(false);
       }
@@ -203,6 +213,7 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
   const revealSeed = useCallback(async () => {
     if (commitment === null || sealedSeed === null || sealedMember === null) return;
     setPhase(reducedMotion ? "revealed" : "shaking");
+    triggerHaptic("revealStep");
     // The tamper switch flips one character. Nothing in the pipeline can tell it
     // was flipped — the commitment check is what catches it, and that is the
     // whole demonstration.
@@ -240,6 +251,14 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden no-scrollbar">
+      <p
+        role="note"
+        data-testid="draw-demo-banner"
+        className="mx-auto mt-3 w-full max-w-md rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2 text-[12px] font-semibold leading-5 text-[#6B4E16] md:max-w-5xl"
+      >
+        {copy.demoBanner}
+        {demoNotice ? ` ${demoNotice}` : ""}
+      </p>
       <MesobCeremony
         phase={phase}
         reducedMotion={reducedMotion}
@@ -317,10 +336,11 @@ export function DrawBoard({ locale = "am" }: DrawBoardProps) {
             </div>
           </div>
 
-          {risk !== null ? <RiskPanel risk={risk} currencyLabel={copy.currency} /> : null}
+          {risk !== null ? <RiskPanel locale={locale} risk={risk} currencyLabel={copy.currency} /> : null}
 
           {transcript !== null ? (
             <VerifyPanel
+              locale={locale}
               transcript={transcript}
               verification={verification}
               isRunning={isVerifying}

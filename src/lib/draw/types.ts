@@ -1,6 +1,28 @@
 export const DRAW_ROUND_STATES = ["committed", "revealed", "paid"] as const;
 export type DrawRoundState = (typeof DRAW_ROUND_STATES)[number];
 
+/**
+ * Draw protocol versions.
+ *
+ * `v2` is the original member-seed protocol. It sealed member nonces before the
+ * treasurer committed, but the winner was derived only from values the treasurer
+ * already knew at commit time (the sealed hashes, never the nonces), so the
+ * treasurer could still grind `seed`/`commitmentNonce` offline until the winner
+ * was who they wanted. It is kept ONLY so historical draws stay verifiable.
+ *
+ * `v3` folds a digest of the revealed member nonces into the transcript digest
+ * that selects the winner. The nonces are the one input the treasurer does not
+ * have at commit time, so the winner can no longer be searched for. New draws
+ * are always `v3`; the database refuses a new `v2` commitment.
+ */
+export const DRAW_PROTOCOL_VERSIONS = ["v2", "v3"] as const;
+export type DrawProtocolVersion = (typeof DRAW_PROTOCOL_VERSIONS)[number];
+export const DRAW_CURRENT_PROTOCOL_VERSION: DrawProtocolVersion = "v3";
+
+export function isDrawProtocolVersion(value: unknown): value is DrawProtocolVersion {
+  return typeof value === "string" && (DRAW_PROTOCOL_VERSIONS as readonly string[]).includes(value);
+}
+
 export const DRAW_MEMBER_STATUSES = ["active", "inactive"] as const;
 export type DrawMemberStatus = (typeof DRAW_MEMBER_STATUSES)[number];
 
@@ -29,7 +51,30 @@ export const DRAW_ERROR_CODES = [
   "ALREADY_COMMITTED",
   "ALREADY_REVEALED",
   "NOT_COMMITTED",
+  /** A member tried to seal while not on this round's eligible roster (for example, they already won). */
+  "NOT_ELIGIBLE",
+  /** A nonce was submitted before the commitment that fixes everything else was published. */
+  "NONCE_TOO_EARLY",
+  /** Every round of the cycle has been drawn, or the cycle is closed. */
+  "CYCLE_COMPLETE",
+  /**
+   * The cycle's contribution gate is `block` and an active member has a flagged
+   * round before the one being opened, and no override reason was given.
+   */
+  "CONTRIBUTION_GATE_BLOCKED",
   "IDEMPOTENCY_CONFLICT",
+  /** A committed draw that is not revealed or cancelled already exists for this round: no re-roll. */
+  "ROUND_HAS_LIVE_DRAW",
+  /** The draw was cancelled; it takes no seal, nonce, commit or reveal. */
+  "DRAW_CANCELLED",
+  /** Cancel before the seal or nonce-release deadline. */
+  "CANCEL_TOO_EARLY",
+  /** The reveal was opened, so the draw must be finished and cannot be cancelled. */
+  "CANCEL_REVEAL_OPENED",
+  /** Every member responded; there is nothing to cancel for. */
+  "CANCEL_NOTHING_MISSED",
+  /** Two cancels in this round already; only a group owner may go further. */
+  "CANCEL_LIMIT_REACHED",
   "UNIFORMITY_EXHAUSTED",
   "UNAVAILABLE",
   "STORAGE_FAILURE",
@@ -113,6 +158,13 @@ export interface DrawCommitment {
   readonly round: number;
   readonly commitment: string;
   /**
+   * Which derivation this draw was committed under. Bound into the commitment
+   * hash itself (`sened-draw-commit-v3`), pinned by the database at commit time,
+   * and never changed afterwards, so a verifier cannot be talked into checking a
+   * v3 draw under the weaker v2 rules.
+   */
+  readonly protocolVersion: DrawProtocolVersion;
+  /**
    * Public half of the sealed entropy. It is published at commit time and is
    * part of the hashed preimage, so the commitment cannot be re-derived from a
    * different nonce — but publishing it early means the commitment is fixed
@@ -184,6 +236,12 @@ export interface DrawVerificationError {
   readonly detail: string;
 }
 
+/** A non-fatal governance concern, as data (see {@link DrawVerificationResult.warningItems}). */
+export type DrawVerificationWarning =
+  | { readonly code: "abandoned_commitments"; readonly count: number }
+  | { readonly code: "recorded_winner_mismatch" }
+  | { readonly code: "recorded_digest_mismatch" };
+
 export interface DrawVerificationResult {
   /**
    * `true` only when every independent cryptographic check passed. A member may
@@ -198,13 +256,34 @@ export interface DrawVerificationResult {
    * decision the service applies policy to.
    */
   readonly warnings: readonly string[];
+  /** The same concerns as `warnings`, structured so the screen can localise them. */
+  readonly warningItems?: readonly DrawVerificationWarning[];
   readonly winnerMemberId: string | null;
   readonly winningTicket: string | null;
   readonly selectedIndex: number | null;
   readonly transcriptDigest: string | null;
+  /**
+   * Digest of the verified member nonces that fed the winner selection. `null`
+   * for a v2 draw (which has none) and whenever the nonces did not all verify.
+   */
+  readonly nonceDigest?: string | null;
   readonly recomputedCommitment: string | null;
   readonly errors: readonly DrawVerificationError[];
 }
+
+/**
+ * One line of reasoning behind the reserve, as data, so the screen can say it in
+ * the member's language. The English `notes` strings are kept alongside for
+ * logs and for callers that predate this field.
+ */
+export type DrawRiskNote =
+  | { readonly code: "base_reserve"; readonly amount: string; readonly bps: number }
+  | { readonly code: "member_exposure"; readonly amount: string }
+  | { readonly code: "final_round" }
+  | { readonly code: "capped"; readonly needed: string; readonly ceilingBps: number }
+  | { readonly code: "coverage"; readonly percent: string; readonly owed: string }
+  | { readonly code: "cannot_absorb" }
+  | { readonly code: "exposure_uncovered"; readonly exposure: string; readonly reserve: string };
 
 export interface DrawRiskAssessment {
   readonly drawId: string;
@@ -227,6 +306,8 @@ export interface DrawRiskAssessment {
   readonly reserveCoversDefaults: number;
   readonly reserveAdequate: boolean;
   readonly notes: readonly string[];
+  /** The same reasoning as `notes`, structured for localisation. */
+  readonly noteItems?: readonly DrawRiskNote[];
 }
 
 export function isDrawRoundState(value: string | null | undefined): value is DrawRoundState {
@@ -238,3 +319,174 @@ export function isDrawVerificationCode(
 ): value is DrawVerificationCode {
   return typeof value === "string" && (DRAW_VERIFICATION_CODES as readonly string[]).includes(value);
 }
+
+// -- cycles, draws and the sealing lifecycle ---------------------------------------
+
+/**
+ * Where a draw is. Derived in the database from which rows exist, never stored:
+ * `sealing` (opened, members sealing) -> `committed` (sealed set frozen, nonces
+ * may be released) -> `revealed` -> `paid`.
+ */
+export const DRAW_LIFECYCLE_STATES = ["sealing", "committed", "revealed", "paid", "cancelled"] as const;
+export type DrawLifecycleState = (typeof DRAW_LIFECYCLE_STATES)[number];
+
+export function isDrawLifecycleState(value: unknown): value is DrawLifecycleState {
+  return typeof value === "string" && (DRAW_LIFECYCLE_STATES as readonly string[]).includes(value);
+}
+
+/**
+ * The per-cycle contribution gate (`docs/architecture/draw.md` §18).
+ *
+ *   off    opening a draw never looks at contributions (every cycle created before the gate existed);
+ *   warn   the screen lists the flagged rounds and asks for a confirmation; the server allows it;
+ *   block  the server refuses to open a draw while an active member has a flagged round before
+ *          the round being opened, unless an owner/treasurer gives a reason, which is recorded.
+ */
+export const DRAW_CONTRIBUTION_GATES = ["off", "warn", "block"] as const;
+export type DrawContributionGate = (typeof DRAW_CONTRIBUTION_GATES)[number];
+
+export function isDrawContributionGate(value: unknown): value is DrawContributionGate {
+  return typeof value === "string" && (DRAW_CONTRIBUTION_GATES as readonly string[]).includes(value);
+}
+
+/** One (member, round) a gate looked at and found flagged. */
+export interface DrawGateFlag {
+  readonly memberId: string;
+  readonly round: number;
+}
+
+/** What opening a draw found when it looked at contributions (absent when no new draw was opened). */
+export interface DrawOpenGate {
+  readonly policy: DrawContributionGate;
+  /** The flagged (member, round) pairs before the round that was opened. Empty under `off`. */
+  readonly flagged: readonly DrawGateFlag[];
+  /** An owner/treasurer's recorded reason let the draw open despite `flagged`. */
+  readonly overridden: boolean;
+}
+
+/** What committing a draw found when it looked at contributions again (absent on a replay). */
+export interface DrawCommitGate {
+  readonly policy: DrawContributionGate;
+  /** The flagged (member, round) pairs before this draw's round at commit time. Empty under `off`. */
+  readonly flagged: readonly DrawGateFlag[];
+  /** An owner/treasurer's reason given AT COMMIT let the draw be committed despite `flagged`. */
+  readonly overridden: boolean;
+  /** `block`, something flagged, and the override given when the draw was opened still covered every pair. */
+  readonly carriedOver: boolean;
+}
+
+/** A draw cycle as the database defines it. Amounts are ETB strings with two decimals. */
+export interface DrawCycleRecord {
+  readonly cycleId: string;
+  readonly groupId: string;
+  readonly name: string;
+  /** Per-member contribution per round. Null only for a cycle that predates the column. */
+  readonly contributionAmount: string | null;
+  /** Contribution times the active members when the cycle was created. */
+  readonly potAmount: string;
+  readonly totalRounds: number;
+  readonly reserveRatioBps: number;
+  readonly startedAt: string;
+  readonly closedAt: string | null;
+  readonly createdAt: string;
+  readonly roundsRevealed: number;
+  readonly roundsPaid: number;
+  /** The round the next draw would be, or null when every round has been drawn. */
+  readonly nextRound: number | null;
+  /** The effective contribution gate: the latest policy change, else the policy chosen at creation. */
+  readonly contributionGate: DrawContributionGate;
+}
+
+/** One draw in a cycle's listing. */
+export interface DrawListEntry {
+  readonly drawId: string;
+  readonly round: number;
+  readonly state: DrawLifecycleState;
+  readonly openedAt: string;
+  readonly committedAt: string | null;
+  readonly revealedAt: string | null;
+  readonly winnerMemberId: string | null;
+  readonly sealCount: number;
+  /** How many members have released a nonce. A count only; never a value. */
+  readonly nonceCount: number;
+  readonly revealRequested: boolean;
+  /** A later draw was opened for the same round, so this one was abandoned. */
+  readonly superseded: boolean;
+  /** Committed before server-created draws existed. Readable, but not completable here. */
+  readonly legacy: boolean;
+}
+
+/** A member's seal: the hash only. */
+export interface DrawSessionSeal {
+  readonly memberId: string;
+  readonly sealed: string;
+  readonly sealedAt?: string;
+}
+
+/**
+ * Everything members may see of a draw in progress: the seal hashes, and for each
+ * sealed member only whether they have released a nonce.
+ */
+export interface DrawSessionView {
+  readonly drawId: string;
+  readonly groupId: string;
+  readonly cycleId: string;
+  readonly round: number;
+  readonly state: DrawLifecycleState;
+  readonly openedBy: string;
+  readonly openedAt: string;
+  readonly committedAt: string | null;
+  readonly cycle: DrawCycleRecord;
+  /** Members who may seal this round (active, not yet drawn this cycle). */
+  readonly eligible: readonly string[];
+  readonly seals: readonly DrawSessionSeal[];
+  readonly nonces: readonly { readonly memberId: string; readonly released: boolean }[];
+  /** The reveal was requested: the seed and nonces are public to the group. */
+  readonly revealRequested: boolean;
+  /** After this instant an owner/treasurer may cancel a draw that is still sealing. Fixed at open. */
+  readonly sealDeadline: string;
+  /** After this instant (and with a nonce missing, reveal not opened) a committed draw may be cancelled. */
+  readonly nonceDeadline: string | null;
+  /** Members excluded from this session as recorded non-responders of an earlier cancel of this round. */
+  readonly excluded: readonly string[];
+  /** Cancels already recorded for this cycle and round (the limit is {@link DRAW_CANCEL_LIMIT}). */
+  readonly cancelsThisRound: number;
+  readonly cancellation: DrawCancellation | null;
+  /** Present once the reveal is opened: the published seed, so any manager can finish the draw. */
+  readonly revealOpening: DrawRevealOpening | null;
+}
+
+/** The two stages at which a draw can be cancelled for members who did not respond. */
+export type DrawCancelStage = "sealing" | "committed";
+
+/**
+ * One append-only cancellation: who, when, why, which stage, the deadline that had passed and
+ * the members who missed it. Visible to every member of the group.
+ */
+export interface DrawCancellation {
+  readonly cancellationId: string;
+  readonly drawId: string;
+  readonly cycleId: string;
+  readonly round: number;
+  readonly stage: DrawCancelStage;
+  readonly reason: string;
+  readonly missedMembers: readonly string[];
+  readonly deadlineAt: string;
+  /** An owner made this call past the per-round limit. */
+  readonly ownerDecision: boolean;
+  readonly cancelledBy: string;
+  readonly cancelledAt: string;
+}
+
+/** Published the moment the reveal is opened: the seed is public from then on. */
+export interface DrawRevealOpening {
+  readonly seed: string;
+  readonly openedBy: string;
+  readonly openedAt: string;
+}
+
+/**
+ * Cancels allowed per round by a treasurer. A third needs a group owner. Mirrors
+ * `sened_draw_cancel_limit()` in the database, which is the authority.
+ */
+export const DRAW_CANCEL_LIMIT = 2;

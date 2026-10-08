@@ -11,12 +11,12 @@
 
 | # | Target | Module | Need | Blocks my lane? | Status |
 |---|---|---|---|---|---|
-| **R-6** | **A1** | `supabase/migrations/20260925120000_bank_verification_reconciliation.sql:285` | **The bank migration does not apply. `schema.table%rowtype` is a PostgreSQL syntax error.** | **Yes for integration** — it stops the whole migration chain, so mine cannot be applied in sequence | **OPEN — see below** |
-| R-1 | **A1** | `src/middleware.ts` | Register the draw API paths in `RATE_LIMITED` so they get a `WRITE_RULE`/`READ_RULE` bucket | No — my routes work unmetered; this is a hardening gap | OPEN |
-| R-2 | **A1** | `src/lib/ledger/types.ts` + `ledger_core.sql` | Allow provenance text on a `disbursement` entry (see note) | No — I keep provenance in my own table | OPEN |
-| R-3 | **A2** | `src/lib/i18n.ts` | Fold in the `draw.*` key triples I filed below | No — I reuse `m2.*` keys + hard-coded Ge'ez per Gen A precedent | OPEN |
-| R-4 | **A1** | `src/app/page.tsx` | Link `DebterCard`'s "ቀጣይ እጣ" affordance to `/draw` during integration | No — `/draw` is self-contained and routable | OPEN |
-| R-5 | **A1** | ledger accounting seeding | Confirm the two account codes I post against exist in every group's `ledger_accounts` | No — I fail closed with an honest 404/422 if they don't | OPEN |
+| **R-6** | **A1** | `supabase/migrations/20260925120000_bank_verification_reconciliation.sql:285` | **The bank migration does not apply. `schema.table%rowtype` is a PostgreSQL syntax error.** | **Yes for integration** — it stops the whole migration chain, so mine cannot be applied in sequence | **RESOLVED (the parameter now uses the composite type `public.bank_verification_intents`, commit 9016e48; the remaining `%rowtype` uses are in `declare` blocks, which are valid; all migrations apply via `scripts/verify-migrations.*`) — see below** |
+| R-1 | **A1** | `src/middleware.ts` | Register the draw API paths in `RATE_LIMITED` so they get a `WRITE_RULE`/`READ_RULE` bucket | No — my routes work unmetered; this is a hardening gap | RESOLVED (all `/api/draw/*` paths, including the `rounds/[roundId]` UUID regex, are in `src/middleware.ts` `RATE_LIMITED` with write/read rules, commit 2257934) |
+| R-2 | **A1** | `src/lib/ledger/types.ts` + `ledger_core.sql` | Allow provenance text on a `disbursement` entry (see note) | No — I keep provenance in my own table | OPEN (unchanged: `src/lib/ledger/rules.ts` still rejects `rationale` on a non-correction entry; option (b) ships, `draw_payouts.ledger_entry_id` plus the draw id in the idempotency key) |
+| R-3 | **A2** | `src/lib/i18n.ts` | Fold in the `draw.*` key triples I filed below | No — I reuse `m2.*` keys + hard-coded Ge'ez per Gen A precedent | RESOLVED (the `draw.*` keys are in `src/lib/i18n.ts` and `src/components/draw/copy.ts` now reads them, commit 2257934) |
+| R-4 | **A1** | `src/app/page.tsx` | Link `DebterCard`'s "ቀጣይ እጣ" affordance to `/draw` during integration | No — `/draw` is self-contained and routable | RESOLVED (`src/app/page.tsx` sends `DebterCard`'s `onDrawClick` to `router.push("/draw")`, commit 2257934) |
+| R-5 | **A1** | ledger accounting seeding | Confirm the two account codes I post against exist in every group's `ledger_accounts` | No — I fail closed with an honest 404/422 if they don't | RESOLVED (`src/lib/ledger/accounts.ts` defines the canonical `POT_CASH` and `PAYOUT_EXPENSE` codes and `create_ledger_group` seeds them for every new group, commits dad1cf0 and the `20260927100000_ledger_group_provisioning.sql` migration; the payout route takes account ids, not the `DRAW_*` codes proposed here) |
 
 ---
 
@@ -202,3 +202,4 @@ before the parse aborted, so there may be more further down.
 | Date | Entry |
 |---|---|
 | 2026-09-26 | Created. Filed R-1 … R-5. None block the lane. |
+| 2026-10-03 | Statuses re-checked against the code. R-1, R-3, R-4, R-5, R-6 resolved; R-2 stays OPEN (no change to the ledger rules; option (b) ships). |

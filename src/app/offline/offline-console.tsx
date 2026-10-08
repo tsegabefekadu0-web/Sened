@@ -1,9 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { OfflineSyncEngine } from "@/lib/offline/engine";
-import { UnconfiguredSyncTransport } from "@/lib/offline/transport";
+import { HttpSyncTransport, UnconfiguredSyncTransport } from "@/lib/offline/transport";
+import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
+import { useSession } from "@/lib/auth/useSession";
+import { useActiveGroup } from "@/lib/groups/useActiveGroup";
+import { readMyGroup } from "@/lib/ledger/clientRead";
+import { serverDisagreesWithActiveGroup, shortGroupId } from "@/lib/groups/activeGroup";
+import { loadPayerChoices, type PayerChoices } from "@/lib/ledger/clientContribution";
+import { readCachedPayerChoices, writeCachedPayerChoices } from "@/lib/ledger/payerChoiceCache";
+import { attributionFromPayload } from "@/lib/db/attribution";
+import { attributionRefusalCode, retryDraftAttribution, retryDueAttributions } from "@/lib/offline/attributionRetry";
+import { ATTRIBUTION_MAX_AUTO_ATTEMPTS, attributionRetryView } from "@/lib/offline/attributionPolicy";
+import {
+  CONTRIBUTION_CHANNELS,
+  CONTRIBUTION_NOTE_MAX,
+  checkContributionNote,
+  isBlankNote,
+  isContributionChannel,
+  type ContributionChannel
+} from "@/lib/ledger/paymentChannel";
+import { translate, type MessageKey } from "@/lib/i18n";
 import { isContentHashingAvailable } from "@/lib/offline/hash";
 import { offlineCopy, type OfflineLocale } from "@/lib/offline/copy";
 import {
@@ -41,15 +60,152 @@ import { formatEtbDisplay } from "@/lib/ledger/money";
  *    `src/lib/offline/copy.ts` (see `docs/requests/agent-4.md` R3).
  */
 
-const GROUP_ID = "22222222-2222-4222-8222-222222222222";
-const CASH_ACCOUNT = "44444444-4444-4444-8444-444444444444";
-const INCOME_ACCOUNT = "55555555-5555-4555-8555-555555555555";
-const ACTOR_ID = "11111111-1111-4111-8111-111111111111";
+/**
+ * The group a *signed-out* (or unconfigured) device keeps its purely local
+ * desk under. It is a placeholder, not a real group: nothing recorded under it
+ * can be queued for the server. A signed-in device resolves the app's active
+ * group (`readMyGroup`, see `GroupSwitcher`) and refuses to queue an entry until
+ * it has one. A draft keeps the group it was created under: its `groupId` is
+ * fixed at save time, and the desk only lists the active group's drafts, so a
+ * later switch hides them but never moves them.
+ */
+const LOCAL_GROUP_ID = "22222222-2222-4222-8222-222222222222";
+const PLACEHOLDER_CASH_ACCOUNT = "44444444-4444-4444-8444-444444444444";
+const PLACEHOLDER_INCOME_ACCOUNT = "55555555-5555-4555-8555-555555555555";
+const GROUP_CACHE_KEY = "sened.offline.group.v2";
+
+type GroupState =
+  | { readonly status: "idle" }
+  | { readonly status: "loading" }
+  | {
+      readonly status: "ready";
+      readonly groupId: string;
+      readonly groupName: string;
+      readonly role: string | null;
+      readonly cashAccountId: string | null;
+      readonly incomeAccountId: string | null;
+    }
+  | { readonly status: "no-group" | "choose-group" | "unresolved" };
+
+interface CachedGroup {
+  readonly name?: string;
+  readonly role: string | null;
+  readonly cashAccountId: string | null;
+  readonly incomeAccountId: string | null;
+}
+
+interface GroupCache {
+  readonly email: string;
+  readonly groups: Readonly<Record<string, CachedGroup>>;
+}
+
+function readGroupCache(email: string | null): GroupCache | null {
+  if (!email) {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(GROUP_CACHE_KEY);
+    const value = raw ? (JSON.parse(raw) as Partial<GroupCache>) : null;
+    if (value && value.email === email && typeof value.groups === "object" && value.groups !== null) {
+      return { email, groups: value.groups as Record<string, CachedGroup> };
+    }
+  } catch {
+    // Storage blocked or corrupt: no cache.
+  }
+  return null;
+}
+
+/**
+ * Per-device convenience only: lets a signed-in treasurer keep drafting with no
+ * network. Keyed by group, so one group's accounts are never offered for another.
+ * With a preferred (active) group only that group's entry counts; with none, the
+ * cache answers only when this account has exactly one cached group (the old
+ * single-group behaviour) and never picks among several.
+ */
+function readCachedGroup(email: string | null, preferredGroupId: string | null): GroupState | null {
+  const cache = readGroupCache(email);
+  if (!cache) {
+    return null;
+  }
+  const ids = Object.keys(cache.groups);
+  const groupId = preferredGroupId ?? (ids.length === 1 ? ids[0] : null);
+  const value = groupId ? cache.groups[groupId] : undefined;
+  if (!groupId || !value) {
+    return null;
+  }
+  return {
+    status: "ready",
+    groupId,
+    groupName: typeof value.name === "string" ? value.name : "",
+    role: typeof value.role === "string" ? value.role : null,
+    cashAccountId: typeof value.cashAccountId === "string" ? value.cashAccountId : null,
+    incomeAccountId: typeof value.incomeAccountId === "string" ? value.incomeAccountId : null
+  };
+}
+
+function writeCachedGroup(email: string | null, group: Extract<GroupState, { status: "ready" }>): void {
+  if (!email) {
+    return;
+  }
+  try {
+    const previous = readGroupCache(email);
+    const { groupId, groupName, role, cashAccountId, incomeAccountId } = group;
+    window.localStorage.setItem(
+      GROUP_CACHE_KEY,
+      JSON.stringify({
+        email,
+        groups: { ...(previous?.groups ?? {}), [groupId]: { name: groupName, role, cashAccountId, incomeAccountId } }
+      })
+    );
+  } catch {
+    // Best effort.
+  }
+}
+
+/** The earliest an automatic payer retry is scheduled after a refresh, so a stuck row cannot spin. */
+const MIN_AUTO_RETRY_DELAY_MS = 2_000;
 
 const CHANNELS = ["telebirr", "cbe-birr", "cash", "bank-transfer"] as const;
+const CONTRIBUTION_CHANNEL_LABEL_KEYS: Readonly<Record<ContributionChannel, MessageKey>> = {
+  telebirr: "shell.feed.channelTelebirr",
+  cbe: "shell.feed.channelCbe",
+  awash: "shell.feed.channelAwash",
+  cash: "shell.feed.channelCash",
+  other: "shell.feed.channelOther"
+};
 const ENTRY_TYPES = ["contribution", "disbursement", "journal"] as const;
 
 type Connectivity = "online" | "offline" | "unknown";
+
+interface StrandedGroup {
+  readonly groupId: string;
+  readonly count: number;
+}
+
+function StrandedDraftsPanel({ stranded, t }: { readonly stranded: readonly StrandedGroup[]; readonly t: TFn }) {
+  if (stranded.length === 0) {
+    return null;
+  }
+  return (
+    <section
+      aria-labelledby="offline-stranded-heading"
+      data-testid="stranded-drafts"
+      className="rounded-2xl border border-offline-rejected/60 bg-offline-raised p-5"
+    >
+      <h2 id="offline-stranded-heading" className="text-lg font-semibold">
+        {t("offline.stranded.title")}
+      </h2>
+      <p className="mt-2 text-sm text-offline-quiet">{t("offline.stranded.body")}</p>
+      <ul className="mt-3 flex flex-col gap-1 text-sm">
+        {stranded.map((entry) => (
+          <li key={entry.groupId} data-testid="stranded-group">
+            {t("offline.stranded.group", { group: shortGroupId(entry.groupId), count: entry.count })}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 interface DeskState {
   readonly roster: readonly RosterMemberRow[];
@@ -76,9 +232,9 @@ const EMPTY_STATE: DeskState = {
 };
 
 export interface OfflineConsoleProps {
-  /** Wave 2 replaces this. Defaults to the fail-closed transport. */
+  /** Test seam. Defaults to `HttpSyncTransport` when signed in, else the fail-closed transport. */
   readonly transport?: SyncTransport;
-  /** Wave 2 supplies the session token. Never persisted. */
+  /** Test seam. Defaults to the signed-in session's Bearer token. Never persisted. */
   readonly authorization?: string;
   readonly initialLocale?: OfflineLocale;
   /** Test seam. Production resolves the device's real IndexedDB. */
@@ -135,6 +291,161 @@ export function OfflineConsole(props: OfflineConsoleProps) {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const session = useSession();
+  const signedIn = session.status === "signed-in";
+  const accessToken = session.status === "signed-in" ? session.accessToken : null;
+  const email = session.status === "signed-in" ? session.email : null;
+  const [group, setGroup] = useState<GroupState>({ status: "idle" });
+  // Which group the desk is for: the app's active group (see `GroupSwitcher`).
+  const activeGroup = useActiveGroup();
+  const groupReady = !activeGroup.provided || activeGroup.status !== "loading";
+  const activeGroupId = activeGroup.activeGroupId;
+  const needsChoice = activeGroup.needsChoice;
+  const reloadGroups = activeGroup.reload;
+
+  useEffect(() => {
+    if (!accessToken) {
+      setGroup({ status: "idle" });
+      return;
+    }
+    setGroup({ status: "loading" });
+    if (!groupReady) {
+      return;
+    }
+    let active = true;
+    void readMyGroup({ getToken: async () => accessToken }, { groupId: activeGroupId }).then((read) => {
+      if (!active) {
+        return;
+      }
+      if (read.status === "ok") {
+        const accountByCode = new Map(read.accounts.map((account) => [account.code, account.id]));
+        const ready = {
+          status: "ready" as const,
+          groupId: read.groupId,
+          groupName: read.groupName,
+          role: read.role,
+          cashAccountId: accountByCode.get("POT_CASH") ?? null,
+          incomeAccountId: accountByCode.get("CONTRIBUTION_INCOME") ?? null
+        };
+        writeCachedGroup(email, ready);
+        setGroup(ready);
+        // The server resolved a group the switcher does not show: re-read the groups.
+        if (serverDisagreesWithActiveGroup(read, activeGroupId)) {
+          reloadGroups();
+        }
+      } else if (read.status === "no-group" || read.status === "choose-group") {
+        setGroup({ status: read.status });
+        // The remembered group is gone or none is chosen: make the switcher say so too.
+        if (serverDisagreesWithActiveGroup(read, activeGroupId)) {
+          reloadGroups();
+        }
+      } else {
+        // Could not look (offline, 401, 5xx). The group this account chose and
+        // resolved before is still its group; with several and none chosen, or
+        // none ever resolved, say so rather than guess.
+        setGroup(
+          needsChoice ? { status: "choose-group" } : (readCachedGroup(email, activeGroupId) ?? { status: "unresolved" })
+        );
+      }
+    });
+    return () => {
+      active = false;
+    };
+    // `needsChoice` only matters inside the failure branch of a read this effect already made;
+    // `reloadGroups` is stable for the life of the store.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, email, groupReady, activeGroupId]);
+
+  const GROUP_ID = group.status === "ready" ? group.groupId : LOCAL_GROUP_ID;
+
+  // Drafts saved under a group this account is no longer in. The desk lists only the
+  // active group's drafts and the server refuses a group the caller has left, so they
+  // would sit on the device unseen. Only judged against a list read from the server.
+  const [stranded, setStranded] = useState<readonly StrandedGroup[]>([]);
+  const knownGroupIds = activeGroup.groups.map((option) => option.groupId).join(",");
+  const groupsAreCurrent = activeGroup.provided && activeGroup.status === "ready" && !activeGroup.stale;
+  useEffect(() => {
+    if (!db || !groupsAreCurrent) {
+      setStranded([]);
+      return;
+    }
+    let live = true;
+    const known = new Set(knownGroupIds.split(",").filter((id) => id !== ""));
+    void listDraftsWithQueueState(db)
+      .then((all) => {
+        if (!live) return;
+        const counts = new Map<string, number>();
+        for (const { draft, outbox } of all) {
+          const groupId = draft.groupId;
+          if (known.has(groupId) || groupId === LOCAL_GROUP_ID || outbox?.state === "synced") continue;
+          counts.set(groupId, (counts.get(groupId) ?? 0) + 1);
+        }
+        setStranded([...counts].map(([groupId, count]) => ({ groupId, count })));
+      })
+      .catch(() => {
+        // A closed database: nothing to report this time.
+      });
+    return () => {
+      live = false;
+    };
+  }, [db, groupsAreCurrent, knownGroupIds, desk.drafts]);
+
+  // The members and cycles a treasurer can name as a payer on a draft. Read from
+  // the server when the device is online and cached per group, so a draft can still
+  // name a payer with no connection; the cache is labelled as such and the server
+  // re-checks the member and cycle when the draft syncs.
+  const [payers, setPayers] = useState<{ readonly choices: Extract<PayerChoices, { status: "ready" }>; readonly fromCache: boolean } | null>(null);
+  const writerGroupId = group.status === "ready" && group.role !== "member" ? group.groupId : null;
+  useEffect(() => {
+    setPayers(null);
+    if (!writerGroupId) {
+      return;
+    }
+    const cached = readCachedPayerChoices(writerGroupId);
+    if (cached) {
+      setPayers({ choices: cached, fromCache: true });
+    }
+  }, [writerGroupId]);
+  useEffect(() => {
+    if (!writerGroupId || !accessToken || connectivity === "offline") {
+      return;
+    }
+    let active = true;
+    void loadPayerChoices(writerGroupId, { getToken: async () => accessToken }).then((read) => {
+      if (active && read.status === "ready") {
+        writeCachedPayerChoices(writerGroupId, read);
+        setPayers({ choices: read, fromCache: false });
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [writerGroupId, accessToken, connectivity]);
+
+  const authorization = props.authorization ?? (accessToken ? `Bearer ${accessToken}` : undefined);
+
+  /** Why a signed-in device may not queue entries yet, or `null` when it may. */
+  const groupBlock: string | null = !signedIn
+    ? null
+    : group.status === "ready"
+      ? group.role === "member"
+        ? "offline.group.readOnly"
+        : null
+      : group.status === "no-group"
+        ? "offline.group.none"
+        : group.status === "choose-group"
+          ? "offline.group.choose"
+          : "offline.group.unresolved";
+
+  const syncModeKey: string | null = props.transport
+    ? null
+    : session.status === "unconfigured"
+      ? "offline.sync.authUnconfigured"
+      : session.status === "signed-out"
+        ? "offline.sync.needsToken"
+        : signedIn && group.status !== "idle" && group.status !== "loading"
+          ? (groupBlock ?? "offline.sync.connected")
+          : null;
 
   const t = useCallback(
     (key: string, variables: Record<string, string | number> = {}) =>
@@ -149,8 +460,11 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     if (!db) {
       return null;
     }
-    return new OfflineSyncEngine({ db, transport: props.transport ?? new UnconfiguredSyncTransport() });
-  }, [db, props.transport]);
+    return new OfflineSyncEngine({
+      db,
+      transport: props.transport ?? (signedIn ? new HttpSyncTransport() : new UnconfiguredSyncTransport())
+    });
+  }, [db, props.transport, signedIn]);
 
   const refresh = useCallback(async () => {
     if (!db) {
@@ -177,7 +491,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
         return;
       }
     }
-  }, [db]);
+  }, [db, GROUP_ID]);
 
   useEffect(() => {
     if (!isOfflineStorageAvailable()) {
@@ -218,7 +532,7 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
     // `drain` is stable enough for this listener: it re-reads the engine on call.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [db, engine]);
+  }, [db, engine, authorization, GROUP_ID, groupBlock]);
 
   const run = useCallback(
     async (action: () => Promise<string | null>) => {
@@ -258,15 +572,86 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     [refresh, t]
   );
 
+  // Automatic retry of a payer that did not record (never while signed out, only online,
+  // bounded, with the attempt count and next-due time kept on the outbox row). The same
+  // pass runs on reconnect, after every drain (the button and the service worker's drain
+  // message both call `drain`) and from a timer set for the next due time.
+  const token = authorization ? authorization.replace(/^Bearer\s+/i, "") : null;
+  const authBlocked = useRef(false);
+  useEffect(() => {
+    authBlocked.current = false;
+  }, [token]);
+
+  const autoRetryPayers = useCallback(
+    async (online?: boolean): Promise<void> => {
+      if (!db || !token || authBlocked.current) {
+        return;
+      }
+      const report = await retryDueAttributions(db, {
+        signedIn: true,
+        ...(online === undefined ? {} : { online }),
+        deps: { getToken: async () => token },
+        groupId: GROUP_ID
+      });
+      if (report.status !== "done") {
+        return;
+      }
+      if (report.stoppedSignedOut) {
+        authBlocked.current = true;
+      }
+      if (report.attempted > 0 || report.stoppedSignedOut) {
+        await refresh();
+      }
+    },
+    [db, token, GROUP_ID, refresh]
+  );
+  const autoRetryRef = useRef(autoRetryPayers);
+  useEffect(() => {
+    autoRetryRef.current = autoRetryPayers;
+  }, [autoRetryPayers]);
+
+  useEffect(() => {
+    const onOnline = () => {
+      void autoRetryRef.current(true);
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []);
+
+  useEffect(() => {
+    if (!db || !token || connectivity === "offline" || authBlocked.current) {
+      return;
+    }
+    let earliest: number | null = null;
+    for (const row of desk.outbox) {
+      const view = attributionRetryView(row, ATTRIBUTION_MAX_AUTO_ATTEMPTS);
+      if (view.kind === "auto") {
+        earliest = earliest === null ? (view.nextAt ?? 0) : Math.min(earliest, view.nextAt ?? 0);
+      }
+    }
+    if (earliest === null) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      void autoRetryRef.current();
+    }, Math.max(MIN_AUTO_RETRY_DELAY_MS, earliest - Date.now()));
+    return () => clearTimeout(timer);
+  }, [db, token, connectivity, desk.outbox]);
+
   async function drain(): Promise<void> {
     if (!engine) {
       return;
     }
     await run(async () => {
-      if (!props.authorization) {
+      if (!authorization) {
         return t("offline.sync.needsToken");
       }
-      const report = await engine.drain(props.authorization, { groupId: GROUP_ID });
+      if (!props.transport && groupBlock) {
+        return t(groupBlock);
+      }
+      const report = await engine.drain(authorization, { groupId: GROUP_ID });
+      // Entries the server now holds may have a payer that did not record: try those too.
+      await autoRetryPayers();
       await refresh();
       // Localised, actionable copy first. A raw transport string is honest but
       // is not something an Ethiopian treasurer can act on in Amharic.
@@ -288,10 +673,13 @@ export function OfflineConsole(props: OfflineConsoleProps) {
       return;
     }
     await run(async () => {
-      if (!props.authorization) {
+      if (!authorization) {
         return t("offline.sync.needsToken");
       }
-      const report = await engine.pull(props.authorization, { groupId: GROUP_ID });
+      if (!props.transport && groupBlock) {
+        return t(groupBlock);
+      }
+      const report = await engine.pull(authorization, { groupId: GROUP_ID });
       if (report.notConfigured) {
         return t("offline.sync.notConfigured");
       }
@@ -340,6 +728,35 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     });
   }
 
+  async function retryAttribution(outboxId: string): Promise<void> {
+    await run(async () => {
+      if (!authorization) {
+        return t("offline.sync.needsToken");
+      }
+      const token = authorization.replace(/^Bearer\s+/i, "");
+      const result = await retryDraftAttribution(db as SenedDatabase, outboxId, { deps: { getToken: async () => token } });
+      switch (result.status) {
+        case "recorded":
+          return t("offline.attribution.retryDone");
+        case "refused":
+          return t("offline.attribution.retryFailed", { reason: attributionReason(locale, result.code) });
+        case "nothing-to-retry":
+          return null;
+        case "unavailable":
+          return t("offline.attribution.retryFailed", {
+            reason: translate(
+              locale,
+              (result.cause === "unauthorized"
+                ? "shell.feed.attribute.error.unauthorized"
+                : result.cause === "rate-limited"
+                  ? "shell.feed.attribute.error.rate_limited"
+                  : "shell.feed.attribute.error.error") as MessageKey
+            )
+          });
+      }
+    });
+  }
+
   async function recordDraft(input: {
     amount: string;
     entryType: (typeof ENTRY_TYPES)[number];
@@ -347,13 +764,20 @@ export function OfflineConsole(props: OfflineConsoleProps) {
     incomeAccountId: string;
     occurredAt: string;
     queueNow: boolean;
+    attribution?: DraftFormInput["attribution"];
   }) {
     await run(async () => {
       if (!db) {
         throw new Error(t("offline.storage.unavailable"));
       }
+      // A signed-in device only saves a draft under its real group. Under the
+      // placeholder it could never sync, and would look like pending work.
+      if (groupBlock) {
+        throw new Error(t(groupBlock));
+      }
       const draft = await saveDraft(db, {
-        updatedBy: ACTOR_ID,
+        updatedBy: email ?? "this-device",
+        ...(input.attribution ? { attribution: input.attribution } : {}),
         request: {
           groupId: GROUP_ID,
           idempotencyKey: `offline-${Date.now().toString(36)}`,
@@ -392,7 +816,8 @@ export function OfflineConsole(props: OfflineConsoleProps) {
             <h1 className="text-2xl font-semibold">{t("offline.title")}</h1>
             <p className="mt-1 max-w-md text-sm text-offline-quiet">{t("offline.subtitle")}</p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <GroupSwitcher locale={locale} tone="dark" className="w-full sm:w-56" />
             <span
               className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${
                 connectivity === "online"
@@ -511,6 +936,11 @@ export function OfflineConsole(props: OfflineConsoleProps) {
               {t("offline.sync.push")}
             </button>
           </div>
+          {syncModeKey ? (
+            <p className="mt-3 text-xs text-offline-quiet" data-testid="offline-sync-mode">
+              {t(syncModeKey)}
+            </p>
+          ) : null}
           {status ? (
             <p className="mt-3 text-xs text-gold-300" role="status">
               {status}
@@ -525,7 +955,24 @@ export function OfflineConsole(props: OfflineConsoleProps) {
 
         <RosterPanel desk={desk} t={t} onRecord={recordNote} />
         <NotesPanel notes={desk.notes} t={t} onDelete={deleteNote} />
-        <DraftsPanel desk={desk} t={t} onRecord={recordDraft} />
+        <StrandedDraftsPanel stranded={stranded} t={t} />
+        <DraftsPanel
+          groupLabel={
+            group.status === "ready"
+              ? (activeGroup.active?.name || group.groupName || shortGroupId(group.groupId))
+              : null
+          }
+          desk={desk}
+          t={t}
+          onRecord={recordDraft}
+          onRetryAttribution={retryAttribution}
+          payers={payers}
+          locale={locale}
+          connectivity={connectivity}
+          busy={busy}
+          defaultCashAccountId={group.status === "ready" ? group.cashAccountId : null}
+          defaultIncomeAccountId={group.status === "ready" ? group.incomeAccountId : null}
+        />
         <QueuePanel desk={desk} t={t} />
       </div>
     </main>
@@ -689,12 +1136,173 @@ function NotesPanel({ notes, t, onDelete }: { readonly notes: readonly SpokenNot
   );
 }
 
-function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly t: TFn; readonly onRecord: (input: { amount: string; entryType: (typeof ENTRY_TYPES)[number]; cashAccountId: string; incomeAccountId: string; occurredAt: string; queueNow: boolean }) => Promise<void> }) {
+type PayersState = { readonly choices: Extract<PayerChoices, { status: "ready" }>; readonly fromCache: boolean } | null;
+
+/** A refusal code as a sentence a person can act on, in the console's language. */
+function attributionReason(locale: OfflineLocale, error: string | null | undefined): string {
+  if (error === "attribution_failed") {
+    return offlineCopy(locale, "offline.attribution.reason.failed");
+  }
+  if (error === "attribution_unreadable") {
+    return offlineCopy(locale, "offline.attribution.reason.unreadable");
+  }
+  return translate(locale, `shell.feed.attribute.error.${attributionRefusalCode(error)}` as MessageKey);
+}
+
+interface DraftFormInput {
+  amount: string;
+  entryType: (typeof ENTRY_TYPES)[number];
+  cashAccountId: string;
+  incomeAccountId: string;
+  occurredAt: string;
+  queueNow: boolean;
+  attribution?: {
+    memberUserId: string;
+    cycleId?: string;
+    round?: number;
+    channel?: ContributionChannel;
+    note?: string;
+  };
+}
+
+function DraftsPanel({
+  desk,
+  t,
+  locale,
+  onRecord,
+  onRetryAttribution,
+  payers,
+  connectivity,
+  busy,
+  defaultCashAccountId,
+  defaultIncomeAccountId,
+  groupLabel
+}: {
+  /** The group a new draft will be recorded to, so nobody queues money for the wrong ledger. */
+  readonly groupLabel: string | null;
+  readonly defaultCashAccountId: string | null;
+  readonly defaultIncomeAccountId: string | null;
+  readonly desk: DeskState;
+  readonly t: TFn;
+  readonly locale: OfflineLocale;
+  readonly payers: PayersState;
+  readonly connectivity: Connectivity;
+  readonly busy: boolean;
+  readonly onRecord: (input: DraftFormInput) => Promise<void>;
+  readonly onRetryAttribution: (outboxId: string) => Promise<void>;
+}) {
   const [amount, setAmount] = useState("");
   const [entryType, setEntryType] = useState<(typeof ENTRY_TYPES)[number]>("contribution");
-  const [cashAccountId, setCashAccountId] = useState(CASH_ACCOUNT);
-  const [incomeAccountId, setIncomeAccountId] = useState(INCOME_ACCOUNT);
+  const [cashAccountId, setCashAccountId] = useState(defaultCashAccountId ?? PLACEHOLDER_CASH_ACCOUNT);
+  const [incomeAccountId, setIncomeAccountId] = useState(defaultIncomeAccountId ?? PLACEHOLDER_INCOME_ACCOUNT);
+  const [payer, setPayer] = useState("");
+  const [cycleId, setCycleId] = useState("");
+  const [round, setRound] = useState("");
+  const [channel, setChannel] = useState<ContributionChannel | "">("");
+  const [note, setNote] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  // The group's own chart replaces the placeholder ids once it is known.
+  useEffect(() => {
+    if (defaultCashAccountId) {
+      setCashAccountId(defaultCashAccountId);
+    }
+    if (defaultIncomeAccountId) {
+      setIncomeAccountId(defaultIncomeAccountId);
+    }
+  }, [defaultCashAccountId, defaultIncomeAccountId]);
+  // A different group's members are not this group's: forget the choice when the lists change.
+  const memberKey = (payers?.choices.members ?? []).map((member) => member.userId).join(",");
+  useEffect(() => {
+    setPayer("");
+    setCycleId("");
+    setRound("");
+    setChannel("");
+    setNote("");
+  }, [memberKey]);
   const [occurredAt, setOccurredAt] = useState(() => new Date().toISOString().slice(0, 16));
+
+  const members = payers?.choices.members ?? [];
+  const cycles = payers?.choices.cycles ?? [];
+  const cycle = cycles.find((candidate) => candidate.cycleId === cycleId) ?? null;
+  const payerLabel = (userId: string): string => {
+    const known = members.find((member) => member.userId === userId);
+    return known?.email ?? translate(locale, "members.anonymous", { id: userId.slice(0, 8) });
+  };
+
+  /** The attribution the form describes, `null` for none, or the name of the field that is wrong. */
+  function readAttribution(): DraftFormInput["attribution"] | null | "payer" | "payerChannel" | "round" | "note" {
+    if (entryType !== "contribution") {
+      return null;
+    }
+    const noteBlank = isBlankNote(note);
+    if (payer === "") {
+      if (cycleId !== "" || round.trim() !== "") {
+        return "payer";
+      }
+      return channel !== "" || !noteBlank ? "payerChannel" : null;
+    }
+    let cleanNote: string | undefined;
+    if (!noteBlank) {
+      const checked = checkContributionNote(note);
+      if (!checked.ok) {
+        return "note";
+      }
+      cleanNote = checked.note;
+    }
+    let roundNumber: number | undefined;
+    if (round.trim() !== "") {
+      roundNumber = /^\d{1,4}$/.test(round.trim()) ? Number(round.trim()) : Number.NaN;
+      const limit = cycle?.totalRounds ?? 1000;
+      if (cycleId === "" || !Number.isInteger(roundNumber) || roundNumber < 1 || roundNumber > limit) {
+        return "round";
+      }
+    }
+    return {
+      memberUserId: payer,
+      ...(cycleId === "" ? {} : { cycleId }),
+      ...(roundNumber === undefined ? {} : { round: roundNumber }),
+      ...(channel === "" ? {} : { channel }),
+      ...(cleanNote === undefined ? {} : { note: cleanNote })
+    };
+  }
+
+  function submit(queueNow: boolean) {
+    const attribution = readAttribution();
+    if (attribution === "payer") {
+      setFormError(offlineCopy(locale, "offline.drafts.payerRequired"));
+      return;
+    }
+    if (attribution === "payerChannel") {
+      setFormError(offlineCopy(locale, "offline.drafts.channelNeedsPayer"));
+      return;
+    }
+    if (attribution === "round") {
+      setFormError(offlineCopy(locale, "offline.drafts.roundError"));
+      return;
+    }
+    if (attribution === "note") {
+      setFormError(offlineCopy(locale, "offline.drafts.noteError"));
+      return;
+    }
+    setFormError(null);
+    void onRecord({
+      amount,
+      entryType,
+      cashAccountId,
+      incomeAccountId,
+      occurredAt,
+      queueNow,
+      ...(attribution ? { attribution } : {})
+    });
+    setAmount("");
+    setPayer("");
+    setCycleId("");
+    setRound("");
+    setChannel("");
+    setNote("");
+  }
+
+  const inputClass = "rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm";
 
   return (
     <Panel title={t("offline.drafts.title")}>
@@ -704,6 +1312,9 @@ function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly
         <ul className="mt-3 flex flex-col gap-2">
           {desk.drafts.map(({ draft, outbox }) => {
             const state: OfflineSyncState = outbox ? outbox.state : "local-draft";
+            const named = draft.attribution ?? (outbox ? attributionFromPayload(outbox.payload) : null);
+            const label = named ? payerLabel(named.memberUserId) : "";
+            const retry = attributionRetryView(outbox);
             return (
               <li key={draft.id} className={`rounded-xl border px-3 py-2 text-sm ${stateClassName(state)}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -724,6 +1335,61 @@ function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly
                 {outbox?.serverEntryHash ? (
                   <p className="offline-hash mt-1 opacity-80">{outbox.serverEntryHash}</p>
                 ) : null}
+                {named ? (
+                  <div className="mt-1 text-xs" data-testid="draft-attribution">
+                    {state !== "synced" ? (
+                      <p>{t("offline.attribution.pending", { payer: label })}</p>
+                    ) : outbox?.attributionOutcome === "RECORDED" ? (
+                      <p data-testid="draft-attribution-recorded">{t("offline.attribution.recorded", { payer: label })}</p>
+                    ) : (
+                      <>
+                        {outbox?.attributionOutcome === "REFUSED" ? (
+                          <p role="alert" data-testid="draft-attribution-refused">
+                            {t("offline.attribution.refused", { reason: attributionReason(locale, outbox.attributionError) })}
+                          </p>
+                        ) : (
+                          <p data-testid="draft-attribution-unknown">{t("offline.attribution.unknown", { payer: label })}</p>
+                        )}
+                        {retry.kind === "auto" ? (
+                          <p data-testid="draft-attribution-auto">
+                            {retry.nextAt !== null && retry.nextAt > Date.now()
+                              ? t("offline.attribution.auto", {
+                                  attempt: retry.attempt,
+                                  max: retry.maxAttempts,
+                                  time: new Date(retry.nextAt).toLocaleTimeString(locale === "am" ? "am-ET" : "en-US")
+                                })
+                              : t("offline.attribution.autoSoon", { attempt: retry.attempt, max: retry.maxAttempts })}
+                          </p>
+                        ) : null}
+                        {retry.kind === "attention" ? (
+                          <p role="alert" data-testid="draft-attribution-attention">
+                            {retry.reason === "definitive"
+                              ? t("offline.attribution.attention.definitive")
+                              : t("offline.attribution.attention.exhausted", { max: ATTRIBUTION_MAX_AUTO_ATTEMPTS })}
+                          </p>
+                        ) : null}
+                        {outbox ? (
+                          <button
+                            type="button"
+                            disabled={busy || connectivity === "offline"}
+                            onClick={() => void onRetryAttribution(outbox.id)}
+                            className="mt-1 rounded-full border border-terracotta-500 px-3 py-1 text-xs disabled:opacity-50"
+                          >
+                            {t("offline.attribution.retry")}
+                          </button>
+                        ) : null}
+                      </>
+                    )}
+                    {named.channel ? (
+                      <p data-testid="draft-attribution-channel">
+                        {t("offline.attribution.channel", {
+                          channel: translate(locale, CONTRIBUTION_CHANNEL_LABEL_KEYS[named.channel])
+                        })}
+                      </p>
+                    ) : null}
+                    {named.note ? <p data-testid="draft-attribution-note">{t("offline.attribution.note", { note: named.note })}</p> : null}
+                  </div>
+                ) : null}
               </li>
             );
           })}
@@ -734,10 +1400,14 @@ function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly
         className="mt-4 flex flex-col gap-3"
         onSubmit={(event) => {
           event.preventDefault();
-          void onRecord({ amount, entryType, cashAccountId, incomeAccountId, occurredAt, queueNow: true });
-          setAmount("");
+          submit(true);
         }}
       >
+        {groupLabel ? (
+          <p data-testid="draft-target-group" className="text-xs font-semibold">
+            {t("offline.drafts.targetGroup", { group: groupLabel })}
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-3">
           <label className="flex flex-1 flex-col gap-1 text-xs">
             <span className="text-offline-quiet">{t("offline.drafts.amountLabel")}</span>
@@ -745,7 +1415,7 @@ function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly
               value={amount}
               inputMode="decimal"
               onChange={(event) => setAmount(event.target.value)}
-              className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+              className={inputClass}
             />
           </label>
           <label className="flex flex-1 flex-col gap-1 text-xs">
@@ -753,7 +1423,7 @@ function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly
             <select
               value={entryType}
               onChange={(event) => setEntryType(event.target.value as (typeof ENTRY_TYPES)[number])}
-              className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+              className={inputClass}
             >
               {ENTRY_TYPES.map((option) => (
                 <option key={option} value={option}>
@@ -769,7 +1439,7 @@ function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly
             <input
               value={cashAccountId}
               onChange={(event) => setCashAccountId(event.target.value)}
-              className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+              className={inputClass}
             />
           </label>
           <label className="flex flex-1 flex-col gap-1 text-xs">
@@ -777,7 +1447,7 @@ function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly
             <input
               value={incomeAccountId}
               onChange={(event) => setIncomeAccountId(event.target.value)}
-              className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+              className={inputClass}
             />
           </label>
         </div>
@@ -787,23 +1457,119 @@ function DraftsPanel({ desk, t, onRecord }: { readonly desk: DeskState; readonly
             type="datetime-local"
             value={occurredAt}
             onChange={(event) => setOccurredAt(event.target.value)}
-            className="rounded-lg border border-offline-quiet/40 bg-offline-surface px-3 py-2 text-sm"
+            className={inputClass}
           />
         </label>
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() =>
-            void onRecord({ amount, entryType, cashAccountId, incomeAccountId, occurredAt, queueNow: false })
-          }
-          className="rounded-full border border-offline-quiet/50 px-4 py-1.5 text-xs"
-        >
-          {t("offline.drafts.save")}
-        </button>
-        <button type="submit" className="rounded-full border border-terracotta-500 px-4 py-1.5 text-xs">
-          {t("offline.drafts.queue")}
-        </button>
-      </div>
+        {entryType === "contribution" && payers ? (
+          <>
+            <div className="flex flex-wrap gap-3">
+              <label className="flex flex-1 flex-col gap-1 text-xs">
+                <span className="text-offline-quiet">{t("offline.drafts.payerLabel")}</span>
+                <select value={payer} onChange={(event) => setPayer(event.target.value)} className={inputClass}>
+                  <option value="">{t("offline.drafts.payerNone")}</option>
+                  {members.map((member) => (
+                    <option key={member.userId} value={member.userId}>
+                      {payerLabel(member.userId)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {payers.choices.cyclesLoaded && cycles.length > 0 ? (
+                <>
+                  <label className="flex flex-1 flex-col gap-1 text-xs">
+                    <span className="text-offline-quiet">{t("offline.drafts.cycleLabel")}</span>
+                    <select
+                      value={cycleId}
+                      onChange={(event) => {
+                        setCycleId(event.target.value);
+                        setRound("");
+                      }}
+                      className={inputClass}
+                    >
+                      <option value="">{t("offline.drafts.cycleNone")}</option>
+                      {cycles.map((candidate) => (
+                        <option key={candidate.cycleId} value={candidate.cycleId}>
+                          {candidate.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-1 flex-col gap-1 text-xs">
+                    <span className="text-offline-quiet">{t("offline.drafts.roundLabel")}</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={cycle?.totalRounds}
+                      step={1}
+                      value={round}
+                      disabled={cycle === null}
+                      onChange={(event) => setRound(event.target.value)}
+                      className={`${inputClass} disabled:opacity-50`}
+                    />
+                  </label>
+                </>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <label className="flex flex-1 flex-col gap-1 text-xs">
+                <span className="text-offline-quiet">{t("offline.drafts.channelLabel")}</span>
+                <select
+                  data-testid="offline-draft-channel"
+                  value={channel}
+                  onChange={(event) => setChannel(isContributionChannel(event.target.value) ? event.target.value : "")}
+                  className={inputClass}
+                >
+                  <option value="">{translate(locale, "shell.feed.channelNone")}</option>
+                  {CONTRIBUTION_CHANNELS.map((option) => (
+                    <option key={option} value={option}>
+                      {translate(locale, CONTRIBUTION_CHANNEL_LABEL_KEYS[option])}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-1 flex-col gap-1 text-xs">
+                <span className="text-offline-quiet">{t("offline.drafts.noteLabel")}</span>
+                <input
+                  data-testid="offline-draft-note"
+                  type="text"
+                  autoComplete="off"
+                  maxLength={CONTRIBUTION_NOTE_MAX * 2}
+                  value={note}
+                  onChange={(event) => setNote(event.target.value)}
+                  className={inputClass}
+                />
+              </label>
+            </div>
+            {payers.fromCache ? (
+              <p className="text-xs text-offline-quiet" data-testid="offline-payers-cached">
+                {t("offline.drafts.payerCached")}
+              </p>
+            ) : null}
+          </>
+        ) : null}
+        {entryType === "contribution" && !payers ? (
+          <p className="text-xs text-offline-quiet" data-testid="offline-payers-unavailable">
+            {t("offline.drafts.payerUnavailable")}
+          </p>
+        ) : null}
+        {formError ? (
+          <p className="text-xs text-terracotta-400" role="alert" data-testid="offline-draft-form-error">
+            {formError}
+          </p>
+        ) : null}
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => submit(false)}
+            className="rounded-full border border-offline-quiet/50 px-4 py-1.5 text-xs"
+          >
+            {t("offline.drafts.save")}
+          </button>
+          <button type="submit" className="rounded-full border border-terracotta-500 px-4 py-1.5 text-xs">
+            {t("offline.drafts.queue")}
+          </button>
+        </div>
       </form>
     </Panel>
   );

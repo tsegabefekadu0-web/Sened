@@ -2,7 +2,9 @@
 
 import React from "react";
 import Link from "next/link";
-import { BookOpenText, Mic, Dices, WifiOff } from "lucide-react";
+import { BookOpenText, Mic, Dices, Scale, WifiOff } from "lucide-react";
+
+import { translate, type Locale } from "@/lib/i18n";
 
 /**
  * The lanes, reachable.
@@ -46,6 +48,12 @@ const DESTINATIONS = [
     sub: "Ledger"
   },
   {
+    href: "/governance",
+    icon: Scale,
+    label: "መመሪያ",
+    sub: "Bylaws"
+  },
+  {
     href: "/offline",
     icon: WifiOff,
     label: "ኦፍላይን",
@@ -53,10 +61,10 @@ const DESTINATIONS = [
   }
 ] as const;
 
-export function WorkspaceLinks() {
+export function WorkspaceLinks({ locale = "am" }: { readonly locale?: Locale } = {}) {
   return (
     <nav
-      aria-label="Built tools"
+      aria-label={translate(locale, "shell.builtTools")}
       className="w-full max-w-md md:max-w-none mx-auto px-4 md:px-0 pt-5 select-none"
     >
       <ul className="flex gap-2.5">

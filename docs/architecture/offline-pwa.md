@@ -4,8 +4,9 @@
 > the network does, it does not work for the one person who needs it most.
 > Offline here is not a nice-to-have; it is a correctness feature.
 
-Branch: `feat/agent-4-offline-pwa` · 101 tests across 3 files · one new
-dependency (`dexie@4.4.6`).
+Branch: `feat/agent-4-offline-pwa` · 111 tests across 3 files (`db.stores` 40,
+`offline.sync` 45, `offline.console` 26) plus 17 for the server route
+(`sync.api.route`), as of 2026-10-03 · one new dependency (`dexie`).
 
 ---
 
@@ -22,18 +23,22 @@ dependency (`dexie@4.4.6`).
 | `src/lib/offline/transport.ts` | `UnconfiguredSyncTransport` (fail-closed) and `HttpSyncTransport` (real, tested against a mocked `fetch`) |
 | `src/lib/offline/backoff.ts` | Jittered exponential backoff, `Retry-After` parsing |
 | `src/lib/offline/hash.ts` | Browser-side WebCrypto SHA-256 for note integrity |
-| `src/lib/offline/copy.ts` | Lane-local `en`/`am` copy, pending A2 integration |
+| `src/lib/offline/copy.ts` | Thin adapter over the `offline.*` keys in `src/lib/i18n.ts` |
 | `src/app/offline/**` | The treasurer's offline desk at `/offline` |
 | `public/manifest.json`, `public/sw.js`, `public/icons/**` | Installability and the app shell |
 | `next.config.mjs` | Service-worker scope, revalidation and manifest headers |
 
-**Deliberately deferred (Wave 2, AGENTWORK §10)**
+**Wave 2 items (AGENTWORK §10) and their current state**
 
-- **No `/api/sync` route.** The *client* half is complete and typed; the server
-  half belongs to A1. §3 specifies the contract precisely enough to be
-  implemented without a redesign.
-- **No Playwright E2E.** `@playwright/test` is not installed, and the brief
-  forbids adding it this wave.
+- **`/api/sync` exists and the console uses it** (`src/app/api/sync/route.ts`,
+  logic in `src/lib/sync/routeHandlers.ts`; §3). `src/app/offline/offline-console.tsx`
+  uses `HttpSyncTransport` when the visitor is signed in and
+  `UnconfiguredSyncTransport` (fail-closed) otherwise. Sync is started by the
+  treasurer's buttons, not automatically on reconnect.
+- **Playwright E2E exists now** (`test/e2e/`, `playwright.config.ts`,
+  `npm run test:e2e`), including a test that the service worker activates and
+  `/offline` loads with the network cut. The rest of the suite runs with
+  workers blocked so a cached shell cannot mask a regression.
 - **No SQL migration.** Nothing here needs a table; the server is A1's.
 
 ---
@@ -76,7 +81,7 @@ string is what every comparison uses.
 
 ---
 
-## 3. The sync contract (Wave 2 server half)
+## 3. The sync contract (implemented server half)
 
 ```ts
 interface SyncTransport {
@@ -87,7 +92,75 @@ interface SyncTransport {
 
 `POST /api/sync` with `{ mutations: SyncPushEnvelope[] }` →
 `{ results: SyncPushResult[] }`, or `{ groupId, sinceSequence, limit }` →
-`SyncPullResult`.
+`SyncPullResult`. One URL, two disjoint strict shapes, chosen by body
+(pulls are metered by `/api/sync`'s write rule because the middleware cannot see
+the body). Requests require a Bearer token, `application/json`, a 256 KiB body cap, and answer
+`Cache-Control: no-store`.
+
+**Push.** Each envelope is replayed, in order, through `LedgerService.append`
+-> `post_ledger_entry_v1`, the same path as `POST /api/ledger/entries`, so
+validation, balancing, the owner/treasurer role gate and idempotency are that
+path's. Idempotency is the RPC's unique `(group, idempotency key)` row plus the
+request fingerprint: a replay returns the stored entry as `REPLAYED`, a
+different body under the same key is `idempotency_conflict`. The **envelope's**
+`idempotencyKey` is the ledger key (the outbox derives it from the draft id and
+keeps it across retries; the payload's own `idempotencyKey` is only a local
+label and is overridden). The envelope's `groupId` must equal the payload's
+(`envelope_mismatch` otherwise). The response always holds one result per envelope, in order; a
+failure is that item's `REJECTED` + `error` (`invalid_request`, `forbidden`,
+`not_found`, `idempotency_conflict`, `unprocessable_ledger_entry`,
+`unsupported_mutation_kind`). Transient ledger failures (`ledger_unavailable`,
+`ledger_write_failed`) are `REJECTED` **with `retryAfterMs`**, which the engine
+turns into a bounded retry rather than a dead end. Only `ledger-draft` has a
+server path; `spoken-note` and `roster-member` are refused, never faked.
+
+**Payer on a draft (additive).** A `ledger-draft` payload may carry
+`attribution: { memberUserId, cycleId?, round?, channel?, note? }` (a **contribution**
+only; `channel` is `telebirr | cbe | awash | cash | other` and `note` is trimmed plain
+text of 1..280 characters, both optional, both stored beside the entry and never in it,
+see `draw.md` §17.4). It is split
+off before the entry is validated, fingerprinted or hashed, then, after the entry posts,
+recorded through `record_ledger_entry_attribution_v1`. The per-item result is extended
+additively; every new field is optional, so an old client ignores it and an old payload
+(no `attribution`) behaves exactly as before:
+
+```ts
+interface SyncPushResult {
+  mutationId: string;
+  outcome: "ACCEPTED" | "REPLAYED" | "REJECTED";
+  serverEntryId?: string; serverEntryHash?: string; serverSequence?: string;
+  // NEW, present only for an ACCEPTED/REPLAYED draft whose payload carried an attribution:
+  attribution?: { outcome: "RECORDED" | "REFUSED"; error?: string };
+  error?: string; retryAfterMs?: number;
+}
+```
+
+- `RECORDED`: the payer is recorded (a replay of an identical record is `RECORDED`, not
+  an error and not a second record).
+- `REFUSED` + `error`: the entry **is posted** and the verdict stays `ACCEPTED` /
+  `REPLAYED`; `error` is the database's code (`attribution_bank_verified`,
+  `attribution_entry_corrected`, `attribution_exists`, `ledger_member_not_found`,
+  `ledger_cycle_not_found`, ...), `forbidden`, or `attribution_failed` when the write
+  itself failed and nothing says it was refused.
+- A malformed attribution, or one on a non-contribution, is `REJECTED` /
+  `invalid_request`, with nothing written.
+- `HttpSyncTransport` reads an attribution it cannot parse as `REFUSED` /
+  `attribution_unreadable`: never as recorded, and never a reason to doubt the entry.
+- A replay attempts the attribution again, so an entry whose first attribution never
+  landed gets it on the next send.
+
+The engine stores the report on the outbox row (`attributionOutcome`,
+`attributionError`); the row is `synced` either way. A new client needs a server that
+has this change (an older server's strict schema refuses a payload with an extra key).
+
+**Pull.** Reads under the caller's JWT (RLS): the group's `ledger_group_heads`
+row, then entries with `sequence > sinceSequence` and `<= head.lastSequence`
+ascending (so head and slice are one snapshot), `limit` 1..500, `hasMore` from a
+`limit + 1` read. Before returning, the server checks the slice for sequence
+gaps, `previousHash` links, and that a slice ending at the head hashes to
+`head.lastHash`; a failure is a 502, never a page to trust. A group the caller
+cannot see is 404. Entries omit tenant id, request fingerprint and idempotency
+key; the head carries the tenant id.
 
 Rules the server must honour, in priority order:
 
@@ -101,7 +174,12 @@ Rules the server must honour, in priority order:
    `serverEntryHash` is a protocol violation.** `HttpSyncTransport` throws
    `SYNC_CORRUPT_PAYLOAD` rather than reporting a success the client cannot
    re-verify later. This is a **tested** branch, not a comment.
-4. **`pull` returns a contiguous, hash-linked slice** in ascending sequence.
+4. **`pull` returns a contiguous, hash-linked slice** in ascending sequence. Each
+   entry also carries read-only `provenance` (`null`, or the bank verification that
+   posted it: provider, time, verification id, the member whose receipt it was and
+   `referenceMasked`, `••••` plus the last 1-4 characters of the bank reference or
+   `null`; never the full reference). It is not part of the hash and the client does not store or
+   rely on it for chain verification.
 5. **A result for an unknown `mutationId` is rejected**, not silently ignored.
 6. Status mapping the client already implements: 401 → `SYNC_UNAUTHENTICATED`,
    403 → `SYNC_FORBIDDEN`, 404 → `SYNC_NOT_CONFIGURED`, 409 →
@@ -137,7 +215,7 @@ complete**. This matters twice over: `src/lib/ledger/canonical.ts` imports
 `node:crypto` and cannot ship to a browser, and A1 owns that file (§8.5).
 Re-deriving a hash client-side would mean re-implementing the single most
 safety-critical function in the product in a second place. A1's
-`verifyLedgerChain` still runs server-side during a Wave 2 pull, where Node is
+`verifyLedgerChain` runs server-side in the `/api/sync` pull, where Node is
 available.
 
 ### What the client refuses to write
@@ -225,9 +303,9 @@ the delay is never 0.
 
 ## 6. i18n — the `offline.*` triples to fold into `src/lib/i18n.ts`
 
-`src/lib/i18n.ts` belongs to AGENT-2 alone (§4.1) and a key in `en` without its
-`am` twin is a compile error, so these are **filed, not added** (request R3).
-`src/lib/offline/copy.ts` mirrors them and must be deleted at integration.
+These triples are now in `src/lib/i18n.ts` (request R3 is closed), and
+`src/lib/offline/copy.ts` reads them from there. The table below is the
+original filing and the dictionary is the source of truth.
 
 | key | en | am |
 |---|---|---|
@@ -314,12 +392,44 @@ the delay is never 0.
 worker whose job is to replace itself on a new deploy should not need a build
 step to do that.
 
+> **Current state:** the worker is registered. `src/components/pwa/ServiceWorkerRegistration.tsx`
+> is mounted once in `src/app/layout.tsx` and calls
+> `navigator.serviceWorker.register("/sw.js", { scope: "/" })` after the page's
+> `load` event, **only** in a production build, in a secure context
+> (`window.isSecureContext`; `127.0.0.1` counts) and when `"serviceWorker" in
+> navigator`. It never registers under `next dev` or jsdom. A registration
+> failure is `console.warn`ed and otherwise ignored. A Playwright test
+> (`test/e2e/smoke.spec.ts`, "service worker and the offline shell") proves the
+> worker takes control, precaches `/offline` plus its hashed chunks, and serves
+> the offline desk with the worker's network cut.
+
+Caching strategy, per request type:
+
+| Request | Strategy |
+|---|---|
+| `/api/**`, HMR/`__nextjs`, any non-`GET`, cross-origin | Not handled — straight to the network, never stored |
+| Navigations (any page) | Network-first. Only the `/offline` document is ever cached. On network failure, `/offline` is served from cache; any other URL is **redirected** to `/offline` (Next hydrates from the URL, so serving `/offline`'s HTML at `/ledger` would mount the wrong screen). Other pages' HTML is never stored, so no stale or per-user shell can be replayed |
+| `/_next/static/**` | Cache-first (content-hashed, so immutable), capped at 200 entries |
+| `/manifest.json`, `/icons/**` | Network-first, cache fallback |
+| Everything else | Not handled |
+
+Install precaches `/offline`, the manifest and icons, then reads the hashed
+`/_next/static/**` URLs out of the `/offline` HTML and caches those too —
+otherwise the cached document would render but never hydrate. A failed precache
+does not block installation. Caches are versioned (`sened-v2-shell`,
+`sened-v2-static`); `activate` deletes every other `sened-*` cache, and only
+those. `skipWaiting` + `clients.claim` are used because navigations are
+network-first (a new worker never pins an old shell), hashed assets are keyed by
+name (old and new chunks coexist), and the worker holds no state. Background
+Sync is not used; the page drains the outbox itself, which works in every
+browser. Nothing in `src/` posts `sened:drain-outbox` to the worker yet, so the
+worker-relayed drain is wired on the receiving side only.
+
 It does three things and refuses several others:
 
-- **Precaches the offline desk shell** with `cache.addAll`, which is atomic —
-  one 404 and nothing is cached, so a half-working offline shell is never
-  presented as a working one.
-- **Serves navigations from cache** when the network is gone.
+- **Precaches the offline desk shell** (document, hashed chunks, manifest,
+  icons). A precache failure is tolerated; the runtime handlers fill the cache.
+- **Serves the offline desk** when the network is gone.
 - **Forwards `sened:drain-outbox` messages to the page.** The worker only
   relays. The queue, the backoff and the idempotency keys live in the page's
   IndexedDB, so the worker never holds a credential or a ledger payload.
@@ -350,6 +460,87 @@ lattice. The maskable variant keeps its mark inside the 80% safe circle.
 > it.
 
 ---
+
+### Schema version 3: payment channel, note, and the payer's retry state
+
+`DATABASE_SCHEMA_VERSION` is 3. No index changed. Version 2's upgrade stays as it was
+(`attribution: null` on a draft, `attributionOutcome` / `attributionError: null` on an
+outbox row); version 3 adds, to every outbox row, `attributionAttempts: 0` and
+`attributionNextAttemptAt: null`, and nothing else. A `DraftAttribution` may now carry
+optional `channel` and `note`; an absent one means none, so a draft saved before version
+3 (with or without a payer) is still valid, is not rewritten, and queues and syncs
+byte-for-byte as it did (`test/offline.attribution.autoretry.test.ts` upgrades a v1 and
+a v2 database to v3 and checks drafts, payloads and which rows are owed a retry).
+`normalizeDraftAttribution` checks both on the device with the server's rules (a
+blank note is "none"; a bad channel, a note over 280 characters or one with a control or
+bidi character is `INVALID_DRAFT`).
+
+### 7a. Retrying a payer that did not record
+
+The entry is posted whatever happens to the payer, so a payer that did not record is a
+follow-up. It is retried by sending only `POST /api/ledger/attributions` for the server's
+entry id, with the draft's own cycle, round, channel and note. The entry is never
+pushed again, and `record_ledger_entry_attribution_v1` answers an identical record with
+the existing one (`replayed: true`), so repeating the call cannot double-record: this is
+proved in SQL ("ALL PAYMENT CHANNEL AND NOTE CHECKS PASSED" and the earlier attribution
+checks) and in `offline.attribution.autoretry.test.ts` (a record that already exists is
+read back as `RECORDED`, a recorded payer is never sent again, two triggers at once send
+one request).
+
+*Which answers are retried by themselves* (`src/lib/offline/attributionPolicy.ts`):
+
+- **Transient**, retried automatically: the server did not say (`unknown`),
+  `attribution_failed`, `attribution_unreadable`, `attribution_conflict`, a network error,
+  a 5xx or a rate limit.
+- **Definitive**, never retried by itself: `attribution_exists` (a different payer is
+  already there), `forbidden`, `ledger_member_not_found`, `attribution_bank_verified`,
+  `attribution_entry_corrected`, `attribution_not_contribution`, entry or cycle not
+  found, and **any code this client does not know**: failing closed means a new server
+  code reaches a person instead of looping. These show "Needs your attention", the
+  reason, and the manual button.
+
+*How* (`src/lib/offline/attributionRetry.ts`, `retryDueAttributions`):
+
+- Bounded: `ATTRIBUTION_MAX_AUTO_ATTEMPTS` (8, the sync engine's own bound). The attempt
+  that came back with the sync result counts as the first. After the last, the row
+  shows "Needs your attention: the 8 automatic tries are used up".
+- Backoff: the shared `computeBackoffMs` (`backoff.ts`), jittered; the next due time is
+  stored on the outbox row (`attributionNextAttemptAt`) next to the count
+  (`attributionAttempts`), so a reload carries on where it was.
+- Only while online and signed in. Signed out, nothing is read, sent or counted
+  (`signedIn: false` returns before touching storage, and `authedFetch` independently
+  fails closed without a token). A 401 mid-run stops the run and spends no try.
+- Safe against itself: a row is claimed inside one IndexedDB transaction first (its
+  next-due time is pushed out by a 30 s lease), so the reconnect event, the drain and the
+  service worker's message firing together send one request.
+- Triggers, in `/offline`: the browser's `online` event; after every drain (the button,
+  and the service worker's `sened:outbox-drain-requested` message, which calls the same
+  drain); and a timer set for the earliest due time (never sooner than two seconds, and
+  not while offline or after a 401).
+- The manual button is unchanged for a transient failure (it changes nothing) and
+  works on any not-recorded payer, including after the tries are used up. A 403 is
+  recorded as a definitive `forbidden` by either path.
+- The row reads "Retrying automatically (attempt 2 of 8, next try at 14:03:10)" or, when
+  it is due now, "... as soon as this device is online"; a definitive refusal or used-up
+  tries reads "Needs your attention ...".
+
+### Schema version 2: the payer on a draft
+
+`DATABASE_SCHEMA_VERSION` is 2. No index changed. `LedgerDraftRow.attribution` (a
+`DraftAttribution` or null) and `OutboxRow.attributionOutcome` / `attributionError` are
+new optional fields; the version-2 upgrade (`schema.ts`) gives every existing draft
+`attribution: null` and every existing outbox row `attributionOutcome: null`,
+`attributionError: null`, and touches nothing else, so a draft saved before it is still
+valid, queues as a bare request and syncs as it always did. `saveDraft` takes an optional
+`attribution`, checked for shape on the device (`src/lib/db/attribution.ts`: a UUID
+member, an optional UUID cycle, an optional round of 1..1000 that needs its cycle,
+contributions only); `queueDraft` puts it in the outbox payload.
+
+**Retry.** `retryDraftAttribution` (`src/lib/offline/attributionRetry.ts`) sends only the
+attribution (`POST /api/ledger/attributions`, the existing attribute action) for a
+*synced* draft's server entry id and records the outcome on the row; the entry is never
+pushed again. A refusal stores its reason; an unreachable server, a signed-out session or
+a rate limit changes nothing.
 
 ## 8. The console at `/offline`
 
@@ -435,26 +626,45 @@ mistakes:
 
 | Request | Target | Blocking? |
 |---|---|---|
-| R1 — add `/api/sync` to `RATE_LIMITED` in `src/middleware.ts` (the `resolveRateLimit` branch at line 27-29 is already there but unreachable) | A1 | No — Wave 2 |
-| R2 — add `<link rel="manifest">` + `apple-touch-icon` to `src/app/layout.tsx` | A1 | **Yes** — installability |
-| R3 — fold the 70 `offline.*` triples in §6 into `src/lib/i18n.ts`, then delete `src/lib/offline/copy.ts` | A2 | No |
+| R1 — add `/api/sync` to `RATE_LIMITED` in `src/middleware.ts` | A1 | Done |
+| R2 — add the manifest link and icons to `src/app/layout.tsx` | A1 | Done (`metadata.manifest` and `icons`) |
+| R3 — fold the `offline.*` triples in §6 into `src/lib/i18n.ts` | A2 | Done; `copy.ts` was kept as an adapter rather than deleted |
 | R4/R5 — no change requested; `canonical.ts` signatures and the ledger route are dependencies I only read | A1 | No |
 
 ---
 
 ## 12. Known limitations, stated rather than hidden
 
-- **No server exists.** Wave 2. Every drain fails closed with
-  `SYNC_NOT_CONFIGURED` and the queue stays visibly queued. That is the honest
-  state today, not a gap in the design.
-- **The console uses fixture group and account UUIDs.** A1 supplies real ones at
-  integration; they are module constants for that reason.
+- **Sync only runs when signed in, and only when the treasurer presses it** (or the
+  service worker asks the open console to drain). Signed out, the console uses
+  `UnconfiguredSyncTransport` and a drain fails closed with `SYNC_NOT_CONFIGURED`.
+  Entries do not push themselves when the network returns; only the payer follow-up of
+  an entry the server already holds does (§7a), and only while the console is open.
+- **The pulled mirror is only displayed on `/offline`** (entry count and chain
+  head). The home and ledger screens do not read it.
+- **The console resolves the signed-in user's group** (via `/api/my-groups`) and
+  falls back to a fixed local UUID (`LOCAL_GROUP_ID`) when signed out or when the
+  group cannot be resolved; a plain `member` cannot queue entries.
+- **The payer list on a draft is the last copy the device saw online.** Members and
+  draw cycles are read when the device is online and cached per group in
+  `localStorage` (`src/lib/ledger/payerChoiceCache.ts`), labelled as such in the console.
+  A device that has never been online cannot name a payer; the draft still saves, and the
+  treasurer attributes it after it syncs. The server re-checks the member and cycle when
+  the draft syncs. The retry of a payer that did not record is automatic only for
+  answers that say nothing about the payer (§7a); a definitive refusal, or tries used up,
+  needs the button and a person.
+- **Only `ledger-draft` mutations have a server path.** Spoken notes and roster
+  edits stay on the device.
 - **No audio blobs are persisted.** A 25 MB base64 string in IndexedDB is how a
   treasurer loses a Sunday's work to a quota error, so the row keeps mime type,
   byte length and duration, and the caller owns blob storage.
 - **No plural forms.** The repo's `translate()` has none; §6 notes which keys
   would need them.
-- **Service worker registration is not in `layout.tsx`** (A1's file) — §7.
+- **The service worker only runs in production builds over a secure context.**
+  Under `next dev` the app has no offline shell by design. Only `/offline` (and
+  its chunks) is cached; other pages are redirected to it when offline, so the
+  rest of the app is not usable without a connection. Nothing in `src/` sends
+  `sened:drain-outbox` to the worker yet. See §7.
 - **Round trips are a single batch of 25.** A 200-member Sunday with no signal
   produces a 200-row queue that drains over several passes. Correct, but the
   treasurer should see the queue depth, which the console does.

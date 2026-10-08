@@ -12,7 +12,13 @@ import { consumeRateLimit, PROXY_RULE, READ_RULE, WRITE_RULE, type RateLimitRule
  */
 export const RATE_LIMITED = new Set([
   "/api/ledger/entries",
+  "/api/ledger/balances",
   "/api/ledger/member-roles",
+  // Who paid a contribution with no bank verification (POST records, PUT corrects
+  // with a reason): small appends beside the ledger, metered as writes.
+  "/api/ledger/attributions",
+  // A member's own avatar attire: a small write, read back through the members list.
+  "/api/ledger/member-attire",
   // Invite links: create/list share one path (the method picks the rule),
   // redeem and revoke are writes, the member list is a read.
   "/api/ledger/invites",
@@ -31,6 +37,24 @@ export const RATE_LIMITED = new Set([
   "/api/draw/payouts",
   "/api/draw/verify",
   "/api/draw/rounds/[roundId]",
+  // Cycles, server-created draws, and the member seal / nonce submissions.
+  // `/api/draw/cycles` carries both the list (GET) and the create (POST), so the
+  // method picks the rule; the others are single-purpose.
+  "/api/draw/cycles",
+  "/api/draw/cycles/[cycleId]",
+  "/api/draw/draws",
+  "/api/draw/draws/[drawId]",
+  "/api/draw/seals",
+  "/api/draw/cancel",
+  "/api/draw/nonces",
+  // Collateral (M4.2): the derived read, and one POST carrying propose / accept /
+  // decline / release / supersede for a guarantee. Advisory only; nothing moves money.
+  "/api/draw/collateral",
+  "/api/draw/guarantees",
+  // Per-round contributions for every member (a derived read), and the owner/treasurer's
+  // change of a cycle's contribution gate (an append-only audit event).
+  "/api/draw/contributions",
+  "/api/draw/gate",
   // A4: Wave 2's sync route. The branch in `resolveRateLimit` already existed
   // and was unreachable until this entry existed.
   "/api/sync",
@@ -38,13 +62,23 @@ export const RATE_LIMITED = new Set([
   // cannot name a binding without one, so these are on the path to verifying
   // anything at all, and they return account metadata.
   "/api/bank-account-bindings",
-  "/api/my-groups"
+  "/api/my-groups",
+  // M5: the recommendation engine is a pure read-sized call; the citations
+  // route spends the server's ScholarXIV key, so it takes the write rule like
+  // the other third-party-backed routes.
+  "/api/governance/recommendations",
+  "/api/governance/citations",
+  // Cron-only (shared-secret) and spends the bank provider's quota, so it is
+  // metered as a write even though a legitimate scheduler calls it once a minute.
+  "/api/reconciliation/drain"
 ]);
 
 const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 
 const BANK_VERIFICATION_ID_PATH = new RegExp(`^/api/bank-verifications/${UUID_SOURCE}$`, "i");
 const DRAW_ROUND_PATH = new RegExp(`^/api/draw/rounds/${UUID_SOURCE}$`, "i");
+const DRAW_CYCLE_PATH = new RegExp(`^/api/draw/cycles/${UUID_SOURCE}$`, "i");
+const DRAW_SESSION_PATH = new RegExp(`^/api/draw/draws/${UUID_SOURCE}$`, "i");
 
 function isBankVerificationReadPath(pathname: string): boolean {
   return pathname === "/api/bank-verifications/[verificationId]" || BANK_VERIFICATION_ID_PATH.test(pathname);
@@ -58,8 +92,22 @@ function isDrawRoundPath(pathname: string): boolean {
   return pathname === "/api/draw/rounds/[roundId]" || DRAW_ROUND_PATH.test(pathname);
 }
 
+function isDrawCyclePath(pathname: string): boolean {
+  return pathname === "/api/draw/cycles/[cycleId]" || DRAW_CYCLE_PATH.test(pathname);
+}
+
+function isDrawSessionPath(pathname: string): boolean {
+  return pathname === "/api/draw/draws/[drawId]" || DRAW_SESSION_PATH.test(pathname);
+}
+
 export function isRateLimitedPath(pathname: string): boolean {
-  return RATE_LIMITED.has(pathname) || isBankVerificationReadPath(pathname) || isDrawRoundPath(pathname);
+  return (
+    RATE_LIMITED.has(pathname) ||
+    isBankVerificationReadPath(pathname) ||
+    isDrawRoundPath(pathname) ||
+    isDrawCyclePath(pathname) ||
+    isDrawSessionPath(pathname)
+  );
 }
 
 export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRule {
@@ -69,10 +117,15 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
   if (pathname === "/api/ledger/invites/redeem" || pathname === "/api/ledger/invites/revoke") {
     return WRITE_RULE;
   }
-  if (pathname === "/api/ledger/members") {
+  if (pathname === "/api/ledger/members" || pathname === "/api/ledger/balances") {
     return READ_RULE;
   }
-  if (pathname === "/api/bank-verifications" || pathname === "/api/ledger/member-roles") {
+  if (
+    pathname === "/api/bank-verifications" ||
+    pathname === "/api/ledger/member-roles" ||
+    pathname === "/api/ledger/member-attire" ||
+    pathname === "/api/ledger/attributions"
+  ) {
     return WRITE_RULE;
   }
   if (isBankVerificationReadPath(pathname)) {
@@ -95,10 +148,42 @@ export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRu
   if (pathname === "/api/draw/verify" || isDrawRoundPath(pathname)) {
     return READ_RULE;
   }
+  // Creating a cycle, opening a draw and a member's seal or nonce each write
+  // state a ceremony depends on. Listing and reading them is read-sized.
+  if (pathname === "/api/draw/cycles") {
+    return method === "GET" ? READ_RULE : WRITE_RULE;
+  }
+  if (
+    pathname === "/api/draw/draws" ||
+    pathname === "/api/draw/seals" ||
+    pathname === "/api/draw/nonces" ||
+    pathname === "/api/draw/guarantees" ||
+    pathname === "/api/draw/gate"
+  ) {
+    return WRITE_RULE;
+  }
+  if (pathname === "/api/draw/collateral" || pathname === "/api/draw/contributions") {
+    return READ_RULE;
+  }
+  if (isDrawCyclePath(pathname) || isDrawSessionPath(pathname)) {
+    return READ_RULE;
+  }
   // A2: transcription and synthesis are billable third-party calls, so they
   // take the strictest rule the module has rather than the generic proxy one.
   if (pathname === "/api/voice/transcribe" || pathname === "/api/voice/speak") {
     return WRITE_RULE;
+  }
+  if (pathname === "/api/governance/recommendations") {
+    return READ_RULE;
+  }
+  if (pathname === "/api/governance/citations" || pathname === "/api/reconciliation/drain") {
+    return WRITE_RULE;
+  }
+  // `/api/sync` carries both pushes and pulls on one URL, so the middleware only
+  // floods-guards it per request; the handler charges the real cost (a push by the
+  // number of entries it carries, a pull in its own bucket). See `src/lib/sync`.
+  if (pathname === "/api/sync") {
+    return READ_RULE;
   }
   if (pathname.endsWith("/sync")) {
     return WRITE_RULE;

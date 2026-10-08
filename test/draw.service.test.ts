@@ -54,10 +54,13 @@ interface Harness {
 
 function harness(options: { readonly hasher?: typeof nodeDrawHasher } = {}): Harness {
   const ledger = ledgerRepository();
-  const drawRepo = new InMemoryDrawRepository();
   const drawHasher = options.hasher ?? hasher;
+  // These are engine-level tests: the caller supplies the sealed set and the
+  // roster. Production no longer accepts that (a commit takes the seals members
+  // stored), so the double is told to allow it; `draw.sessions.test.ts` covers the
+  // server-created flow.
+  const drawRepo = new InMemoryDrawRepository({ allowSessionlessCommit: true, hasher: drawHasher });
   const sealed = new Map<string, { memberId: string; nonce: string }>();
-  let counter = 0;
   return {
     ledger,
     drawRepo,
@@ -65,8 +68,7 @@ function harness(options: { readonly hasher?: typeof nodeDrawHasher } = {}): Har
     sealed,
     service: new DrawService(drawRepo, new LedgerService(ledger), {
       hasher: drawHasher,
-      clock: () => new Date("2026-09-26T10:00:00.000Z"),
-      entropyFactory: () => `entropy-${String(counter++).padStart(4, "0")}-abcdefghij`
+      clock: () => new Date("2026-09-26T10:00:00.000Z")
     })
   };
 }

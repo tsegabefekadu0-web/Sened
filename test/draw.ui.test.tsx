@@ -263,3 +263,118 @@ describe("VerifyPanel tamper reporting", () => {
     expect(screen.getByText(/abandoned/)).toBeInTheDocument();
   });
 });
+
+describe("VerifyPanel and RiskPanel speak both languages", () => {
+  const transcript: DrawVerificationTranscript = {
+    drawId: "55555555-5555-4555-8555-555555555555",
+    groupId: "22222222-2222-4222-8222-222222222222",
+    cycleId: "77777777-7777-4777-8777-777777777777",
+    round: 1,
+    commitment: "a".repeat(64),
+    rosterDigest: "b".repeat(64),
+    commitmentNonce: "nonce-abcdefghijklmnop",
+    memberDigest: "e".repeat(64),
+    memberCommitments: [{ memberId: "00014444-4444-8444-8444-444444444444", sealed: "f".repeat(64) }],
+    seed: "seed-abcdefghijklmnop",
+    participants: [
+      { memberId: "00014444-4444-8444-8444-444444444444", ticket: "c".repeat(64), contributionAmount: "5000.00" }
+    ]
+  };
+  const ethiopic = /[ሀ-፿]/;
+
+  const failing: DrawVerificationResult = {
+    verified: false,
+    codes: ["commitment_mismatch", "roster_mismatch", "member_commitment_mismatch", "incomplete_transcript", "selection_mismatch"],
+    warnings: ["1 commitment(s) for this round were created and then abandoned."],
+    warningItems: [
+      { code: "abandoned_commitments", count: 2 },
+      { code: "recorded_winner_mismatch" },
+      { code: "recorded_digest_mismatch" }
+    ],
+    winnerMemberId: null,
+    winningTicket: null,
+    selectedIndex: null,
+    transcriptDigest: null,
+    recomputedCommitment: null,
+    errors: (
+      ["commitment_mismatch", "roster_mismatch", "member_commitment_mismatch", "incomplete_transcript", "selection_mismatch"] as const
+    ).map((code) => ({ code, detail: `engine detail for ${code}` }))
+  };
+
+  it("shows English in English: status, errors and structured warnings, with no Amharic left", () => {
+    render(<VerifyPanel locale="en" transcript={transcript} verification={failing} isRunning={false} error={null} />);
+    const verify = panel("verify");
+
+    expect(verify.getByText("Tampering detected")).toBeInTheDocument();
+    expect(verify.getByText(/The revealed seed does not reproduce the published commitment/)).toBeInTheDocument();
+    expect(verify.getByText(/A member's nonce does not open what they sealed/)).toBeInTheDocument();
+    expect(verify.getByText(/2 commitment\(s\) for this round were created and then abandoned/)).toBeInTheDocument();
+    expect(verify.getByText(/winner recorded by the server does not match/)).toBeInTheDocument();
+    const text = document.querySelector('[data-draw-panel="verify"]')!.textContent ?? "";
+    expect(text).not.toMatch(ethiopic);
+  });
+
+  it("shows Amharic in Amharic (the default), with the structured warning and its count", () => {
+    render(<VerifyPanel transcript={transcript} verification={failing} isRunning={false} error={null} />);
+    const text = document.querySelector('[data-draw-panel="verify"]')!.textContent ?? "";
+
+    expect(text).toContain("ማስተካከል ተለይቷል");
+    expect(text).toContain("ለዚህ ዙር 2 መቆለፊያ(ዎች) ተፈጥረው ተተዋል");
+    // The English engine detail is kept as technical detail, labelled as English.
+    expect(document.querySelector('[data-draw-panel="verify"] [lang="en"]')).not.toBeNull();
+  });
+
+  it("has a message in both languages for every verification code and warning kind", async () => {
+    const { dictionaries } = await import("@/lib/i18n");
+    const { DRAW_VERIFICATION_CODES } = await import("@/lib/draw/types");
+    for (const code of DRAW_VERIFICATION_CODES) {
+      for (const locale of ["en", "am"] as const) {
+        expect(dictionaries[locale][`drawVerify.err.${code}` as keyof typeof dictionaries.en], `${locale} ${code}`).toBeTruthy();
+      }
+    }
+    for (const kind of ["abandoned_commitments", "recorded_winner_mismatch", "recorded_digest_mismatch"]) {
+      for (const locale of ["en", "am"] as const) {
+        expect(dictionaries[locale][`drawVerify.warn.${kind}` as keyof typeof dictionaries.en], `${locale} ${kind}`).toBeTruthy();
+      }
+    }
+    for (const state of ["sealing", "committed", "revealed", "paid"]) {
+      expect(dictionaries.am[`drawLive.lifecycle.${state}` as keyof typeof dictionaries.en]).toBeTruthy();
+    }
+  });
+
+  it("localises every risk note kind the engine can emit", async () => {
+    const { RiskPanel } = await import("@/components/draw/RiskPanel");
+    const { assessDrawRisk, planReserve } = await import("@/lib/draw/risk");
+    const base = {
+      drawId: "55555555-5555-4555-8555-555555555555",
+      potAmount: "10000.00",
+      reserveRatioBps: 1000,
+      totalRounds: 5,
+      contributionAmount: "2000.00",
+      eligibleCount: 5
+    };
+    // Mid-cycle (member exposure), final round, and an exposure above the ceiling.
+    const requests = [
+      { ...base, round: 2 },
+      { ...base, round: 5 },
+      { ...base, round: 1, contributionAmount: "9000.00", potAmount: "45000.00" }
+    ];
+    const seen = new Set<string>();
+    for (const request of requests) {
+      const risk = assessDrawRisk(request, planReserve(request));
+      for (const note of risk.noteItems ?? []) seen.add(note.code);
+      for (const locale of ["en", "am"] as const) {
+        const { unmount, container } = render(<RiskPanel locale={locale} risk={risk} currencyLabel="ETB" />);
+        const text = container.textContent ?? "";
+        if (locale === "en") expect(text).not.toMatch(ethiopic);
+        else {
+          // No English engine sentence leaks into the Amharic panel.
+          for (const english of risk.notes) expect(text).not.toContain(english);
+          expect(text).toMatch(ethiopic);
+        }
+        unmount();
+      }
+    }
+    expect([...seen].sort()).toEqual(["base_reserve", "cannot_absorb", "capped", "coverage", "final_round", "member_exposure"].sort());
+  });
+});

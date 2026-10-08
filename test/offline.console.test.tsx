@@ -1,4 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const hoisted = vi.hoisted(() => ({
+  session: { status: "unconfigured" } as { status: string; accessToken?: string; email?: string | null }
+}));
+
+vi.mock("@/lib/auth/useSession", () => ({ useSession: () => hoisted.session }));
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createSenedDatabase, deleteSenedDatabase, resetSenedDatabase, type SenedDatabase } from "@/lib/db";
@@ -8,6 +14,8 @@ import { saveDraft, queueDraft } from "@/lib/db/drafts";
 import { recordDivergence } from "@/lib/db/meta";
 import { storeMirrorEntries } from "@/lib/db/mirror";
 import { OfflineConsole } from "@/app/offline/offline-console";
+import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
+import type { FetchedGroups } from "@/lib/groups/activeGroup";
 import { SyncError, type SyncPushResult, type SyncTransport } from "@/lib/offline/contract";
 import { offlineCopy, OFFLINE_COPY, type OfflineCopyKey } from "@/lib/offline/copy";
 import type { LedgerEntryLike } from "@/lib/offline/contract";
@@ -64,6 +72,7 @@ async function findPanel(key: keyof typeof OFFLINE_COPY) {
 }
 
 beforeEach(() => {
+  hoisted.session = { status: "unconfigured" };
   dbName = `sened-test-console-${Math.random().toString(36).slice(2, 10)}`;
   db = createSenedDatabase(dbName);
   setOnline(false);
@@ -72,6 +81,8 @@ beforeEach(() => {
 afterEach(async () => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  window.localStorage.clear();
   db.close();
   await resetSenedDatabase();
   await deleteSenedDatabase(dbName);
@@ -416,3 +427,370 @@ describe("offline console", () => {
 });
 
 const OFFLINE_SYNC_PUSH = OFFLINE_COPY["offline.sync.push"].en;
+
+describe("offline console — real sync wiring", () => {
+  const REAL_GROUP = "77777777-7777-4777-8777-777777777777";
+  const POT_CASH = "88888888-8888-4888-8888-888888888881";
+  const CONTRIBUTION_INCOME = "88888888-8888-4888-8888-888888888882";
+  const SIGNED_IN = { status: "signed-in", accessToken: "tok", email: "t@example.com" };
+
+  function groupBody(groups: number, role = "treasurer") {
+    return {
+      groups: Array.from({ length: groups }, (_, index) => ({
+        groupId: index === 0 ? REAL_GROUP : `66666666-6666-4666-8666-66666666666${index}`,
+        role,
+        accounts: [
+          { id: POT_CASH, code: "POT_CASH" },
+          { id: CONTRIBUTION_INCOME, code: "CONTRIBUTION_INCOME" }
+        ]
+      }))
+    };
+  }
+
+  /** A stand-in for the two routes the wired console talks to. */
+  function stubServer(groups: ReturnType<typeof groupBody> | "network-down") {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit = {}) => {
+        calls.push({ url, init });
+        if (groups === "network-down") {
+          throw new TypeError("network down");
+        }
+        if (url === "/api/my-groups") {
+          return Response.json(groups);
+        }
+        const body = JSON.parse(String(init.body)) as { mutations: { mutationId: string }[] };
+        return Response.json({
+          results: body.mutations.map((m, index) => ({
+            mutationId: m.mutationId,
+            outcome: "ACCEPTED",
+            serverEntryId: `real-entry-${index + 1}`,
+            serverEntryHash: "a".repeat(64),
+            serverSequence: String(index + 1)
+          }))
+        });
+      })
+    );
+    return calls;
+  }
+
+  async function recordDraftVia(button: "queue" | "save") {
+    const user = userEvent.setup();
+    const panel = await findPanel("offline.drafts.title");
+    await user.type(within(panel).getByLabelText(OFFLINE_COPY["offline.drafts.amountLabel"].en), "250.00");
+    await user.click(within(panel).getByRole("button", { name: OFFLINE_COPY[`offline.drafts.${button}`].en }));
+    return { user, panel };
+  }
+
+  it("signed in: resolves the real group, drafts under it with its accounts, and pushes over HttpSyncTransport", async () => {
+    hoisted.session = SIGNED_IN;
+    const calls = stubServer(groupBody(1));
+    render(<OfflineConsole database={db} />);
+
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.sync.connected"].en);
+    const { user } = await recordDraftVia("queue");
+
+    await waitFor(async () => expect(await db.drafts.count()).toBe(1));
+    const draft = (await db.drafts.toArray())[0]!;
+    expect(draft.groupId).toBe(REAL_GROUP);
+    expect(draft.request.groupId).toBe(REAL_GROUP);
+    expect(draft.request.postings.map((posting) => posting.accountId)).toEqual([POT_CASH, CONTRIBUTION_INCOME]);
+    expect(draft.updatedBy).toBe("t@example.com");
+
+    const push = screen.getByRole("button", { name: OFFLINE_SYNC_PUSH });
+    await waitFor(() => expect(push).toBeEnabled());
+    await user.click(push);
+    await waitFor(async () => expect((await db.outbox.toArray())[0]?.state).toBe("synced"));
+
+    const syncCall = calls.find((call) => call.url === "/api/sync")!;
+    expect((syncCall.init.headers as Record<string, string>).authorization).toBe("Bearer tok");
+    const sent = JSON.parse(String(syncCall.init.body)) as { mutations: { groupId: string; idempotencyKey: string }[] };
+    expect(sent.mutations[0]).toMatchObject({
+      groupId: REAL_GROUP,
+      idempotencyKey: expect.stringContaining(`sened-offline:ledger-draft:${REAL_GROUP}:`)
+    });
+    expect((await db.outbox.toArray())[0]?.serverEntryId).toBe("real-entry-1");
+  });
+
+  it("refuses to queue entries when the account has no group or several with none chosen, and says why", async () => {
+    for (const [groups, key] of [
+      [0, "offline.group.none"],
+      [2, "offline.group.choose"]
+    ] as const) {
+      cleanup();
+      hoisted.session = SIGNED_IN;
+      stubServer(groupBody(groups));
+      render(<OfflineConsole database={db} />);
+      expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY[key].en);
+      await recordDraftVia("queue");
+      expect(await screen.findByRole("alert")).toHaveTextContent(OFFLINE_COPY[key].en);
+      expect(await db.drafts.count()).toBe(0);
+    }
+  });
+
+  it("refuses a plain member, who may read but not record", async () => {
+    hoisted.session = SIGNED_IN;
+    stubServer(groupBody(1, "member"));
+    render(<OfflineConsole database={db} />);
+    await screen.findByTestId("offline-sync-mode");
+    await recordDraftVia("save");
+    expect(await screen.findByRole("alert")).toHaveTextContent(OFFLINE_COPY["offline.group.readOnly"].en);
+    expect(await db.drafts.count()).toBe(0);
+  });
+
+  it("offline-first: with no network a returning user still drafts under the group they resolved before", async () => {
+    hoisted.session = SIGNED_IN;
+    stubServer(groupBody(1));
+    const first = render(<OfflineConsole database={db} />);
+    await screen.findByText(OFFLINE_COPY["offline.sync.connected"].en);
+    first.unmount();
+
+    const calls = stubServer("network-down");
+    render(<OfflineConsole database={db} />);
+    await recordDraftVia("save");
+    await waitFor(async () => expect(await db.drafts.count()).toBe(1));
+    expect((await db.drafts.toArray())[0]?.groupId).toBe(REAL_GROUP);
+    expect(calls.every((call) => call.url === "/api/my-groups")).toBe(true);
+  });
+
+  it("offline and never resolved: says the group is unknown instead of drafting under a placeholder", async () => {
+    hoisted.session = SIGNED_IN;
+    stubServer("network-down");
+    render(<OfflineConsole database={db} />);
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.group.unresolved"].en);
+    await recordDraftVia("save");
+    expect(await screen.findByRole("alert")).toHaveTextContent(OFFLINE_COPY["offline.group.unresolved"].en);
+    expect(await db.drafts.count()).toBe(0);
+  });
+
+  it("signed out or unconfigured: stays on the fail-closed transport, says why, and still drafts locally", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    hoisted.session = { status: "signed-out" };
+    render(<OfflineConsole database={db} />);
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.sync.needsToken"].en);
+    await recordDraftVia("save");
+    await waitFor(async () => expect(await db.drafts.count()).toBe(1));
+    cleanup();
+
+    hoisted.session = { status: "unconfigured" };
+    render(<OfflineConsole database={db} initialLocale="am" />);
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.sync.authUnconfigured"].am);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("offline console — several groups", () => {
+  const G1 = "77777777-7777-4777-8777-777777777771";
+  const G2 = "77777777-7777-4777-8777-777777777772";
+  const CASH = { [G1]: "88888888-8888-4888-8888-888888888811", [G2]: "88888888-8888-4888-8888-888888888821" };
+  const INCOME = { [G1]: "88888888-8888-4888-8888-888888888812", [G2]: "88888888-8888-4888-8888-888888888822" };
+  const SESSION = { status: "signed-in", accessToken: "tok", email: "t@example.com", userId: "u1" };
+
+  const wireGroups = () => ({
+    groups: [G1, G2].map((groupId) => ({
+      groupId,
+      role: "treasurer",
+      accounts: [
+        { id: CASH[groupId as keyof typeof CASH], code: "POT_CASH" },
+        { id: INCOME[groupId as keyof typeof INCOME], code: "CONTRIBUTION_INCOME" }
+      ]
+    }))
+  });
+
+  const fetchGroups = async (): Promise<FetchedGroups> => ({
+    kind: "ok",
+    userId: "u1",
+    groups: [
+      { groupId: G1, name: "Bole Equb", role: "treasurer" },
+      { groupId: G2, name: "Family Iddir", role: "treasurer" }
+    ]
+  });
+
+  function stub(down = false) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (down) throw new TypeError("network down");
+        if (url === "/api/my-groups") return Response.json(wireGroups());
+        return Response.json({ results: [] });
+      })
+    );
+  }
+
+  function mount() {
+    return render(
+      <ActiveGroupProvider fetchGroups={fetchGroups} storage={window.localStorage}>
+        <OfflineConsole database={db} />
+      </ActiveGroupProvider>
+    );
+  }
+
+  async function saveDraftHere(amount: string) {
+    const user = userEvent.setup();
+    const panel = await findPanel("offline.drafts.title");
+    const field = within(panel).getByLabelText(OFFLINE_COPY["offline.drafts.amountLabel"].en);
+    await user.clear(field);
+    await user.type(field, amount);
+    await user.click(within(panel).getByRole("button", { name: OFFLINE_COPY["offline.drafts.save"].en }));
+  }
+
+  beforeEach(() => {
+    hoisted.session = SESSION as never;
+    window.localStorage.clear();
+  });
+
+  it("asks for a group first, then drafts under the chosen group with that group's own chart", async () => {
+    stub();
+    const user = userEvent.setup();
+    mount();
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.group.choose"].en);
+    await saveDraftHere("10.00");
+    expect(await screen.findByRole("alert")).toHaveTextContent(OFFLINE_COPY["offline.group.choose"].en);
+    expect(await db.drafts.count()).toBe(0);
+
+    const switcher = screen.getByRole("combobox", { name: "Group" });
+    await user.selectOptions(switcher, G2);
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.sync.connected"].en);
+    await saveDraftHere("20.00");
+    await waitFor(async () => expect(await db.drafts.count()).toBe(1));
+    const draft = (await db.drafts.toArray())[0]!;
+    expect(draft.groupId).toBe(G2);
+    expect(draft.request.groupId).toBe(G2);
+    expect(draft.request.postings.map((posting) => posting.accountId)).toEqual([CASH[G2], INCOME[G2]]);
+  });
+
+  it("keeps each draft in the group it was created under when the active group changes", async () => {
+    stub();
+    const user = userEvent.setup();
+    mount();
+    const switcher = await screen.findByRole("combobox", { name: "Group" });
+
+    await user.selectOptions(switcher, G1);
+    await screen.findByText(OFFLINE_COPY["offline.sync.connected"].en);
+    await saveDraftHere("11.00");
+    await waitFor(async () => expect(await db.drafts.count()).toBe(1));
+
+    await user.selectOptions(switcher, G2);
+    await screen.findByText(OFFLINE_COPY["offline.sync.connected"].en);
+    // The other group's desk does not list (or touch) the first group's draft.
+    const draftsPanel = await findPanel("offline.drafts.title");
+    await waitFor(() => expect(within(draftsPanel).getByText(OFFLINE_COPY["offline.drafts.empty"].en)).toBeInTheDocument());
+    await saveDraftHere("22.00");
+    await waitFor(async () => expect(await db.drafts.count()).toBe(2));
+
+    const drafts = await db.drafts.toArray();
+    const byAmount = Object.fromEntries(drafts.map((row) => [row.request.postings[0]!.amount, row]));
+    expect(byAmount["11.00"]!.groupId).toBe(G1);
+    expect(byAmount["11.00"]!.request.groupId).toBe(G1);
+    expect(byAmount["11.00"]!.request.postings.map((posting) => posting.accountId)).toEqual([CASH[G1], INCOME[G1]]);
+    expect(byAmount["22.00"]!.groupId).toBe(G2);
+
+    // Back to the first group: its draft is there again, unchanged.
+    await user.selectOptions(switcher, G1);
+    await screen.findByText(OFFLINE_COPY["offline.sync.connected"].en);
+    expect(await within(await findPanel("offline.drafts.title")).findByText(/11\.00/)).toBeInTheDocument();
+    expect((await db.drafts.toArray()).find((row) => row.request.postings[0]!.amount === "11.00")!.groupId).toBe(G1);
+  });
+
+  it("offline, a returning user still drafts under the group they chose, with that group's chart", async () => {
+    stub();
+    const user = userEvent.setup();
+    const first = mount();
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Group" }), G2);
+    await screen.findByText(OFFLINE_COPY["offline.sync.connected"].en);
+    first.unmount();
+
+    stub(true);
+    mount();
+    await saveDraftHere("33.00");
+    await waitFor(async () => expect(await db.drafts.count()).toBe(1));
+    const draft = (await db.drafts.toArray())[0]!;
+    expect(draft.groupId).toBe(G2);
+    expect(draft.request.postings.map((posting) => posting.accountId)).toEqual([CASH[G2], INCOME[G2]]);
+  });
+
+  it("offline with several groups and none chosen: refuses rather than picking from the cache", async () => {
+    stub();
+    const user = userEvent.setup();
+    const first = mount();
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Group" }), G1);
+    await screen.findByText(OFFLINE_COPY["offline.sync.connected"].en);
+    first.unmount();
+    // The remembered choice is gone (e.g. cleared site data for it), the cache is not.
+    window.localStorage.removeItem("sened.activeGroup.v1.u1");
+
+    stub(true);
+    mount();
+    expect(await screen.findByTestId("offline-sync-mode")).toHaveTextContent(OFFLINE_COPY["offline.group.choose"].en);
+    await saveDraftHere("44.00");
+    expect(await screen.findByRole("alert")).toHaveTextContent(OFFLINE_COPY["offline.group.choose"].en);
+    expect(await db.drafts.count()).toBe(0);
+  });
+});
+
+describe("offline console - target group and stranded drafts", () => {
+  const G1 = "77777777-7777-4777-8777-777777777771";
+  const G2 = "77777777-7777-4777-8777-777777777772";
+  const LEFT = "77777777-7777-4777-8777-777777777779";
+  const SESSION = { status: "signed-in", accessToken: "tok", email: "t@example.com", userId: "u1" };
+  const wire = (ids: string[]) => ({
+    groups: ids.map((groupId) => ({
+      groupId,
+      role: "treasurer",
+      accounts: [
+        { id: "88888888-8888-4888-8888-888888888811", code: "POT_CASH" },
+        { id: "88888888-8888-4888-8888-888888888812", code: "CONTRIBUTION_INCOME" }
+      ]
+    }))
+  });
+  const options = (ids: string[]): FetchedGroups => ({
+    kind: "ok",
+    userId: "u1",
+    groups: ids.map((groupId, index) => ({ groupId, name: index === 0 ? "Bole Equb" : "Family Iddir", role: "treasurer" as const }))
+  });
+
+  beforeEach(() => {
+    hoisted.session = SESSION as never;
+    window.localStorage.clear();
+  });
+
+  function mount(ids: string[]) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => (url === "/api/my-groups" ? Response.json(wire(ids)) : Response.json({ results: [] })))
+    );
+    return render(
+      <ActiveGroupProvider fetchGroups={async () => options(ids)} storage={window.localStorage}>
+        <OfflineConsole database={db} />
+      </ActiveGroupProvider>
+    );
+  }
+
+  it("names the group a new draft will be recorded to", async () => {
+    mount([G1]);
+    expect(await screen.findByTestId("draft-target-group")).toHaveTextContent(
+      offlineCopy("en", "offline.drafts.targetGroup", { group: "Bole Equb" })
+    );
+  });
+
+  it("surfaces unsent drafts that belong to a group the user has left, and not the ones in their groups", async () => {
+    await saveDraft(db, { request: { ...contributionRequest("15.00", "stranded-1"), groupId: LEFT }, updatedBy: ACTOR_ID });
+    await saveDraft(db, { request: { ...contributionRequest("16.00", "mine-1"), groupId: G1 }, updatedBy: ACTOR_ID });
+    mount([G1]);
+    const panel = await screen.findByTestId("stranded-drafts");
+    expect(within(panel).getByRole("heading")).toHaveTextContent(OFFLINE_COPY["offline.stranded.title"].en);
+    const rows = within(panel).getAllByTestId("stranded-group");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent(offlineCopy("en", "offline.stranded.group", { group: LEFT.replace(/-/g, "").slice(0, 8), count: 1 }));
+  });
+
+  it("shows no stranded panel when every draft is in one of the user's groups", async () => {
+    await saveDraft(db, { request: { ...contributionRequest("16.00", "mine-2"), groupId: G1 }, updatedBy: ACTOR_ID });
+    mount([G1]);
+    await screen.findByTestId("draft-target-group");
+    expect(screen.queryByTestId("stranded-drafts")).toBeNull();
+  });
+});

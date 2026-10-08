@@ -22,6 +22,7 @@ const PAGES = [
   { path: "/", name: "mobile shell" },
   { path: "/voice", name: "voice pipeline" },
   { path: "/draw", name: "fair draw" },
+  { path: "/governance", name: "governance copilot" },
   { path: "/ledger", name: "ledger review" },
   { path: "/offline", name: "offline console" },
   { path: "/sign-in", name: "sign-in (unconfigured)" }
@@ -250,6 +251,21 @@ test.describe("the ledger review route", () => {
   });
 });
 
+test.describe("the record-contribution section", () => {
+  test("is reachable, offers a signed-out visitor no form, and does not widen the page", async ({ page }) => {
+    await page.goto("/ledger#record-contribution");
+
+    await expect(page.getByRole("heading", { name: "Record a contribution" })).toBeVisible();
+    await expect(page.getByTestId("record-state")).toHaveText(/Sign in as the group's owner or treasurer/);
+    // No controls and nothing posted: a form that cannot work is not shown.
+    await expect(page.getByLabel("Amount in birr")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Record contribution" })).toHaveCount(0);
+    // Phone width: the section must not add a horizontal scrollbar.
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+});
+
 test.describe("the fair draw route", () => {
   test("renders the three ceremony steps and runs SHA-256 in the browser", async ({ page }) => {
     await page.goto("/draw");
@@ -339,6 +355,11 @@ test.describe("the mic dock records a spoken contribution for real", () => {
   }) => {
     await page.goto("/");
 
+    // The reference rows only render once the session has resolved to signed-out
+    // (until then the page is in its "loading" state with no feed). The sample
+    // notice is shown in exactly that state, so waiting on it is the real signal
+    // that hydration finished; counting earlier reads 0 and races the sample rows.
+    await expect(page.getByText(/የናሙና መረጃ — ይህ የቡድንዎ መዝገብ አይደለም/)).toBeVisible();
     const before = await page.getByText("በመጠባበቅ ላይ").count();
 
     // The mic dock opens the modal.
@@ -426,5 +447,64 @@ test.describe("the mic dock records a spoken contribution for real", () => {
     // Content-hashed by A4's own code, so a note cannot be edited in place
     // without detection.
     expect(note?.contentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+test.describe("service worker and the offline shell", () => {
+  // playwright.config.ts blocks workers for every other test so a cached shell
+  // cannot mask a regression; this one exists to prove the worker works.
+  test.use({ serviceWorkers: "allow" });
+
+  test("registers, takes control, and serves /offline with no connection", async ({ page, context }) => {
+    await page.goto("/offline", { waitUntil: "load" });
+
+    const scope = await page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.ready;
+      return registration.active ? registration.scope : null;
+    });
+    expect(scope, "an active service worker should control the origin").toMatch(/\/$/);
+    await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+
+    // The worker precaches the document and its hashed chunks while installing.
+    const cached = await page.evaluate(async () => {
+      const keys = await caches.keys();
+      const urls: string[] = [];
+      for (const key of keys) {
+        for (const request of await (await caches.open(key)).keys()) {
+          urls.push(new URL(request.url).pathname);
+        }
+      }
+      return urls;
+    });
+    expect(cached).toContain("/offline");
+    expect(cached.some((path) => path.startsWith("/_next/static/"))).toBe(true);
+    expect(cached.some((path) => path.startsWith("/api/"))).toBe(false);
+
+    await context.setOffline(true);
+    try {
+      // Playwright's offline emulation reaches a service worker only until its
+      // first navigation, so this test makes exactly one offline navigation and
+      // first proves the worker really has no network (otherwise a pass here
+      // could just be the live server answering).
+      const workerReachesNetwork = await context.serviceWorkers()[0].evaluate(() =>
+        fetch("/offline", { cache: "no-store" }).then(
+          () => true,
+          () => false
+        )
+      );
+      expect(workerReachesNetwork, "the worker must be offline for this test to mean anything").toBe(false);
+
+      const failures: string[] = [];
+      page.on("pageerror", (error) => failures.push(error.message));
+
+      // A page that was never cached redirects to the offline desk, which is
+      // served from the precache, so URL and document agree for hydration.
+      await page.goto("/ledger", { waitUntil: "domcontentloaded" });
+      await expect(page).toHaveURL(/\/offline$/);
+      await expect(page.getByText("Offline ledger desk").or(page.getByText("የመስመር መዝገብ ጠረጴዛ")).first()).toBeVisible();
+      expect(failures).toEqual([]);
+    } finally {
+      await context.setOffline(false);
+    }
   });
 });

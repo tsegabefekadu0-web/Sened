@@ -1,5 +1,18 @@
+/*
+ * One id per build, stamped into the client bundle and into Next's own build id.
+ * The service worker names its caches after it (see public/sw.js), so a deploy
+ * can never leave an old build's cached files in play and nobody has to remember
+ * to bump a version by hand. CI can pin it (SENED_BUILD_ID / the commit sha).
+ */
+const rawBuildId =
+  process.env.SENED_BUILD_ID || process.env.GITHUB_SHA || process.env.VERCEL_GIT_COMMIT_SHA || Date.now().toString(36);
+const BUILD_ID = rawBuildId.replace(/[^A-Za-z0-9._-]/g, "").slice(0, 12) || "build";
+
 const nextConfig = {
   reactStrictMode: true,
+
+  env: { NEXT_PUBLIC_BUILD_ID: BUILD_ID },
+  generateBuildId: async () => BUILD_ID,
 
   /*
    * Standalone output — A1, added with the Dockerfile (ROADMAP M6.3).
@@ -52,8 +65,10 @@ const nextConfig = {
         ]
       },
       {
+        // Not `immutable`: the icon filenames are not content-hashed, so a changed
+        // icon must be able to reach installed apps. A day, then revalidate.
         source: "/icons/:path*",
-        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }]
+        headers: [{ key: "Cache-Control", value: "public, max-age=86400, must-revalidate" }]
       },
       {
         source: "/offline",

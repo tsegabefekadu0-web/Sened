@@ -166,6 +166,8 @@ export interface GroupMember {
   readonly joinedAt: string;
   /** Present only when the caller is the group's owner. */
   readonly email: string | null;
+  /** The member's own avatar choice (a display preference, shown to every member). */
+  readonly attire: "none" | "gabi" | "netela";
 }
 
 export type ListMembersResult =
@@ -185,11 +187,17 @@ export async function listMembers(client: SupabaseClient, groupId: string): Prom
     ) {
       throw new Error("invite_integrity_failure");
     }
+    // Absent (a database one migration behind) is none; anything else must be a known value.
+    const attire = entry.attire ?? "none";
+    if (attire !== "none" && attire !== "gabi" && attire !== "netela") {
+      throw new Error("invite_integrity_failure");
+    }
     members.push({
       userId: entry.userId,
       role: entry.role,
       joinedAt: entry.joinedAt,
-      email: typeof entry.email === "string" ? entry.email : null
+      email: typeof entry.email === "string" ? entry.email : null,
+      attire
     });
   }
   return { status: "ok", members };

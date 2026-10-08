@@ -1,6 +1,6 @@
 import { LedgerService } from "@/lib/ledger";
 import { BankVerificationError } from "./errors";
-import type { BankVerificationIntent, BankVerificationLedgerSink } from "./types";
+import type { BankVerificationIntent, BankVerificationLedgerSink, ReconciliationVerifyContext } from "./types";
 
 /**
  * Bank truth → committed ledger.
@@ -76,7 +76,10 @@ export class LedgerBankVerificationSink implements BankVerificationLedgerSink {
     this.clock = options.clock ?? (() => new Date());
   }
 
-  async postVerifiedContribution(intent: BankVerificationIntent): Promise<string | null> {
+  async postVerifiedContribution(
+    intent: BankVerificationIntent,
+    context: ReconciliationVerifyContext = {}
+  ): Promise<string | null> {
     // The service only calls this on a verified result, but the sink is public
     // and the invariant is cheap to assert. Posting a contribution for an
     // unverified intent would put money in the pot on the strength of a claim.
@@ -126,7 +129,11 @@ export class LedgerBankVerificationSink implements BankVerificationLedgerSink {
           }
         ]
       },
-      { actorId: intent.userId }
+      {
+        actorId: intent.userId,
+        // Present only when the cron drain is posting for a claimed job.
+        ...(context.leaseToken ? { reconciliationLeaseToken: context.leaseToken } : {})
+      }
     );
 
     return result.entry.id;

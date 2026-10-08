@@ -132,6 +132,54 @@ if ($check.Out -notmatch 'ALL DRAW BINDING CHECKS PASSED') {
     docker rm -f $container 2>&1 | Out-Null
     throw 'VERIFICATION DID NOT REACH THE SUCCESS MARKER'
 }
+if ($check.Out -notmatch 'ALL DRAW CYCLE AND SEAL CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE DRAW CYCLE AND SEAL SUCCESS MARKER'
+}
+if ($check.Out -notmatch 'ALL LEDGER PROVENANCE CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE LEDGER PROVENANCE SUCCESS MARKER'
+}
+
+if ($check.Out -notmatch 'ALL LEDGER BALANCES CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE LEDGER BALANCES SUCCESS MARKER'
+}
+
+if ($check.Out -notmatch 'ALL BANK REFERENCE DISPLAY CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE BANK REFERENCE DISPLAY SUCCESS MARKER'
+}
+
+if ($check.Out -notmatch 'ALL MEMBER ATTIRE CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE MEMBER ATTIRE SUCCESS MARKER'
+}
+
+if ($check.Out -notmatch 'ALL ATTRIBUTION AND COLLATERAL CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE ATTRIBUTION AND COLLATERAL SUCCESS MARKER'
+}
+
+if ($check.Out -notmatch 'ALL CONTRIBUTION GRID AND GATE CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE CONTRIBUTION GRID AND GATE SUCCESS MARKER'
+}
+
+if ($check.Out -notmatch 'ALL POST-WIN FILL AND COMMIT GATE CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE POST-WIN FILL AND COMMIT GATE SUCCESS MARKER'
+}
+
+if ($check.Out -notmatch 'ALL PAYMENT CHANNEL AND NOTE CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE PAYMENT CHANNEL AND NOTE SUCCESS MARKER'
+}
+
+if ($check.Out -notmatch 'ALL DRAW INTEGRITY CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'VERIFICATION DID NOT REACH THE DRAW INTEGRITY SUCCESS MARKER'
+}
 
 docker rm -f $container 2>&1 | Out-Null
 Write-Host 'Migrations applied and verified.' -ForegroundColor Green

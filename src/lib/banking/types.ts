@@ -167,6 +167,13 @@ export interface BankVerificationIntent {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly ledgerEntryId: string | null;
+  /**
+   * Masked form of the bank reference (`••••2F42`, see `referenceMask.ts`).
+   * `null` when none was stored (rows from before it existed until the backfill
+   * script has run, or a reference too short to mask). Absent from fixtures that
+   * predate the field; treat absent as `null`.
+   */
+  readonly referenceDisplay?: string | null;
 }
 
 export interface BankVerificationEvent {
@@ -191,6 +198,8 @@ export interface PublicBankVerification {
   readonly occurredAt: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /** Masked bank reference for the owner (`••••2F42`), or `null`. Never the full reference. */
+  readonly referenceMasked: string | null;
 }
 
 export interface CreateBankIntentInput {
@@ -204,6 +213,8 @@ export interface CreateBankIntentInput {
   readonly occurredAt: string;
   readonly idempotencyKey: string;
   readonly requestFingerprint: string;
+  /** Computed by the server from the plaintext reference with `maskBankReference`. */
+  readonly referenceDisplay?: string | null;
 }
 
 export interface CreateBankIntentResult {
@@ -267,8 +278,16 @@ export interface BankVerificationRepository {
   ): Promise<BankVerificationEvent>;
 }
 
+/** What the reconciliation drain knows about the job it is working: its current lease token. */
+export interface ReconciliationVerifyContext {
+  readonly leaseToken?: string;
+}
+
 export interface BankVerificationLedgerSink {
-  postVerifiedContribution(intent: BankVerificationIntent): Promise<string | null>;
+  postVerifiedContribution(
+    intent: BankVerificationIntent,
+    context?: ReconciliationVerifyContext
+  ): Promise<string | null>;
 }
 
 export interface ReconciliationJob {
@@ -301,6 +320,11 @@ export interface ReconciliationJobStore {
     nextAttemptAt: Date
   ): Promise<ReconciliationJob>;
   claimNext(workerId: string, now: Date, leaseMs: number): Promise<ReconciliationClaim | null>;
+  /**
+   * Move jobs that are leased-and-expired on their final attempt to
+   * MANUAL_REVIEW (claimNext can never return them). Returns how many.
+   */
+  reapExhausted?(): Promise<number>;
   reschedule(
     jobId: string,
     workerId: string,
@@ -338,5 +362,8 @@ export interface ReconciliationVerificationOutcome {
 }
 
 export interface ReconciliationVerifier {
-  verifyIntent(intent: BankVerificationIntent): Promise<ReconciliationVerificationOutcome>;
+  verifyIntent(
+    intent: BankVerificationIntent,
+    context?: ReconciliationVerifyContext
+  ): Promise<ReconciliationVerificationOutcome>;
 }

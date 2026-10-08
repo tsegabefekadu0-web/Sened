@@ -29,6 +29,10 @@ export interface MyGroup {
   readonly name: string;
   readonly currency: string;
   readonly role: string;
+  /** The caller's own avatar attire in this group; `none` when never chosen. */
+  readonly attire: "none" | "gabi" | "netela";
+  /** The caller's own user id, or null from a database one migration behind. */
+  readonly userId: string | null;
   readonly accounts: readonly GroupAccount[];
 }
 
@@ -90,6 +94,8 @@ function parseGroup(value: unknown): MyGroup | null {
     name: row.name,
     currency: row.currency,
     role: row.role,
+    userId: typeof row.userId === "string" && UUID_PATTERN.test(row.userId) ? row.userId : null,
+    attire: row.attire === "gabi" || row.attire === "netela" ? row.attire : "none",
     accounts: row.accounts
       .map((account) => parseAccount(account))
       .filter((account): account is GroupAccount => account !== null)

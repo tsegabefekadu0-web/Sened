@@ -2,6 +2,7 @@ import { normalizeLedgerEntryRequest } from "@/lib/ledger/rules";
 import { LedgerError } from "@/lib/ledger/errors";
 import type { LedgerEntryRequest } from "@/lib/ledger/types";
 import { SyncError } from "@/lib/offline/contract";
+import { normalizeDraftAttribution, draftPayload } from "./attribution";
 import { mapStorageError } from "./database";
 import { createIdempotencyKey, newLocalId } from "./ids";
 import { enqueue, findOutboxBySubject, getOutboxRow, type EnqueueInput } from "./outbox";
@@ -19,6 +20,12 @@ export interface SaveDraftInput {
    * would be how an offline device ends up minting an entry the server rejects.
    */
   readonly request: unknown;
+  /**
+   * Who paid, and for which cycle round (contributions only). Optional: a draft
+   * with no payer is valid and is sent as a plain entry. Validated for shape here;
+   * the server checks the member and cycle belong to the group when it syncs.
+   */
+  readonly attribution?: unknown;
   readonly updatedBy: string;
   readonly now?: Date;
 }
@@ -62,6 +69,10 @@ function requireActor(value: unknown): string {
 export async function saveDraft(db: SenedDatabase, input: SaveDraftInput): Promise<LedgerDraftRow> {
   const request = validateRequest(input.request);
   const updatedBy = requireActor(input.updatedBy);
+  const attribution = normalizeDraftAttribution(input.attribution);
+  if (attribution !== null && request.entryType !== "contribution") {
+    throw new SyncError("INVALID_DRAFT", "Only a contribution can name a payer");
+  }
   const groupId = input.groupId ?? request.groupId;
   if (groupId !== request.groupId) {
     throw new SyncError("INVALID_DRAFT", "A draft's group must match the group on its request");
@@ -88,7 +99,8 @@ export async function saveDraft(db: SenedDatabase, input: SaveDraftInput): Promi
         createdAt: existing?.createdAt ?? timestamp,
         updatedAt: timestamp,
         updatedBy,
-        outboxId: null
+        outboxId: null,
+        attribution
       };
       await db.drafts.put(row);
       return row;
@@ -150,7 +162,7 @@ export async function queueDraft(
         kind: "ledger-draft",
         groupId: draft.groupId,
         subjectId: draft.id,
-        payload: draft.request,
+        payload: draftPayload(draft.request, draft.attribution),
         now,
         idempotencyKey: createIdempotencyKey({
           kind: "ledger-draft",

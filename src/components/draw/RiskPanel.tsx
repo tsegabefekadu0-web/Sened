@@ -2,12 +2,15 @@
 
 import React from "react";
 
-import type { DrawRiskAssessment } from "@/lib/draw/types";
+import type { DrawRiskAssessment, DrawRiskNote } from "@/lib/draw/types";
+import { translate, type Locale, type MessageKey } from "@/lib/i18n";
 import { formatEtbDisplay } from "@/lib/ledger/money";
 
 import "./draw.css";
 
 export interface RiskPanelProps {
+  /** Amharic unless told otherwise, as the panel has always been. */
+  readonly locale?: Locale;
   readonly risk: DrawRiskAssessment;
   readonly currencyLabel: string;
 }
@@ -20,30 +23,49 @@ export interface RiskPanelProps {
  * so the treasurer can see that reasoning instead of trusting a number. Every
  * figure here is recomputable by hand from the published round values.
  */
-export function RiskPanel({ risk, currencyLabel }: RiskPanelProps) {
+export function RiskPanel({ locale = "am", risk, currencyLabel }: RiskPanelProps) {
+  const tr = (key: MessageKey, variables?: Record<string, string | number>): string => translate(locale, key, variables);
+  const noteText = (note: DrawRiskNote): string => {
+    switch (note.code) {
+      case "base_reserve":
+        return tr("drawRisk.note.base_reserve", { amount: formatEtbDisplay(note.amount), bps: note.bps, currency: currencyLabel });
+      case "member_exposure":
+        return tr("drawRisk.note.member_exposure", { amount: formatEtbDisplay(note.amount), currency: currencyLabel });
+      case "final_round":
+        return tr("drawRisk.note.final_round");
+      case "capped":
+        return tr("drawRisk.note.capped", { needed: formatEtbDisplay(note.needed), bps: note.ceilingBps, currency: currencyLabel });
+      case "coverage":
+        return tr("drawRisk.note.coverage", { percent: note.percent, owed: formatEtbDisplay(note.owed), currency: currencyLabel });
+      case "cannot_absorb":
+        return tr("drawRisk.note.cannot_absorb");
+      case "exposure_uncovered":
+        return tr("drawRisk.note.exposure_uncovered", { exposure: formatEtbDisplay(note.exposure), reserve: formatEtbDisplay(note.reserve), currency: currencyLabel });
+    }
+  };
   return (
     <section
       className="sened-draw-shell rounded-[22px] border border-[#DCCFC7] p-4 shadow-card"
-      aria-label="የክምት አደጋ ምዘና (Default risk assessment)"
+      aria-label={tr("drawRisk.aria")}
       data-draw-panel="risk"
     >
       <h3 className="font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]">
-        የክምት አደጋ ምዘና
+        {tr("drawRisk.title")}
       </h3>
 
       <dl className="mt-3 space-y-2.5">
         <Row
-          label="የመሶብ ጠቅላላ"
+          label={tr("drawRisk.pot")}
           value={`${formatEtbDisplay(risk.potAmount)} ${currencyLabel}`}
           muted
         />
         <Row
-          label="የሚከፈለው"
+          label={tr("drawRisk.payout")}
           value={`${formatEtbDisplay(risk.payoutAmount)} ${currencyLabel}`}
           emphasis
         />
         <Row
-          label="የተጠበቀ ማስጠንቀቂያ"
+          label={tr("drawRisk.reserve")}
           value={`${formatEtbDisplay(risk.reserveAmount)} ${currencyLabel}`}
         />
       </dl>
@@ -57,18 +79,22 @@ export function RiskPanel({ risk, currencyLabel }: RiskPanelProps) {
         ].join(" ")}
       >
         <p className="text-[12px] font-bold text-[#1C1410]">
-          {risk.reserveAdequate
-            ? "ማስጠንቀቂያው አንድ አባላት የሚልበውን ገንዘብ ያሽላል"
-            : "ማስጠንቀቂያው አይበቃም — ዙሩ በአባላት ውስጥ ይገመገማል"}
+          {risk.reserveAdequate ? tr("drawRisk.adequate") : tr("drawRisk.inadequate")}
         </p>
         <p className="mt-1 text-[11px] leading-4 text-[#065F46]">
-          አንድ አባላት ካልተከፈለ የሚያዘግየውን ለይቶ በ{" "}
-          {risk.reserveCoversDefaults >= Number.MAX_SAFE_INTEGER ? "∞" : risk.reserveCoversDefaults} ይችላል።
+          {tr("drawRisk.covers", {
+            count: risk.reserveCoversDefaults >= Number.MAX_SAFE_INTEGER ? "∞" : risk.reserveCoversDefaults
+          })}
         </p>
       </div>
 
       <ul className="mt-3 space-y-1.5">
-        {risk.notes.map((note, index) => (
+        {/* Said in the member's language when the assessment carries structured
+            notes; the engine's English strings are the fallback. */}
+        {(risk.noteItems && risk.noteItems.length > 0
+          ? risk.noteItems.map(noteText)
+          : risk.notes
+        ).map((note, index) => (
           <li key={index} className="text-[11px] leading-4 text-[#6F625D]">
             • {note}
           </li>

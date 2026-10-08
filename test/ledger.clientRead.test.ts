@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { loadCorrectionTargets } from "@/lib/ledger/clientRead";
+import { loadCorrectionTargets, pickGroup } from "@/lib/ledger/clientRead";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -88,10 +88,49 @@ describe("loadCorrectionTargets", () => {
     expect(d.fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("refuses to choose between several groups", async () => {
-    const d = deps([json({ groups: [{ groupId: GROUP }, { groupId: "33333333-3333-4333-8333-333333333333" }] })]);
-    expect(await loadCorrectionTargets(d)).toEqual({ status: "multiple-groups" });
+  const OTHER = "33333333-3333-4333-8333-333333333333";
+  const TWO_GROUPS = { groups: [{ groupId: GROUP, role: "owner" }, { groupId: OTHER, role: "treasurer" }] };
+
+  it("asks for a choice, and does not guess, with several groups and no active one", async () => {
+    const d = deps([json(TWO_GROUPS)]);
+    expect(await loadCorrectionTargets(d)).toEqual({ status: "choose-group" });
     expect(d.fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the active group among several, and the switch decides which one", async () => {
+    for (const chosen of [GROUP, OTHER]) {
+      const d = deps([json(TWO_GROUPS), json({ entries: [entry("e1", "1", "contribution")] })]);
+      const result = await loadCorrectionTargets(d, { groupId: chosen });
+      expect(result.status).toBe("ready");
+      expect(String(d.fetchImpl.mock.calls[1]?.[0])).toContain(`groupId=${chosen}`);
+    }
+  });
+
+  it("applies the writer-only rule to the chosen group's role, not to another group's", async () => {
+    const groups = { groups: [{ groupId: GROUP, role: "owner" }, { groupId: OTHER, role: "member" }] };
+    expect(await loadCorrectionTargets(deps([json(groups)]), { groupId: OTHER })).toEqual({ status: "read-only" });
+    expect((await loadCorrectionTargets(deps([json(groups), json({ entries: [] })]), { groupId: GROUP })).status).toBe("empty");
+  });
+
+  it("ignores an active group the server did not return for this caller", async () => {
+    const foreign = "44444444-4444-4444-8444-444444444444";
+    expect(await loadCorrectionTargets(deps([json(TWO_GROUPS)]), { groupId: foreign })).toEqual({ status: "choose-group" });
+    // Even with exactly one group a preference that is not among them is never
+    // replaced by it: the switcher would say one group while money posts to another.
+    const d = deps([json({ groups: [{ groupId: GROUP, role: "owner" }] })]);
+    expect(await loadCorrectionTargets(d, { groupId: foreign })).toEqual({ status: "choose-group" });
+    expect(d.fetchImpl).toHaveBeenCalledTimes(1);
+    // With no preference the only group is still used.
+    const only = deps([json({ groups: [{ groupId: GROUP, role: "owner" }] }), json({ entries: [] })]);
+    expect((await loadCorrectionTargets(only)).status).toBe("empty");
+  });
+
+  it("pickGroup returns null for a missing preference and the only group for none", () => {
+    const one = [{ groupId: GROUP }];
+    expect(pickGroup(one, "other")).toBeNull();
+    expect(pickGroup(one, null)).toBe(one[0]);
+    expect(pickGroup(one, GROUP)).toBe(one[0]);
+    expect(pickGroup([{ groupId: "a" }, { groupId: "b" }], null)).toBeNull();
   });
 
   it("returns read-only for a plain member without reading entries", async () => {

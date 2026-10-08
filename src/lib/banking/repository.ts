@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { BankVerificationError } from "./errors";
+import { isMaskedReference } from "./referenceMask";
 import { isUuid } from "@/lib/ledger/rules";
 import { formatEtbAmount, toEtbMinorUnits } from "@/lib/ledger/money";
 import type {
@@ -53,6 +54,16 @@ function assertHmac(value: string, field: string): string {
   return value.toLowerCase();
 }
 
+function assertReferenceDisplay(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!isMaskedReference(value)) {
+    throw new BankVerificationError("INVALID_REQUEST", "Reference display is not a masked value");
+  }
+  return value;
+}
+
 function assertAmount(value: string): string {
   try {
     toEtbMinorUnits(value, true);
@@ -83,7 +94,10 @@ export function toPublicBankVerification(intent: BankVerificationIntent): Public
     direction: intent.direction,
     occurredAt: intent.occurredAt,
     createdAt: intent.createdAt,
-    updatedAt: intent.updatedAt
+    updatedAt: intent.updatedAt,
+    // Re-checked against the masked shape on the way out: whatever the intent
+    // carried, nothing but a masked value is ever put in a response.
+    referenceMasked: isMaskedReference(intent.referenceDisplay) ? intent.referenceDisplay : null
   };
 }
 
@@ -201,6 +215,7 @@ export class InMemoryBankVerificationRepository implements BankVerificationRepos
       provider: input.provider,
       providerReferenceHmac,
       sealedProviderReference: { ...input.sealedProviderReference },
+      referenceDisplay: assertReferenceDisplay(input.referenceDisplay),
       amount: assertAmount(input.amount),
       currency: "ETB",
       direction: input.direction,

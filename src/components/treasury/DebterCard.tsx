@@ -5,9 +5,16 @@ import Image from "next/image";
 import { ChevronRight } from "lucide-react";
 
 import { createTranslator, type Locale } from "@/lib/i18n";
+import { formatPotBalance } from "@/lib/ledger/homeSummary";
 
 interface DebterCardProps {
-  potBalance: number;
+  /**
+   * A number is the sample figure; a string is a ledger amount ("175000.00")
+   * and is only grouped, never parsed as a float. `null` means there is no
+   * balance to show (loading, signed in without a readable ledger) and the card
+   * shows a dash rather than a number it does not have.
+   */
+  potBalance: number | string | null;
   onDrawClick?: () => void;
   /**
    * The shell is Ge'ez-primary, so this defaults to `am` and the card looks
@@ -19,7 +26,7 @@ interface DebterCardProps {
 }
 
 export function DebterCard({
-  potBalance = 175000,
+  potBalance,
   onDrawClick,
   locale = "am"
 }: DebterCardProps) {
@@ -76,11 +83,20 @@ export function DebterCard({
 
               <div className="flex items-baseline gap-1 mt-0.5">
                 <span className="text-[30px] sm:text-[34px] font-black text-white tracking-tight font-sans tabular-nums">
-                  {potBalance.toLocaleString()}
+                  {potBalance === null ? (
+                    <>
+                      <span aria-hidden="true">—</span>
+                      <span className="sr-only">{t("shell.debter.unavailable")}</span>
+                    </>
+                  ) : (
+                    formatPotBalance(potBalance)
+                  )}
                 </span>
-                <span className="text-lg sm:text-xl font-extrabold text-[#D4A244] font-ethiopic">
-                  {t("shell.debter.currency")}
-                </span>
+                {potBalance !== null && (
+                  <span className="text-lg sm:text-xl font-extrabold text-[#D4A244] font-ethiopic">
+                    {t("shell.debter.currency")}
+                  </span>
+                )}
               </div>
             </div>
 

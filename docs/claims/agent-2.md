@@ -1,5 +1,7 @@
 # AGENT-2 — Claim: Zero-Trust Voice Pipeline (M3)
 
+> **Historical log.** This file records one agent's work during the multi-agent build phase and is not kept up to date. For current status, see [ROADMAP.md](../../ROADMAP.md).
+
 | Field | Value |
 |---|---|
 | Agent | **AGENT-2** |

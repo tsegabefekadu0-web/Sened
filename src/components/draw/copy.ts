@@ -1,4 +1,4 @@
-import { translate, type Locale } from "@/lib/i18n";
+import { translate, type Locale, type MessageKey, type TranslationVariables } from "@/lib/i18n";
 
 /**
  * AGENT-3's ceremonial copy, sourced from the shared dictionary.
@@ -42,6 +42,7 @@ export interface DrawCopy {
   readonly participants: string;
   readonly currency: string;
   readonly localNote: string;
+  readonly demoBanner: string;
 }
 
 const FIELDS = {
@@ -67,7 +68,8 @@ const FIELDS = {
   commitmentIdle: "draw.commitmentIdle",
   participants: "draw.participants",
   currency: "draw.currency",
-  localNote: "draw.localNote"
+  localNote: "draw.localNote",
+  demoBanner: "draw.demoBanner"
 } as const satisfies Record<Exclude<keyof DrawCopy, "roundLabel">, string>;
 
 export function t(locale: Locale): DrawCopy {
@@ -98,6 +100,15 @@ export function t(locale: Locale): DrawCopy {
     commitmentIdle: read(FIELDS.commitmentIdle),
     participants: read(FIELDS.participants),
     currency: read(FIELDS.currency),
-    localNote: read(FIELDS.localNote)
+    localNote: read(FIELDS.localNote),
+    demoBanner: read(FIELDS.demoBanner)
   };
+}
+
+/** Keys of the signed-in ceremony (`drawLive.*`), kept apart from the demo's `draw.*`. */
+export type DrawLiveKey = Extract<MessageKey, `drawLive.${string}`>;
+
+/** Translator for the signed-in ceremony, through the same adapter as the demo. */
+export function liveCopy(locale: Locale): (key: DrawLiveKey, variables?: TranslationVariables) => string {
+  return (key, variables) => translate(locale, key, variables);
 }

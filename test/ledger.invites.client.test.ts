@@ -12,7 +12,8 @@ import {
   redeemInviteToken,
   revokeInviteLink,
   setTreasurer,
-  stashPendingInvite
+  stashPendingInvite,
+  saveMyAttire
 } from "@/lib/ledger/clientInvites";
 
 const TOKEN = "b".repeat(64);
@@ -112,16 +113,72 @@ describe("loadInvites, loadMembers, loadMyGroup", () => {
 
   it("parses members", async () => {
     const row = { userId: "u", role: "member", joinedAt: "x", email: null };
-    expect(await loadMembers(GROUP, deps(200, { members: [row] }).deps)).toEqual({ status: "ready", members: [row] });
+    // An absent attire (a database one migration behind) reads as none.
+    expect(await loadMembers(GROUP, deps(200, { members: [row] }).deps)).toEqual({ status: "ready", members: [{ ...row, attire: "none" }] });
+    const shawled = { ...row, attire: "netela" };
+    expect(await loadMembers(GROUP, deps(200, { members: [shawled] }).deps)).toEqual({ status: "ready", members: [shawled] });
+    // An unknown value fails the read rather than drawing a guessed shawl.
+    for (const bad of ["female", "", 3, "GABI"]) {
+      expect((await loadMembers(GROUP, deps(200, { members: [{ ...row, attire: bad }] }).deps)).status, String(bad)).toBe("error");
+    }
     expect((await loadMembers(GROUP, deps(200, { members: [{ ...row, role: "king" }] }).deps)).status).toBe("error");
     expect((await loadMembers(GROUP, deps(403).deps)).status).toBe("forbidden");
   });
 
-  it("picks the single group and refuses to guess among several", async () => {
+  it("picks the single group, honours the active group among several, and never guesses", async () => {
     const group = { groupId: GROUP, name: "Equb", role: "owner" };
-    expect(await loadMyGroup(deps(200, { groups: [group] }).deps)).toEqual({ status: "ready", groupId: GROUP, name: "Equb", role: "owner" });
+    expect(await loadMyGroup(deps(200, { groups: [group] }).deps)).toEqual({
+      status: "ready",
+      groupId: GROUP,
+      name: "Equb",
+      role: "owner",
+      attire: "none",
+      userId: null
+    });
+    expect(await loadMyGroup(deps(200, { groups: [{ ...group, attire: "gabi", userId: "u1" }] }).deps)).toMatchObject({ attire: "gabi", userId: "u1" });
+    expect((await loadMyGroup(deps(200, { groups: [{ ...group, attire: "male" }] }).deps)).status).toBe("error");
     expect(await loadMyGroup(deps(200, { groups: [] }).deps)).toEqual({ status: "no-group" });
-    expect(await loadMyGroup(deps(200, { groups: [group, group] }).deps)).toEqual({ status: "multiple-groups" });
+    const other = { ...group, groupId: "33333333-3333-4333-8333-333333333333", name: "Iddir", role: "member" };
+    const both = { groups: [group, other] };
+    expect(await loadMyGroup(deps(200, both).deps)).toEqual({ status: "choose-group" });
+    expect(await loadMyGroup(deps(200, both).deps, { groupId: other.groupId })).toMatchObject({ groupId: other.groupId, name: "Iddir", role: "member" });
+    expect(await loadMyGroup(deps(200, both).deps, { groupId: GROUP })).toMatchObject({ groupId: GROUP, name: "Equb" });
+    // A stale or foreign preference is ignored, never obeyed.
+    expect(await loadMyGroup(deps(200, both).deps, { groupId: "55555555-5555-4555-8555-555555555555" })).toEqual({ status: "choose-group" });
+  });
+});
+
+describe("saveMyAttire", () => {
+  it("PUTs only the group and the value, with the session's token", async () => {
+    const a = deps(200, { groupId: GROUP, attire: "gabi", changed: true });
+    expect(await saveMyAttire({ groupId: GROUP, attire: "gabi" }, a.deps)).toEqual({ status: "saved", attire: "gabi" });
+    const [url, init] = a.fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/ledger/member-attire");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ groupId: GROUP, attire: "gabi" });
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer jwt");
+  });
+
+  it("maps each failure to a closed status, and a malformed success to error", async () => {
+    const input = { groupId: GROUP, attire: "gabi" as const };
+    expect((await saveMyAttire(input, deps(403).deps)).status).toBe("forbidden");
+    expect((await saveMyAttire(input, deps(401).deps)).status).toBe("unauthorized");
+    expect((await saveMyAttire(input, deps(429).deps)).status).toBe("rate-limited");
+    expect((await saveMyAttire(input, deps(400).deps)).status).toBe("invalid");
+    expect((await saveMyAttire(input, deps(503).deps)).status).toBe("unavailable");
+    expect((await saveMyAttire(input, deps(502).deps)).status).toBe("error");
+    expect((await saveMyAttire(input, deps(200, { attire: "female" }).deps)).status).toBe("error");
+    expect((await saveMyAttire(input, deps(200, {}).deps)).status).toBe("error");
+  });
+
+  it("sends nothing when signed out", async () => {
+    const fetchImpl = vi.fn();
+    const outcome = await saveMyAttire(
+      { groupId: GROUP, attire: "gabi" },
+      { getToken: async () => null, fetchImpl: fetchImpl as unknown as typeof fetch }
+    );
+    expect(outcome.status).toBe("unauthorized");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 

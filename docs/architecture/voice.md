@@ -15,7 +15,7 @@ Design notes for `src/lib/voice/**`, `src/app/api/voice/**`,
 | `VoiceModal.tsx:32-41` — two `setTimeout`s revealing a hard-coded Amharic transcript | real `getUserMedia` → `MediaRecorder` → `AnalyserNode` pipeline in `src/lib/voice/recorder.ts` | a timer invents a sentence the treasurer never spoke |
 | `VoiceModal.tsx:100-116` — CSS `animate-ping` divs as a "waveform" | 32 bars sized inline from real `AnalyserNode` frames at ~30 fps (`voice.css` §waveform) | a ping animation is a heartbeat, not audio |
 | `VoiceModal.tsx:59-65` — a **literal object inside a callback** as "extraction" | `parseContributionUtterance()` in `src/lib/voice/parser.ts` | the amount was typed by a developer, not read from speech |
-| `VoiceModal.tsx:180` — "ክፍያው በባንክ ተረጋግጦ ደብተር ላይ ሰፍሯል" (added to the ledger!) | that string does not exist. The submit control renders **disabled** with the reason on screen | §12.3: no fabricated trust signals |
+| `VoiceModal.tsx:180` — "ክፍያው በባንክ ተረጋግጦ ደብተር ላይ ሰፍሯል" (added to the ledger!) | that string does not exist. Signed in, the submit control posts to `/api/bank-verifications` and shows the real outcome (verified / pending / no account / error); signed out it saves a provisional note on the device instead | §12.3: no fabricated trust signals |
 | `AudioDigestModal.tsx:89-98` — bar heights from `Math.sin((progress + i * 10) * 0.1)` | bars lit by real `speechSynthesis` `boundary` events | a sine wave is a screensaver |
 | `AudioDigestModal.tsx:27-40` — `setInterval` assuming a 12 s duration at 1× | progress = boundary count ÷ sentence count | Amharic at 0.75× on a cheap phone is not 12 seconds |
 | No speed control | `TTS_SPEEDS` selector driving `utterance.rate` | ROADMAP §3.2 requires play, pause **and** speed |
@@ -36,8 +36,8 @@ waveform.ts    AnalyserNode arithmetic
 intent.ts      the hand-off to A1
 ```
 
-The left column is why M3 is worth anything at all: **184 tests, no network,
-no credential, no `AudioContext`.** The right column is inert until someone
+The left column is why M3 is worth anything at all: **no network,
+no credential, no `AudioContext`** (the voice suite is 212 tests, §9). The right column is inert until someone
 sets `VOXIDE_API_URL` / `VOXIDE_API_KEY`, and until then every call raises
 `PROVIDER_NOT_CONFIGURED`.
 
@@ -213,11 +213,16 @@ reference) while staying a non-blocking *warning* on the draft.
 trustworthy clock, and the field feeds A1's request fingerprint and its
 `TIMESTAMP_MISMATCH` reconciliation. A missing time is a question, not a guess.
 
-**While `onRequestVerification` is absent the submit control is disabled and
-says why.** `page.tsx`'s `onAddContribution` is kept in the prop signature so
-A1's file keeps compiling, but A2's lane never calls it from speech — only from
-a genuine `VERIFIED` outcome returned by a caller-supplied verifier. See
-`docs/requests/agent-2.md` R-2 and R-5.
+**Status: wired.** `src/app/page.tsx` passes `requestBankVerification`
+(`src/lib/voice/clientVerify.ts`) as `onRequestVerification` when the visitor is
+signed in. It lists the caller's bank-account bindings, picks the one active
+ETB binding that matches the spoken provider (zero or several matches are
+refused, never guessed), and POSTs `/api/bank-verifications`; only a server
+`VERIFIED` state yields `verified: true`, and `occurredAt` is the submission
+time. Signed out, `onRecordLocally` saves a provisional note in the offline
+store instead (transcript only; no audio is stored). If neither prop is given the
+modal's submit control is disabled and says why. `onAddContribution` no longer
+exists. See `docs/requests/agent-2.md` R-2 and R-5.
 
 ---
 
@@ -241,9 +246,9 @@ visible en/am switch, so a reviewer can read it.
 | Amharic `SpeechRecognition` support is browser-dependent; Oromo has no shipped BCP-47 tag in any major engine | `canSpeak()` / `isSpeechRecognitionSupported()` report the truth and the UI disables the control |
 | No language auto-detect from a BCP-47 tag | the caller picks; guessing a language for a *financial* draft is not acceptable |
 | Provider field names are assumed from a small candidate set (`transcript` / `text` / `result.text` / …) | a real integration must confirm Voxide's actual shape; a miss raises `PROVIDER_REJECTED`, never a partial parse |
-| `/api/voice/extract` is unauthenticated | pure function, no persistence, no credential, 8 KiB cap. Rate limiting requested in R-1 |
-| No A4-style offline capture | AGENT-4 owns `src/lib/db/**`. The observed `mimeType` is preserved for their store (R-4) |
-| `next build` not run | A3/A4 have in-flight type errors in the shared tree; a build would report *their* failures. `npm run typecheck` filtered to A2's paths is clean |
+| `/api/voice/extract` is unauthenticated and not rate limited | pure function, no persistence, no credential, 8 KiB cap. `/api/voice/transcribe` and `/api/voice/speak` are in `RATE_LIMITED` (`src/middleware.ts`); `extract` and `capabilities` are not |
+| Voice notes store the transcript, not the audio | the signed-out local path (`recordVoiceNoteLocally` in `src/app/page.tsx`) saves a spoken note without audio; the store has an `audioMimeType` column, unused by this flow |
+| Oromo speech recognition and an Oromo UI | the parser reads Oromo text, but `i18n.ts` has only `en` and `am`, and the audio digest speaks Amharic |
 
 ---
 
@@ -256,4 +261,6 @@ visible en/am switch, so a reviewer can read it.
 | `test/voice.audio.test.ts` | 41 | waveform maths, capture quality, fail-closed STT/TTS, every provider fault |
 | `test/voice.intent.test.ts` | 15 | the A1 hand-off, validated against A1's own schema |
 | `test/voice.api.route.test.ts` | 27 | auth tiers, 400/401/429/502/503, no fabricated transcript, no smuggled `verified` |
-| **total** | **184** | baseline suite 75/75 unchanged |
+| `test/voice.numerals.regression.test.ts` | 19 | numeral-composition regressions found after the first pass |
+| `test/voice.local-record.test.tsx` | 9 | the modal with no verifier wired: records a provisional note on the device |
+| **total** | **212** | as of 2026-10-03 (`npx vitest run test/voice`) |

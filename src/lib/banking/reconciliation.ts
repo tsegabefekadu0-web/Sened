@@ -98,12 +98,18 @@ export class ReconciliationCoordinator {
     private readonly store: ReconciliationJobStore,
     private readonly verifier: {
       verifyIntent(
-        intent: BankVerificationIntent
+        intent: BankVerificationIntent,
+        context?: { readonly leaseToken?: string }
       ): Promise<ReconciliationCoordinatorOutcome>;
     },
     private readonly clock: () => Date = () => new Date(),
     private readonly backoff: ReconciliationBackoffOptions = {}
   ) {}
+
+  /** Hand jobs stuck on an expired final-attempt lease to a person. Returns the count. */
+  async reapExhausted(): Promise<number> {
+    return this.store.reapExhausted ? this.store.reapExhausted() : 0;
+  }
 
   async run(workerId: string, leaseMs: number): Promise<ReconciliationJob | null> {
     const settled = await this.runWithOutcome(workerId, leaseMs);
@@ -129,7 +135,7 @@ export class ReconciliationCoordinator {
     }
     let outcome: ReconciliationCoordinatorOutcome;
     try {
-      outcome = await this.verifier.verifyIntent(claim.intent);
+      outcome = await this.verifier.verifyIntent(claim.intent, { leaseToken: claim.job.leaseToken });
     } catch {
       outcome = {
         state: "PENDING_RECONCILIATION",
@@ -211,6 +217,17 @@ export async function drainReconciliationQueue(
     readonly leaseMs: number;
     /** Backstop. Defaults to 100. */
     readonly maxIterations?: number;
+    /**
+     * Consulted before each claim. Return false to stop (reported as
+     * `truncated`). This is how a caller imposes a time budget: a job already
+     * claimed is always finished, so the budget bounds when work STARTS.
+     */
+    readonly shouldContinue?: () => boolean;
+    /** Called after each job settles, for callers that report per-job detail. */
+    readonly onSettled?: (settled: {
+      job: ReconciliationJob;
+      outcome: ReconciliationCoordinatorOutcome;
+    }) => void;
   }
 ): Promise<ReconciliationDrainResult> {
   const maxIterations = Math.max(1, Math.floor(options.maxIterations ?? 100));
@@ -221,11 +238,15 @@ export async function drainReconciliationQueue(
   let manualReview = 0;
 
   while (attempted < maxIterations) {
+    if (options.shouldContinue && !options.shouldContinue()) {
+      return { attempted, verified, rejected, rescheduled, manualReview, truncated: true };
+    }
     const settled = await coordinator.runWithOutcome(options.workerId, options.leaseMs);
     if (!settled) {
       return { attempted, verified, rejected, rescheduled, manualReview, truncated: false };
     }
     attempted += 1;
+    options.onSettled?.(settled);
     if (settled.job.state === "MANUAL_REVIEW") {
       manualReview += 1;
       continue;
@@ -362,6 +383,45 @@ export class InMemoryReconciliationJobStore implements ReconciliationJobStore {
       throw new BankVerificationError("INTEGRITY_FAILURE", "Reconciliation intent is missing");
     }
     return { job: copyJob(updated), intent: copyIntent(intent) };
+  }
+
+  async reapExhausted(): Promise<number> {
+    const now = this.clock();
+    let reaped = 0;
+    for (const job of Array.from(this.jobs.values())) {
+      const leaseExpired = job.leaseExpiresAt !== null && new Date(job.leaseExpiresAt).getTime() <= now.getTime();
+      if (job.state !== "CLAIMED" || !leaseExpired || job.attempt < job.maxAttempts) {
+        continue;
+      }
+      const stamp = now.toISOString();
+      this.jobs.set(job.id, {
+        ...job,
+        state: "MANUAL_REVIEW",
+        leaseToken: null,
+        leaseExpiresAt: null,
+        lastReasonCode: "MANUAL_REVIEW_REQUIRED",
+        terminalAt: stamp,
+        updatedAt: stamp
+      });
+      this.leaseOwners.delete(job.id);
+      if (this.repository) {
+        const updatedIntent = await this.repository.recordResult(
+          job.verificationId,
+          {
+            state: "PENDING_RECONCILIATION",
+            reasonCode: "MANUAL_REVIEW_REQUIRED",
+            evidenceFingerprint: null,
+            providerTransactionIdentityHmac: null,
+            ledgerEntryId: null,
+            nextAttemptAt: null
+          },
+          { userId: job.userId }
+        );
+        this.intents.set(job.verificationId, copyIntent(updatedIntent));
+      }
+      reaped += 1;
+    }
+    return reaped;
   }
 
   async reschedule(

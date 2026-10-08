@@ -113,7 +113,7 @@ function VoxideAssistantMounted({ publicKey }: { readonly publicKey: string }) {
       greeting: t("assistant.greeting"),
       placeholder: t("assistant.placeholder"),
       launcherLabel: t("assistant.launcherLabel"),
-      launcherSize: "sm",
+      launcherSize: "md",
       starters: [t("assistant.starter.status"), t("assistant.starter.next"), t("assistant.starter.pending")]
     });
   }, [client, t]);

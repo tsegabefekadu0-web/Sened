@@ -38,22 +38,22 @@ export function VerifyPanel({ locale = "am", transcript, verification, isRunning
       data-draw-panel="verify"
     >
       <header className="flex items-center justify-between gap-3">
-        <h3 className="font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]">
+        <h3 className="font-ethiopic text-base font-bold  text-[#1C1410]">
           {tr("drawVerify.title")}
         </h3>
-        <span className="rounded-full bg-[#F5EFEB] px-2 py-1 text-[10px] font-semibold tracking-wide text-[#6F625D]">
+        <span className="rounded-full bg-[#F5EFEB] px-2 py-1 text-base font-semibold  text-[#4F4137]">
           {tr("drawVerify.badge")}
         </span>
       </header>
 
-      <p className="mt-2 text-[12px] leading-5 text-[#6F625D]">
+      <p className="mt-2 text-base leading-relaxed text-[#4F4137]">
         {tr("drawVerify.intro")}
       </p>
 
       {error ? (
         <p
           role="alert"
-          className="mt-3 rounded-xl border border-[#C6532B] bg-[#FDEDE6] px-3 py-2 text-[12px] font-semibold text-[#863214]"
+          className="mt-3 rounded-xl border border-[#C6532B] bg-[#FDEDE6] px-3 py-2 text-base font-semibold text-[#863214]"
         >
           {error}
         </p>
@@ -86,7 +86,7 @@ export function VerifyPanel({ locale = "am", transcript, verification, isRunning
                   : "bg-[#D4A244]"
           ].join(" ")}
         />
-        <span className="text-[13px] font-bold tracking-wide">
+        <span className="text-base font-bold ">
           {isRunning
             ? tr("drawVerify.running")
             : tampered || selectionWrong
@@ -100,10 +100,10 @@ export function VerifyPanel({ locale = "am", transcript, verification, isRunning
       {verification.errors.length > 0 ? (
         <ul className="mt-2 space-y-1.5">
           {verification.errors.map((entry, index) => (
-            <li key={index} className="text-[12px] leading-5 text-[#863214]">
+            <li key={index} className="text-base leading-relaxed text-[#863214]">
               • {tr(`drawVerify.err.${entry.code}` as MessageKey)}
               {/* The engine's own wording, kept as technical detail: it names the exact value that failed. */}
-              <span lang="en" className="block pl-3 text-[11px] leading-4 text-[#6F625D]">
+              <span lang="en" className="block pl-3 text-base leading-relaxed text-[#4F4137]">
                 {entry.detail}
               </span>
             </li>
@@ -117,7 +117,7 @@ export function VerifyPanel({ locale = "am", transcript, verification, isRunning
               carries only the engine's English strings falls back to those. */}
           {verification.warningItems && verification.warningItems.length > 0
             ? verification.warningItems.map((item, index) => (
-                <li key={index} className="text-[12px] leading-5 text-[#6B4E16]">
+                <li key={index} className="text-base leading-relaxed text-[#6B4E16]">
                   •{" "}
                   {item.code === "abandoned_commitments"
                     ? tr("drawVerify.warn.abandoned_commitments", { count: item.count })
@@ -125,7 +125,7 @@ export function VerifyPanel({ locale = "am", transcript, verification, isRunning
                 </li>
               ))
             : verification.warnings.map((warning, index) => (
-                <li key={index} className="text-[12px] leading-5 text-[#6B4E16]">
+                <li key={index} className="text-base leading-relaxed text-[#6B4E16]">
                   • {warning}
                 </li>
               ))}
@@ -133,18 +133,18 @@ export function VerifyPanel({ locale = "am", transcript, verification, isRunning
       ) : null}
 
       {verification.verified && !isRunning ? (
-        <dl className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-[12px]">
-          <dt className="font-ethiopic text-[#6F625D]">{tr("drawVerify.winner")}</dt>
+        <dl className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-base">
+          <dt className="font-ethiopic text-[#4F4137]">{tr("drawVerify.winner")}</dt>
           <dd className="sened-hash font-sans font-semibold">{verification.winnerMemberId}</dd>
-          <dt className="font-ethiopic text-[#6F625D]">{tr("drawVerify.ticket")}</dt>
+          <dt className="font-ethiopic text-[#4F4137]">{tr("drawVerify.ticket")}</dt>
           <dd className="sened-hash">{verification.winningTicket}</dd>
-          <dt className="font-ethiopic text-[#6F625D]">{tr("drawVerify.digest")}</dt>
+          <dt className="font-ethiopic text-[#4F4137]">{tr("drawVerify.digest")}</dt>
           <dd className="sened-hash">{verification.transcriptDigest}</dd>
         </dl>
       ) : null}
 
       <details className="mt-3 rounded-xl border border-[#DCCFC7] bg-[#FAF7F2] px-3 py-2">
-        <summary className="cursor-pointer select-text text-[12px] font-semibold text-[#1C1410]">
+        <summary className="cursor-pointer select-text text-base font-semibold text-[#1C1410]">
           {tr("drawVerify.showAll")}
         </summary>
         <dl className="mt-2 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5">
@@ -162,12 +162,12 @@ export function VerifyPanel({ locale = "am", transcript, verification, isRunning
             ["transcriptDigest", verification.transcriptDigest ?? tr("drawVerify.notComputed")]
           ].map(([label, value]) => (
             <React.Fragment key={label}>
-              <dt className="text-[11px] font-semibold text-[#6F625D]">{label}</dt>
+              <dt className="text-base font-semibold text-[#4F4137]">{label}</dt>
               <dd className="sened-hash">{value}</dd>
             </React.Fragment>
           ))}
         </dl>
-        <p className="mt-2 text-[11px] leading-4 text-[#6F625D]">
+        <p className="mt-2 text-base leading-relaxed text-[#4F4137]">
           {tr("drawVerify.ticketsNote")}
         </p>
         <ul className="mt-1 space-y-1">

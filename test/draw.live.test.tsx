@@ -921,16 +921,16 @@ describe("signed out", () => {
       render(<DrawPage />);
 
       const banner = screen.getByTestId("draw-demo-banner");
-      expect(banner).toHaveTextContent("ማሳያ");
+      expect(banner).toHaveTextContent("የልምምድ");
       expect(banner).toHaveTextContent("ለቡድንዎ እውነተኛ እጣ ለማውጣት ይግቡ");
 
       await user.click(screen.getByRole("button", { name: "Switch to English" }));
-      expect(screen.getByTestId("draw-demo-banner")).toHaveTextContent("DEMO");
+      expect(screen.getByTestId("draw-demo-banner")).toHaveTextContent("Practice draw");
       expect(screen.getByTestId("draw-demo-banner")).toHaveTextContent("Sign in to run a real draw for your group.");
       expect(screen.queryByTestId("draw-live")).toBeNull();
 
-      await user.click(screen.getByRole("button", { name: "Seal the commitment" }));
-      await screen.findByRole("button", { name: "Reveal the seed" });
+      await user.click(screen.getByRole("button", { name: "Lock the draw" }));
+      await screen.findByRole("button", { name: "Pick the winner" });
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();

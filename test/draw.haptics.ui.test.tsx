@@ -34,18 +34,18 @@ const calls = () => triggerHaptic.mock.calls.map((call) => (call as unknown as [
 describe("demo ceremony haptics", () => {
   it("does not vibrate on load, before any user action", async () => {
     render(<DrawBoard locale="en" />);
-    await screen.findByRole("button", { name: "Seal the commitment" });
+    await screen.findByRole("button", { name: "Lock the draw" });
     expect(triggerHaptic).not.toHaveBeenCalled();
   });
 
   it("buzzes the seal on commit, a step on reveal, then the winner once verified", async () => {
     const user = userEvent.setup();
     render(<DrawBoard locale="en" />);
-    await user.click(screen.getByRole("button", { name: "Seal the commitment" }));
-    await screen.findByRole("button", { name: "Reveal the seed" });
+    await user.click(screen.getByRole("button", { name: "Lock the draw" }));
+    await screen.findByRole("button", { name: "Pick the winner" });
     expect(calls()).toEqual(["commitSealed"]);
 
-    await user.click(screen.getByRole("button", { name: "Reveal the seed" }));
+    await user.click(screen.getByRole("button", { name: "Pick the winner" }));
     await waitFor(() => expect(calls()).toContain("winnerRevealed"));
     expect(calls()).toEqual(["commitSealed", "revealStep", "revealStep", "winnerRevealed"]);
     expect(calls()).not.toContain("tamperDetected");
@@ -54,10 +54,10 @@ describe("demo ceremony haptics", () => {
   it("buzzes the tamper pattern, and never the winner one, when the seed is flipped", async () => {
     const user = userEvent.setup();
     render(<DrawBoard locale="en" />);
-    await user.click(screen.getByRole("button", { name: "Seal the commitment" }));
-    await screen.findByRole("button", { name: "Reveal the seed" });
+    await user.click(screen.getByRole("button", { name: "Lock the draw" }));
+    await screen.findByRole("button", { name: "Pick the winner" });
     await user.click(screen.getByRole("checkbox"));
-    await user.click(screen.getByRole("button", { name: "Reveal the seed" }));
+    await user.click(screen.getByRole("button", { name: "Pick the winner" }));
     await waitFor(() => expect(calls()).toContain("tamperDetected"));
     expect(calls()).toEqual(["commitSealed", "revealStep", "tamperDetected"]);
   });

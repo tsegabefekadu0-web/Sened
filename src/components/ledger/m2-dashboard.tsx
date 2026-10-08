@@ -251,7 +251,7 @@ const statusIconByState: Record<BankVerificationState, LucideIcon> = {
 
 function StatusPill({ label, tone, icon: Icon }: { label: string; tone: StatusTone; icon: LucideIcon }) {
   return (
-    <span className={`inline-flex min-h-8 items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${statusToneClasses[tone]}`}>
+    <span className={`inline-flex min-h-12 items-center gap-2 rounded-full border px-3 py-1 text-base font-semibold ${statusToneClasses[tone]}`}>
       <Icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
       <span>{label}</span>
     </span>
@@ -519,24 +519,24 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
             <a
               href="#top"
               aria-label={t("m2.brand.home")}
-              className="inline-flex min-h-11 items-center gap-3 self-start rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
+              className="inline-flex min-h-12 items-center gap-3 self-start rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
             >
               <span aria-hidden="true" className="relative flex h-10 w-10 items-center justify-center rounded-xl border-2 border-terracotta bg-gold/25">
                 <span className="h-4 w-4 rotate-45 border-2 border-terracotta" />
                 <span className="absolute h-1.5 w-1.5 rotate-45 bg-coffee-900" />
               </span>
-              <span className="flex flex-col leading-tight">
+              <span className="flex flex-col leading-relaxed">
                 <span className="text-lg font-bold tracking-tight text-coffee-900">{t("m2.brand.name")}</span>
-                <span className="text-xs font-medium text-inkMuted">{t("m2.brand.context")}</span>
+                <span className="text-base font-medium text-inkMuted">{t("m2.brand.context")}</span>
               </span>
             </a>
             <div className="flex flex-wrap items-center gap-2 sm:justify-end">
               <GroupSwitcher locale={locale} tone="light" className="w-full sm:w-64" />
-              <span className="inline-flex min-h-9 items-center gap-2 rounded-full border border-gold-500/45 bg-gold/15 px-3 text-xs font-semibold text-coffee-700">
+              <span className="inline-flex min-h-12 items-center gap-2 rounded-full border border-gold-500/45 bg-gold/15 px-3 text-base font-semibold text-coffee-700">
                 <CircleDashed aria-hidden="true" className="h-3.5 w-3.5" />
                 {t("m2.header.demoLabel")}
               </span>
-              <span className="hidden min-h-9 items-center gap-2 px-2 text-xs font-medium text-inkMuted md:inline-flex">
+              <span className="hidden min-h-12 items-center gap-2 px-2 text-base font-medium text-inkMuted md:inline-flex">
                 <LockKeyhole aria-hidden="true" className="h-3.5 w-3.5" />
                 {t("m2.header.noSession")}
               </span>
@@ -545,27 +545,27 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                 onClick={() => onLocaleChange?.(locale === "en" ? "am" : "en")}
                 aria-label={t("shell.changeLanguage")}
                 aria-pressed={locale === "am"}
-                className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-coffee-900/15 bg-white/60 px-3 text-sm font-semibold text-coffee-800 transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
+                className="inline-flex min-h-12 items-center gap-2 rounded-xl border border-coffee-900/15 bg-white/60 px-3 text-base font-semibold text-coffee-800 transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
               >
                 <Languages aria-hidden="true" className="h-4 w-4" />
                 <span>{locale === "en" ? t("shell.amharic") : t("shell.english")}</span>
               </button>
             </div>
           </div>
-          <nav aria-label={t("shell.primaryNavigation")} className="flex flex-wrap gap-x-5 gap-y-1 border-t border-coffee-900/10 py-2 text-sm font-semibold text-inkMuted">
-            <a href="#balance" className="inline-flex min-h-11 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
+          <nav aria-label={t("shell.primaryNavigation")} className="flex flex-wrap gap-x-5 gap-y-1 border-t border-coffee-900/10 py-2 text-base font-semibold text-inkMuted">
+            <a href="#balance" className="inline-flex min-h-12 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
               {t("m2.nav.overview")}
             </a>
-            <a href="#integrations" className="inline-flex min-h-11 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
+            <a href="#integrations" className="inline-flex min-h-12 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
               {t("m2.nav.integrations")}
             </a>
-            <a href="#history" className="inline-flex min-h-11 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
+            <a href="#history" className="inline-flex min-h-12 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
               {t("m2.nav.ledger")}
             </a>
-            <a href="#record-contribution" className="inline-flex min-h-11 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
+            <a href="#record-contribution" className="inline-flex min-h-12 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
               {t("m2.nav.record")}
             </a>
-            <a href="#correction" className="inline-flex min-h-11 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
+            <a href="#correction" className="inline-flex min-h-12 items-center rounded-lg px-1 transition-colors hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50">
               {t("m2.nav.corrections")}
             </a>
           </nav>
@@ -576,18 +576,18 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
         <section aria-labelledby="m2-hero-heading" className="overflow-hidden bg-coffee-900 text-parchment-50">
           <div className="mx-auto grid max-w-7xl gap-10 px-4 py-12 sm:px-6 sm:py-16 lg:grid-cols-[1.15fr_0.85fr] lg:items-center lg:px-8 lg:py-20">
             <div className="max-w-3xl">
-              <div className="inline-flex items-center gap-2 rounded-full border border-gold-400/40 bg-gold-400/10 px-3 py-1.5 text-xs font-semibold text-gold-300">
+              <div className="inline-flex items-center gap-2 rounded-full border border-gold-400/40 bg-gold-400/10 px-3 py-1.5 text-base font-semibold text-gold-300">
                 <LockKeyhole aria-hidden="true" className="h-3.5 w-3.5" />
                 {t("m2.header.readOnly")}
               </div>
-              <h1 id="m2-hero-heading" className="mt-6 max-w-2xl text-4xl font-bold leading-tight tracking-tight sm:text-5xl lg:text-6xl">
+              <h1 id="m2-hero-heading" className="mt-6 max-w-2xl text-4xl font-bold leading-relaxed tracking-tight sm:text-5xl lg:text-6xl">
                 {t("m2.hero.title")}
               </h1>
               <p className="mt-5 max-w-2xl text-base leading-7 text-parchment-200 sm:text-lg">{t("m2.hero.description")}</p>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
                 <a
                   href="#balance"
-                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-gold-400 px-4 py-2.5 text-sm font-bold text-coffee-950 transition-colors hover:bg-gold-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-gold-300 focus-visible:ring-offset-2 focus-visible:ring-offset-coffee-900"
+                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-gold-400 px-4 py-2.5 text-base font-bold text-coffee-950 transition-colors hover:bg-gold-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-gold-300 focus-visible:ring-offset-2 focus-visible:ring-offset-coffee-900"
                 >
                   {t("m2.hero.viewBalance")}
                   <ArrowRight aria-hidden="true" className="h-4 w-4" />
@@ -595,13 +595,13 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                 <button
                   type="button"
                   onClick={openCorrection}
-                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-parchment-300/35 px-4 py-2.5 text-sm font-bold text-parchment-100 transition-colors hover:border-gold-300 hover:text-gold-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-gold-300 focus-visible:ring-offset-2 focus-visible:ring-offset-coffee-900"
+                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl border border-parchment-300/35 px-4 py-2.5 text-base font-bold text-parchment-100 transition-colors hover:border-gold-300 hover:text-gold-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-gold-300 focus-visible:ring-offset-2 focus-visible:ring-offset-coffee-900"
                 >
                   {t("m2.hero.startCorrection")}
                   <ArrowRight aria-hidden="true" className="h-4 w-4" />
                 </button>
               </div>
-              <p className="mt-6 max-w-2xl text-sm leading-6 text-parchment-300">{t("m2.hero.demoNotice")}</p>
+              <p className="mt-6 max-w-2xl text-base leading-6 text-parchment-300">{t("m2.hero.demoNotice")}</p>
             </div>
             <div aria-hidden="true" className="relative hidden min-h-64 items-center justify-center lg:flex">
               <div className="absolute inset-0 opacity-40">
@@ -629,72 +629,72 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
             <div className="mt-8 grid gap-px overflow-hidden rounded-2xl border border-coffee-900/15 bg-coffee-900/15 shadow-card lg:grid-cols-2">
               <div data-testid="trusted-balance" className="bg-parchment-50 p-6 sm:p-8">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <p className="text-sm font-semibold text-inkMuted">{t("m2.balance.trustedLabel")}</p>
+                  <p className="text-base font-semibold text-inkMuted">{t("m2.balance.trustedLabel")}</p>
                   <StatusPill label={t("m2.status.ledgerVerified")} tone="verified" icon={CircleCheck} />
                 </div>
                 <p data-testid="trusted-balance-amount" className="mt-6 break-words text-4xl font-bold tracking-tight text-coffee-950 sm:text-5xl">{trustedAmount}</p>
-                <p className="mt-5 max-w-xl text-sm leading-6 text-inkMuted">{t("m2.balance.verifiedExplanation")}</p>
+                <p className="mt-5 max-w-xl text-base leading-6 text-inkMuted">{t("m2.balance.verifiedExplanation")}</p>
               </div>
               <div data-testid="pending-excluded" className="bg-parchment-50 p-6 sm:p-8">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <p className="text-sm font-semibold text-inkMuted">{t("m2.balance.pendingTitle")}</p>
+                  <p className="text-base font-semibold text-inkMuted">{t("m2.balance.pendingTitle")}</p>
                   <StatusPill label={t("m2.status.pendingReconciliation")} tone="pending" icon={Clock3} />
                 </div>
                 <p data-testid="pending-balance-amount" className="mt-6 break-words text-4xl font-bold tracking-tight text-coffee-950 sm:text-5xl">{pendingAmount}</p>
-                <p className="mt-5 max-w-xl text-sm leading-6 text-inkMuted">{t("m2.balance.pendingDescription")}</p>
+                <p className="mt-5 max-w-xl text-base leading-6 text-inkMuted">{t("m2.balance.pendingDescription")}</p>
               </div>
             </div>
             <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <p data-testid="pending-exclusion-note" className="border-l-2 border-gold-500 bg-parchment-50 px-4 py-3 text-sm leading-6 text-coffee-800">
+              <p data-testid="pending-exclusion-note" className="border-l-2 border-gold-500 bg-parchment-50 px-4 py-3 text-base leading-6 text-coffee-800">
                 {t("m2.balance.pendingExcluded", { amount: pendingAmount })}
               </p>
-              <p className="border-l-2 border-terracotta bg-parchment-50 px-4 py-3 text-sm leading-6 text-coffee-800">
-                <span className="block text-xs font-bold uppercase tracking-[0.12em] text-terracotta-700">{t("m2.balance.reviewTitle")}</span>
+              <p className="border-l-2 border-terracotta bg-parchment-50 px-4 py-3 text-base leading-6 text-coffee-800">
+                <span className="block text-base font-bold   text-terracotta-700">{t("m2.balance.reviewTitle")}</span>
                 {t("m2.balance.reviewExcluded", { amount: reviewAmount })}
               </p>
             </div>
-            <p className="mt-4 text-xs font-medium text-inkMuted">{t("m2.balance.currencyNote")}</p>
+            <p className="mt-4 text-base font-medium text-inkMuted">{t("m2.balance.currencyNote")}</p>
           </section>
 
           <section aria-labelledby="integrity-heading" className="border-y border-coffee-900/10 py-10 sm:py-12">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <h2 id="integrity-heading" className="text-2xl font-bold tracking-tight text-coffee-950 sm:text-3xl">{t("m2.integrity.title")}</h2>
-                <p className="mt-2 text-sm leading-6 text-inkMuted">{t("m2.integrity.description")}</p>
+                <p className="mt-2 text-base leading-6 text-inkMuted">{t("m2.integrity.description")}</p>
               </div>
-              <p className="text-xs font-semibold text-inkMuted">{t("m2.integrity.checkedAt", { date: formatDate(LAST_RECORDED_AT, locale) })}</p>
+              <p className="text-base font-semibold text-inkMuted">{t("m2.integrity.checkedAt", { date: formatDate(LAST_RECORDED_AT, locale) })}</p>
             </div>
             <dl className="mt-7 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <div className="flex min-h-24 items-center gap-3 rounded-xl border border-[#B7DFC1] bg-[#EFFAF1] px-4 py-4">
                 <ShieldCheck aria-hidden="true" className="h-6 w-6 shrink-0 text-[#166534]" />
                 <div className="min-w-0">
-                  <dt className="text-xs font-semibold text-[#166534]">{t("m2.integrity.chainLabel")}</dt>
+                  <dt className="text-base font-semibold text-[#166534]">{t("m2.integrity.chainLabel")}</dt>
                   <dd className="mt-1"><StatusPill label={t("m2.status.chainIntact")} tone="verified" icon={Check} /></dd>
                 </div>
               </div>
               <div className="flex min-h-24 items-center gap-3 rounded-xl border border-coffee-900/15 bg-parchment-50 px-4 py-4">
                 <GitBranch aria-hidden="true" className="h-6 w-6 shrink-0 text-terracotta-600" />
                 <div>
-                  <dt className="text-xs font-semibold text-inkMuted">{t("m2.integrity.historyLabel")}</dt>
-                  <dd className="mt-1 text-sm font-bold text-coffee-900">{t("m2.integrity.historyValue")}</dd>
+                  <dt className="text-base font-semibold text-inkMuted">{t("m2.integrity.historyLabel")}</dt>
+                  <dd className="mt-1 text-base font-bold text-coffee-900">{t("m2.integrity.historyValue")}</dd>
                 </div>
               </div>
               <div className="flex min-h-24 items-center gap-3 rounded-xl border border-coffee-900/15 bg-parchment-50 px-4 py-4">
                 <ScrollText aria-hidden="true" className="h-6 w-6 shrink-0 text-terracotta-600" />
                 <div>
-                  <dt className="text-xs font-semibold text-inkMuted">{t("m2.integrity.sequenceLabel")}</dt>
-                  <dd className="mt-1 text-sm font-bold text-coffee-900">{t("m2.integrity.sequenceValue", { sequence: "000428" })}</dd>
+                  <dt className="text-base font-semibold text-inkMuted">{t("m2.integrity.sequenceLabel")}</dt>
+                  <dd className="mt-1 text-base font-bold text-coffee-900">{t("m2.integrity.sequenceValue", { sequence: "000428" })}</dd>
                 </div>
               </div>
               <div className="flex min-h-24 items-center gap-3 rounded-xl border border-coffee-900/15 bg-parchment-50 px-4 py-4">
                 <Fingerprint aria-hidden="true" className="h-6 w-6 shrink-0 text-terracotta-600" />
                 <div className="min-w-0">
-                  <dt className="text-xs font-semibold text-inkMuted">{t("m2.integrity.hashLabel")}</dt>
-                  <dd aria-label={t("m2.integrity.hashAccessible")} className="mt-1 truncate text-sm font-bold text-coffee-900">{t("m2.integrity.hashVisible")}</dd>
+                  <dt className="text-base font-semibold text-inkMuted">{t("m2.integrity.hashLabel")}</dt>
+                  <dd aria-label={t("m2.integrity.hashAccessible")} className="mt-1 truncate text-base font-bold text-coffee-900">{t("m2.integrity.hashVisible")}</dd>
                 </div>
               </div>
             </dl>
-            <p className="mt-5 flex items-start gap-2 text-sm leading-6 text-inkMuted">
+            <p className="mt-5 flex items-start gap-2 text-base leading-6 text-inkMuted">
               <FileLock2 aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-terracotta-600" />
               {t("m2.integrity.noEdits")}
             </p>
@@ -709,34 +709,34 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                       <Landmark aria-hidden="true" className="h-5 w-5" />
                     </span>
                     <div>
-                      <p className="text-xs font-semibold text-inkMuted">{t("m2.integration.statusLabel")}</p>
+                      <p className="text-base font-semibold text-inkMuted">{t("m2.integration.statusLabel")}</p>
                       <h2 id="integrations-heading" className="mt-1 text-2xl font-bold tracking-tight text-coffee-950">{t("m2.integration.title")}</h2>
                     </div>
                   </div>
                   <StatusPill label={t("m2.integration.unconfigured")} tone="pending" icon={Unplug} />
                 </div>
                 <p className="mt-6 text-lg font-bold text-coffee-900">{t("m2.integration.linksName")}</p>
-                <p className="mt-2 text-sm leading-6 text-inkMuted">{t("m2.integration.unconfiguredDescription")}</p>
-                <div className="mt-6 flex items-start gap-3 rounded-xl border border-gold-500/40 bg-gold/10 p-4 text-sm leading-6 text-coffee-800">
+                <p className="mt-2 text-base leading-6 text-inkMuted">{t("m2.integration.unconfiguredDescription")}</p>
+                <div className="mt-6 flex items-start gap-3 rounded-xl border border-gold-500/40 bg-gold/10 p-4 text-base leading-6 text-coffee-800">
                   <Info aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0 text-terracotta-600" />
                   <div>
                     <p className="font-bold">{t("m2.integration.readOnlyTitle")}</p>
                     <p>{t("m2.integration.readOnlyDescription")}</p>
                   </div>
                 </div>
-                <p className="mt-5 flex items-start gap-2 text-xs leading-5 text-inkMuted">
+                <p className="mt-5 flex items-start gap-2 text-base leading-relaxed text-inkMuted">
                   <Link2Off aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
                   {t("m2.integration.noSecrets")}
                 </p>
                 <div className="mt-7 border-t border-coffee-900/10 pt-5">
-                  <p className="text-sm font-bold text-coffee-900">{t("m2.integration.availableTitle")}</p>
-                  <ul className="mt-3 space-y-3 text-sm leading-6 text-inkMuted">
+                  <p className="text-base font-bold text-coffee-900">{t("m2.integration.availableTitle")}</p>
+                  <ul className="mt-3 space-y-3 text-base leading-6 text-inkMuted">
                     <li className="flex gap-2"><Check aria-hidden="true" className="mt-1 h-4 w-4 shrink-0 text-[#166534]" />{t("m2.integration.localLedger")}</li>
                     <li className="flex gap-2"><Check aria-hidden="true" className="mt-1 h-4 w-4 shrink-0 text-[#166534]" />{t("m2.integration.pendingOutside")}</li>
                     <li className="flex gap-2"><Clock3 aria-hidden="true" className="mt-1 h-4 w-4 shrink-0 text-[#7A5200]" />{t("m2.integration.futureProvider")}</li>
                   </ul>
                 </div>
-                <p className="mt-5 text-xs leading-5 text-inkMuted">{t("m2.integration.configurationNote")}</p>
+                <p className="mt-5 text-base leading-relaxed text-inkMuted">{t("m2.integration.configurationNote")}</p>
               </article>
 
               <article aria-labelledby="queue-heading" className="rounded-2xl border border-coffee-900/15 bg-parchment-50 p-6 shadow-card sm:p-8">
@@ -746,14 +746,14 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                   </span>
                   <div>
                     <h2 id="queue-heading" className="text-2xl font-bold tracking-tight text-coffee-950">{t("m2.queue.title")}</h2>
-                    <p className="mt-2 max-w-xl text-sm leading-6 text-inkMuted">{t("m2.queue.description")}</p>
+                    <p className="mt-2 max-w-xl text-base leading-6 text-inkMuted">{t("m2.queue.description")}</p>
                   </div>
                 </div>
                 {unresolvedEntries.length === 0 ? (
                   <div className="mt-7 border-t border-coffee-900/10 pt-6">
                     <CircleCheck aria-hidden="true" className="h-7 w-7 text-[#166534]" />
                     <p className="mt-3 font-bold text-coffee-900">{t("m2.queue.emptyTitle")}</p>
-                    <p className="mt-1 text-sm leading-6 text-inkMuted">{t("m2.queue.emptyDescription")}</p>
+                    <p className="mt-1 text-base leading-6 text-inkMuted">{t("m2.queue.emptyDescription")}</p>
                   </div>
                 ) : (
                   <ul className="mt-7 divide-y divide-coffee-900/10 border-y border-coffee-900/10">
@@ -764,14 +764,14 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                         <li key={entry.id} aria-label={t("m2.queue.referenceLabel", { reference: entry.reference })} className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between">
                           <div className="min-w-0">
                             <p className="font-bold text-coffee-900">{manual ? t("m2.queue.reviewTitle") : t("m2.queue.pendingTitle")}</p>
-                            <p className="mt-1 text-sm leading-6 text-inkMuted">
+                            <p className="mt-1 text-base leading-6 text-inkMuted">
                               {rejected
                                 ? t("m2.queue.rejectedMeta", { amount: formatAmount(entry.amount, locale, t) })
                                 : manual
                                   ? t("m2.queue.reviewMeta", { amount: formatAmount(entry.amount, locale, t) })
                                   : t("m2.queue.pendingMeta", { amount: formatAmount(entry.amount, locale, t) })}
                             </p>
-                            <p className="mt-1 text-xs font-semibold text-inkMuted">{reasonLabel(entry, t)}</p>
+                            <p className="mt-1 text-base font-semibold text-inkMuted">{reasonLabel(entry, t)}</p>
                           </div>
                           <StatusPill
                             label={manual ? t("m2.queue.manualBadge") : t(bankStateMessageKeys[entry.status])}
@@ -800,39 +800,39 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                 <div className="py-10 text-center">
                   <FileText aria-hidden="true" className="mx-auto h-8 w-8 text-terracotta-600" />
                   <p className="mt-3 font-bold text-coffee-900">{t("m2.history.noEntriesTitle")}</p>
-                  <p className="mt-1 text-sm leading-6 text-inkMuted">{t("m2.history.noEntriesDescription")}</p>
+                  <p className="mt-1 text-base leading-6 text-inkMuted">{t("m2.history.noEntriesDescription")}</p>
                 </div>
               ) : (
                 entries.map((entry) => (
                   <article key={entry.id} className="border-b border-coffee-900/10 py-6 last:border-b-0 sm:py-7">
                     <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0">
-                        <p className="text-xs font-bold uppercase tracking-[0.14em] text-terracotta-600">{t("m2.history.sequence", { sequence: entry.sequence })}</p>
+                        <p className="text-base font-bold   text-terracotta-600">{t("m2.history.sequence", { sequence: entry.sequence })}</p>
                         <h3 className="mt-2 text-xl font-bold tracking-tight text-coffee-950">{t(entryTypeMessageKeys[entry.type])}</h3>
-                        <p className="mt-1 text-sm leading-6 text-inkMuted">{t(entry.memberKey)}</p>
+                        <p className="mt-1 text-base leading-6 text-inkMuted">{t(entry.memberKey)}</p>
                       </div>
                       <StatusPill label={statusLabel(entry, t)} tone={statusTone(entry)} icon={statusIcon(entry)} />
                     </div>
                     <dl className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                       <div>
-                        <dt className="text-xs font-semibold text-inkMuted">{t("m2.history.amountLabel")}</dt>
-                        <dd className="mt-1 break-words text-sm font-bold text-coffee-900">{formatAmount(entry.amount, locale, t, entry.direction === "outbound")}</dd>
+                        <dt className="text-base font-semibold text-inkMuted">{t("m2.history.amountLabel")}</dt>
+                        <dd className="mt-1 break-words text-base font-bold text-coffee-900">{formatAmount(entry.amount, locale, t, entry.direction === "outbound")}</dd>
                       </div>
                       <div>
-                        <dt className="text-xs font-semibold text-inkMuted">{t("m2.history.typeLabel")}</dt>
-                        <dd className="mt-1 text-sm font-semibold text-coffee-900">{t(entry.direction === "inbound" ? "m2.history.directionInbound" : "m2.history.directionOutbound")}</dd>
+                        <dt className="text-base font-semibold text-inkMuted">{t("m2.history.typeLabel")}</dt>
+                        <dd className="mt-1 text-base font-semibold text-coffee-900">{t(entry.direction === "inbound" ? "m2.history.directionInbound" : "m2.history.directionOutbound")}</dd>
                       </div>
                       <div>
-                        <dt className="text-xs font-semibold text-inkMuted">{t("m2.history.recordedLabel")}</dt>
-                        <dd className="mt-1 text-sm leading-6 text-coffee-900">{t("m2.history.recordedAt", { date: formatDate(entry.recordedAt, locale) })}</dd>
+                        <dt className="text-base font-semibold text-inkMuted">{t("m2.history.recordedLabel")}</dt>
+                        <dd className="mt-1 text-base leading-6 text-coffee-900">{t("m2.history.recordedAt", { date: formatDate(entry.recordedAt, locale) })}</dd>
                       </div>
                       <div className="min-w-0">
-                        <dt className="text-xs font-semibold text-inkMuted">{t("m2.history.referenceLabel")}</dt>
-                        <dd className="mt-1 break-all text-sm font-semibold text-coffee-900">{entry.reference}</dd>
-                        <dd className="mt-1 text-xs text-inkMuted">{t("m2.history.hash", { hash: entry.hash })}</dd>
+                        <dt className="text-base font-semibold text-inkMuted">{t("m2.history.referenceLabel")}</dt>
+                        <dd className="mt-1 break-all text-base font-semibold text-coffee-900">{entry.reference}</dd>
+                        <dd className="mt-1 text-base text-inkMuted">{t("m2.history.hash", { hash: entry.hash })}</dd>
                       </div>
                     </dl>
-                    <div className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs font-semibold text-inkMuted">
+                    <div className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-2 text-base font-semibold text-inkMuted">
                       <span className="inline-flex items-center gap-2">
                         <CircleAlert aria-hidden="true" className="h-3.5 w-3.5 text-terracotta-600" />
                         {reasonLabel(entry, t)}
@@ -869,7 +869,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                 <button
                   type="button"
                   onClick={openCorrection}
-                  className="mt-7 inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-terracotta-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-terracotta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-100"
+                  className="mt-7 inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-terracotta-600 px-4 py-2.5 text-base font-bold text-white transition-colors hover:bg-terracotta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-100"
                 >
                   <Plus aria-hidden="true" className="h-4 w-4" />
                   {t("m2.correction.open")}
@@ -880,15 +880,15 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                 <ol className="grid gap-5 sm:grid-cols-3">
                   <li className="flex gap-3">
                     <FileText aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0 text-terracotta-600" />
-                    <div><p className="text-sm font-bold text-coffee-900">{t("m2.correction.stepOne")}</p><p className="mt-1 text-xs leading-5 text-inkMuted">{t("m2.correction.stepOneDescription")}</p></div>
+                    <div><p className="text-base font-bold text-coffee-900">{t("m2.correction.stepOne")}</p><p className="mt-1 text-base leading-relaxed text-inkMuted">{t("m2.correction.stepOneDescription")}</p></div>
                   </li>
                   <li className="flex gap-3">
                     <CircleAlert aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0 text-terracotta-600" />
-                    <div><p className="text-sm font-bold text-coffee-900">{t("m2.correction.stepTwo")}</p><p className="mt-1 text-xs leading-5 text-inkMuted">{t("m2.correction.stepTwoDescription")}</p></div>
+                    <div><p className="text-base font-bold text-coffee-900">{t("m2.correction.stepTwo")}</p><p className="mt-1 text-base leading-relaxed text-inkMuted">{t("m2.correction.stepTwoDescription")}</p></div>
                   </li>
                   <li className="flex gap-3">
                     <Plus aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0 text-terracotta-600" />
-                    <div><p className="text-sm font-bold text-coffee-900">{t("m2.correction.stepThree")}</p><p className="mt-1 text-xs leading-5 text-inkMuted">{t("m2.correction.stepThreeDescription")}</p></div>
+                    <div><p className="text-base font-bold text-coffee-900">{t("m2.correction.stepThree")}</p><p className="mt-1 text-base leading-relaxed text-inkMuted">{t("m2.correction.stepThreeDescription")}</p></div>
                   </li>
                 </ol>
 
@@ -900,14 +900,14 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                         type="button"
                         onClick={closeCorrection}
                         aria-label={t("m2.correction.close")}
-                        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-coffee-900/15 px-3 text-sm font-semibold text-inkMuted transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
+                        className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl border border-coffee-900/15 px-3 text-base font-semibold text-inkMuted transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
                       >
                         <X aria-hidden="true" className="h-4 w-4" />
                         {t("m2.correction.close")}
                       </button>
                     </div>
                     <div className="mt-6">
-                      <label htmlFor="correction-entry" className="text-sm font-bold text-coffee-900">{t("m2.correction.entryLabel")}</label>
+                      <label htmlFor="correction-entry" className="text-base font-bold text-coffee-900">{t("m2.correction.entryLabel")}</label>
                       <select
                         id="correction-entry"
                         value={selectedEntryId}
@@ -917,7 +917,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                           setSubmitError(null);
                         }}
                         aria-describedby="correction-entry-helper"
-                        className="mt-2 block min-h-11 w-full rounded-xl border border-coffee-900/20 bg-white/75 px-3 text-sm text-coffee-900 focus:border-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
+                        className="mt-2 block min-h-12 w-full rounded-xl border border-coffee-900/20 bg-white/75 px-3 text-base text-coffee-900 focus:border-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
                       >
                         <option value="">{t("m2.correction.chooseEntry")}</option>
                         {correctionTargets.map((entry) => (
@@ -932,19 +932,19 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                           </option>
                         ))}
                       </select>
-                      <p id="correction-entry-helper" className="mt-2 text-xs leading-5 text-inkMuted">{signedIn ? t("m2.correction.live.helper") : t("m2.correction.entryHelper")}</p>
+                      <p id="correction-entry-helper" className="mt-2 text-base leading-relaxed text-inkMuted">{signedIn ? t("m2.correction.live.helper") : t("m2.correction.entryHelper")}</p>
                       {signedIn && live === "loading" ? (
-                        <p role="status" className="mt-2 text-xs font-semibold leading-5 text-inkMuted">{t("m2.correction.live.loading")}</p>
+                        <p role="status" className="mt-2 text-base font-semibold leading-relaxed text-inkMuted">{t("m2.correction.live.loading")}</p>
                       ) : null}
                       {signedIn && live !== "loading" && live.status !== "ready" ? (
-                        <p role={live.status === "empty" ? "status" : "alert"} className="mt-2 flex items-start gap-2 text-xs font-semibold leading-5 text-terracotta-700">
+                        <p role={live.status === "empty" ? "status" : "alert"} className="mt-2 flex items-start gap-2 text-base font-semibold leading-relaxed text-terracotta-700">
                           <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
                           {t(liveStatusMessageKeys[live.status])}
                         </p>
                       ) : null}
                     </div>
                     <div className="mt-5">
-                      <label htmlFor="correction-rationale" className="text-sm font-bold text-coffee-900">
+                      <label htmlFor="correction-rationale" className="text-base font-bold text-coffee-900">
                         {t("m2.correction.rationaleLabel")} <span aria-hidden="true">*</span><span className="sr-only">({t("m2.a11y.required")})</span>
                       </label>
                       <textarea
@@ -963,11 +963,11 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                         placeholder={t("m2.correction.rationalePlaceholder")}
                         aria-invalid={Boolean(correctionError)}
                         aria-describedby={correctionError ? "correction-rationale-helper correction-rationale-error" : "correction-rationale-helper"}
-                        className="mt-2 block w-full resize-y rounded-xl border border-coffee-900/20 bg-white/75 px-3 py-3 text-sm leading-6 text-coffee-900 placeholder:text-inkMuted focus:border-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
+                        className="mt-2 block w-full resize-y rounded-xl border border-coffee-900/20 bg-white/75 px-3 py-3 text-base leading-6 text-coffee-900 placeholder:text-inkMuted focus:border-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
                       />
-                      <p id="correction-rationale-helper" className="mt-2 text-xs leading-5 text-inkMuted">{t("m2.correction.rationaleHelper")}</p>
+                      <p id="correction-rationale-helper" className="mt-2 text-base leading-relaxed text-inkMuted">{t("m2.correction.rationaleHelper")}</p>
                       {correctionError ? (
-                        <p id="correction-rationale-error" role="alert" className="mt-2 flex items-start gap-2 text-xs font-semibold leading-5 text-terracotta-700">
+                        <p id="correction-rationale-error" role="alert" className="mt-2 flex items-start gap-2 text-base font-semibold leading-relaxed text-terracotta-700">
                           <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
                           {correctionError === "required" ? t("m2.correction.requiredError") : correctionError === "length" ? t("m2.correction.lengthError") : t("m2.correction.targetError")}
                         </p>
@@ -978,7 +978,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                         type="submit"
                         disabled={submitting || (signedIn && live !== "loading" && live.status === "read-only")}
                         aria-busy={submitting}
-                        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-terracotta-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-terracotta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-terracotta-600 px-4 py-2.5 text-base font-bold text-white transition-colors hover:bg-terracotta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         <Plus aria-hidden="true" className="h-4 w-4" />
                         {t("m2.correction.submit")}
@@ -986,23 +986,23 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                       <button
                         type="button"
                         onClick={closeCorrection}
-                        className="inline-flex min-h-11 items-center justify-center rounded-xl border border-coffee-900/15 px-4 py-2.5 text-sm font-semibold text-inkMuted transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
+                        className="inline-flex min-h-12 items-center justify-center rounded-xl border border-coffee-900/15 px-4 py-2.5 text-base font-semibold text-inkMuted transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50"
                       >
                         {t("m2.correction.cancel")}
                       </button>
                     </div>
-                    <p className="mt-4 text-xs leading-5 text-inkMuted">{signedIn ? t("m2.correction.live.notice") : t("m2.correction.demoNotice")}</p>
+                    <p className="mt-4 text-base leading-relaxed text-inkMuted">{signedIn ? t("m2.correction.live.notice") : t("m2.correction.demoNotice")}</p>
                     {submitting ? (
-                      <p role="status" className="mt-4 text-xs font-semibold leading-5 text-inkMuted">{t("m2.correction.live.submitting")}</p>
+                      <p role="status" className="mt-4 text-base font-semibold leading-relaxed text-inkMuted">{t("m2.correction.live.submitting")}</p>
                     ) : null}
                     {submitError ? (
-                      <p role="alert" className="mt-4 flex items-start gap-2 text-xs font-semibold leading-5 text-terracotta-700">
+                      <p role="alert" className="mt-4 flex items-start gap-2 text-base font-semibold leading-relaxed text-terracotta-700">
                         <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
                         {t(submitErrorMessageKeys[submitError])}
                       </p>
                     ) : null}
                     {liveSuccess ? (
-                      <div role="status" className="mt-5 flex items-start gap-3 rounded-xl border border-[#B7DFC1] bg-[#EFFAF1] p-4 text-sm leading-6 text-[#166534]">
+                      <div role="status" className="mt-5 flex items-start gap-3 rounded-xl border border-[#B7DFC1] bg-[#EFFAF1] p-4 text-base leading-6 text-[#166534]">
                         <BadgeCheck aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0" />
                         <div>
                           <p className="font-bold">{t("m2.correction.live.successTitle")}</p>
@@ -1014,7 +1014,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
                       </div>
                     ) : null}
                     {correctionReference && selectedEntry ? (
-                      <div role="status" className="mt-5 flex items-start gap-3 rounded-xl border border-[#B7DFC1] bg-[#EFFAF1] p-4 text-sm leading-6 text-[#166534]">
+                      <div role="status" className="mt-5 flex items-start gap-3 rounded-xl border border-[#B7DFC1] bg-[#EFFAF1] p-4 text-base leading-6 text-[#166534]">
                         <BadgeCheck aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0" />
                         <div>
                           <p className="font-bold">{t("m2.correction.successTitle")}</p>
@@ -1036,7 +1036,7 @@ export function M2Dashboard({ locale = "en", onLocaleChange }: M2DashboardProps)
       </main>
 
       <footer className="border-t border-coffee-900/10 bg-coffee-900 text-parchment-300">
-        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-8 text-xs leading-5 sm:px-6 md:flex-row md:items-center md:justify-between lg:px-8">
+        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-8 text-base leading-relaxed sm:px-6 md:flex-row md:items-center md:justify-between lg:px-8">
           <p>{t("m2.footer.demo")}</p>
           <p>{t("m2.footer.privacy")}</p>
           <p className="font-semibold text-gold-300">{t("m2.footer.tagline")}</p>

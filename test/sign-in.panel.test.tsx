@@ -10,7 +10,7 @@ describe("SignInPanel", () => {
   it("shows a clear not-configured state and no form when Supabase env is missing", () => {
     hoisted.session = { status: "unconfigured" };
     render(<SignInPanel initialLocale="en" />);
-    expect(screen.getByRole("alert")).toHaveTextContent("Sign-in is not configured");
+    expect(screen.getByRole("alert")).toHaveTextContent("Sign-in is not ready yet");
     expect(screen.queryByLabelText("Email address")).toBeNull();
   });
 

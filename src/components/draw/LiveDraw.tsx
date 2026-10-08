@@ -104,19 +104,19 @@ function isAmbiguousFailure(failure: Pick<DrawFailure, "status" | "code">): bool
 }
 
 const CARD = "sened-draw-shell rounded-[22px] border border-[#DCCFC7] p-4 shadow-card";
-const HEADING = "font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]";
+const HEADING = "font-ethiopic text-base font-bold  text-[#1C1410]";
 const FIELD =
-  "mt-1 w-full rounded-xl border border-[#DCCFC7] bg-white px-3 py-2 font-sans text-[13px] text-[#1C1410]";
-const LABEL = "block text-[11px] font-semibold text-[#6F625D]";
-const HINT = "mt-1 text-[11px] leading-4 text-[#6F625D]";
+  "mt-1 w-full rounded-xl border border-[#DCCFC7] bg-white px-3 py-2 font-sans text-base text-[#1C1410]";
+const LABEL = "block text-base font-semibold text-[#4F4137]";
+const HINT = "mt-1 text-base leading-relaxed text-[#4F4137]";
 const BUTTON =
-  "min-h-11 w-full rounded-2xl bg-[#C6532B] px-4 py-3 font-ethiopic text-[14px] font-bold tracking-wide text-[#FAF6F0] disabled:opacity-50";
+  "min-h-12 w-full rounded-2xl bg-[#C6532B] px-4 py-3 font-ethiopic text-base font-bold  text-[#FAF6F0] disabled:opacity-50";
 const SECONDARY =
-  "min-h-9 rounded-xl border border-[#453630] px-3 font-sans text-[12px] font-semibold text-[#1C1410] disabled:opacity-50";
+  "min-h-12 rounded-xl border border-[#453630] px-3 font-sans text-base font-semibold text-[#1C1410] disabled:opacity-50";
 const NOTICE =
-  "mt-2 rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2 text-[12px] font-semibold text-[#6B4E16]";
-const GOOD = "mt-2 text-[12px] font-semibold text-[#065F46]";
-const BAD = "mt-2 text-[12px] font-semibold text-[#863214]";
+  "mt-2 rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2 text-base font-semibold text-[#6B4E16]";
+const GOOD = "mt-2 text-base font-semibold text-[#065F46]";
+const BAD = "mt-2 text-base font-semibold text-[#863214]";
 
 function shortId(id: string): string {
   return id.slice(0, 8);
@@ -186,7 +186,7 @@ export function LiveDraw(props: LiveDrawProps) {
   const { ready, groupId } = useActiveGroupPreference();
   if (!ready) {
     return (
-      <p role="status" className="px-4 py-6 text-[13px] text-[#6F625D]">
+      <p role="status" className="px-4 py-6 text-base text-[#4F4137]">
         {liveCopy(props.locale)("drawLive.loading")}
       </p>
     );
@@ -782,7 +782,7 @@ function LiveDrawBody({
 
   if (load.kind === "loading") {
     return (
-      <p role="status" className="px-4 py-6 text-[13px] text-[#6F625D]">
+      <p role="status" className="px-4 py-6 text-base text-[#4F4137]">
         {t("drawLive.loading")}
       </p>
     );
@@ -790,7 +790,7 @@ function LiveDrawBody({
   if (load.kind === "message") {
     return (
       <div className="mx-auto w-full max-w-md px-4 py-6">
-        <p role="alert" data-testid="draw-live-refusal" className="rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-3 text-[13px] text-[#6B4E16]">
+        <p role="alert" data-testid="draw-live-refusal" className="rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-3 text-base text-[#6B4E16]">
           {t(load.key)}
         </p>
       </div>
@@ -853,22 +853,22 @@ function LiveDrawBody({
         winnerName={winnerId === null ? undefined : labelFor(winnerId)}
       />
 
-      <div className="mx-auto w-full max-w-md space-y-3 px-4 pb-6 md:max-w-3xl md:px-6">
+      <div className="w-full space-y-3 px-4 pb-6">
         <p
           data-testid="draw-live-badge"
-          className="rounded-xl border border-[#A7F3D0] bg-[#ECFDF5] px-3 py-2 text-[12px] font-semibold text-[#065F46]"
+          className="rounded-xl border border-[#A7F3D0] bg-[#ECFDF5] px-3 py-2 text-base font-semibold text-[#065F46]"
         >
           {t("drawLive.liveBadge")}
         </p>
 
         {notice ? (
-          <div role="status" data-testid="draw-notice" className="rounded-xl border border-[#A7F3D0] bg-[#ECFDF5] px-3 py-2 text-[12px] font-semibold text-[#065F46]">
+          <div role="status" data-testid="draw-notice" className="rounded-xl border border-[#A7F3D0] bg-[#ECFDF5] px-3 py-2 text-base font-semibold text-[#065F46]">
             <p>{t(notice.key as DrawLiveKey, notice.vars)}</p>
           </div>
         ) : null}
 
         {problem ? (
-          <div role="alert" className="rounded-xl border border-[#C6532B] bg-[#FDEDE6] px-3 py-2 text-[12px] font-semibold text-[#863214]">
+          <div role="alert" className="rounded-xl border border-[#C6532B] bg-[#FDEDE6] px-3 py-2 text-base font-semibold text-[#863214]">
             <p>{t(problem.key as DrawLiveKey, problem.vars)}</p>
           </div>
         ) : null}
@@ -880,13 +880,13 @@ function LiveDrawBody({
             {readyGroup.members.map((member) => (
               <li
                 key={member.userId}
-                className="flex items-center justify-between gap-2 rounded-lg bg-[#F5EFEB] px-2.5 py-1.5 text-[12px]"
+                className="flex items-center justify-between gap-2 rounded-lg bg-[#F5EFEB] px-2.5 py-1.5 text-base"
               >
                 <span className="min-w-0 truncate font-semibold">
                   {member.email ?? t("drawLive.memberAnonymous", { id: shortId(member.userId) })}
                   {member.userId === myUserId ? ` ${t("drawLive.you")}` : ""}
                 </span>
-                <span className="shrink-0 text-right text-[11px] text-[#6F625D]">
+                <span className="shrink-0 text-right text-base text-[#4F4137]">
                   {cycle?.contributionAmount
                     ? `${t("drawLive.expectedEach", { each: formatEtbDisplay(cycle.contributionAmount) })} · `
                     : ""}
@@ -923,25 +923,25 @@ function LiveDrawBody({
               </label>
               {cycle !== null ? (
                 <>
-                  <dl data-testid="cycle-terms" className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-[12px]">
-                    <dt className="text-[#6F625D]">{t("drawLive.cycleEach")}</dt>
+                  <dl data-testid="cycle-terms" className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-base">
+                    <dt className="text-[#4F4137]">{t("drawLive.cycleEach")}</dt>
                     <dd data-testid="cycle-each" className="font-semibold">
                       {cycle.contributionAmount === null
                         ? t("drawLive.cycleEachUnknown")
                         : `${formatEtbDisplay(cycle.contributionAmount)} ${copy.currency}`}
                     </dd>
-                    <dt className="text-[#6F625D]">{t("drawLive.cyclePot")}</dt>
+                    <dt className="text-[#4F4137]">{t("drawLive.cyclePot")}</dt>
                     <dd data-testid="cycle-pot" className="font-semibold">
                       {formatEtbDisplay(cycle.potAmount)} {copy.currency}
                       {potMembers(cycle) !== null ? ` (${t("drawLive.cyclePotMembers", { count: potMembers(cycle) ?? 0 })})` : ""}
                     </dd>
-                    <dt className="text-[#6F625D]">{t("drawLive.cycleRounds")}</dt>
+                    <dt className="text-[#4F4137]">{t("drawLive.cycleRounds")}</dt>
                     <dd>{t("drawLive.cycleProgress", { done: cycle.roundsRevealed, total: cycle.totalRounds, paid: cycle.roundsPaid })}</dd>
-                    <dt className="text-[#6F625D]">{t("drawLive.cycleReserve")}</dt>
+                    <dt className="text-[#4F4137]">{t("drawLive.cycleReserve")}</dt>
                     <dd>{(cycle.reserveRatioBps / 100).toFixed(2)} %</dd>
-                    <dt className="text-[#6F625D]">{t("drawLive.cycleStarted")}</dt>
+                    <dt className="text-[#4F4137]">{t("drawLive.cycleStarted")}</dt>
                     <dd>{cycle.startedAt.slice(0, 10)}</dd>
-                    <dt className="text-[#6F625D]">{t("drawLive.cycleGate")}</dt>
+                    <dt className="text-[#4F4137]">{t("drawLive.cycleGate")}</dt>
                     <dd data-testid="cycle-gate">{translate(locale, `contributions.gate.policy.${cycle.contributionGate}` as MessageKey)}</dd>
                   </dl>
                   {potMembers(cycle) !== null && potMembers(cycle) !== readyGroup.members.length ? (
@@ -956,7 +956,7 @@ function LiveDrawBody({
 
           {isTreasurer ? (
             <details className="mt-3 rounded-xl border border-[#DCCFC7] bg-[#FAF7F2] px-3 py-2" open={cycles !== null && cycles.length === 0}>
-              <summary className="cursor-pointer text-[12px] font-semibold text-[#1C1410]">{t("drawLive.cycleCreateTitle")}</summary>
+              <summary className="cursor-pointer text-base font-semibold text-[#1C1410]">{t("drawLive.cycleCreateTitle")}</summary>
               <div className="mt-2 space-y-2" data-testid="cycle-create-form">
                 <label className="block">
                   <span className={LABEL}>{t("drawLive.cycleName")}</span>
@@ -1062,7 +1062,7 @@ function LiveDrawBody({
                   <span className={HINT}>{t("drawLive.gateHint")}</span>
                 </label>
                 {normaliseAmount(contribution) !== null ? (
-                  <p data-testid="cycle-pot-preview" className="text-[12px] font-semibold text-[#1C1410]">
+                  <p data-testid="cycle-pot-preview" className="text-base font-semibold text-[#1C1410]">
                     {t("drawLive.cyclePotPreview", {
                       pot: formatEtbDisplay(
                         formatEtbMinorUnits(
@@ -1101,7 +1101,7 @@ function LiveDrawBody({
               <p className={HINT}>{t("drawLive.ledgerLoading")}</p>
             ) : ledger.status === "ready" ? (
               <>
-                <p data-testid="ledger-recorded" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
+                <p data-testid="ledger-recorded" className="mt-2 text-base font-semibold text-[#1C1410]">
                   {t("drawLive.ledgerRecorded", {
                     total: formatEtbDisplay(ledger.figures.total),
                     currency: copy.currency,
@@ -1120,7 +1120,7 @@ function LiveDrawBody({
                 ) : null}
               </>
             ) : ledger.status === "empty" ? (
-              <p data-testid="ledger-recorded" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
+              <p data-testid="ledger-recorded" className="mt-2 text-base font-semibold text-[#1C1410]">
                 {t("drawLive.ledgerEmpty")}
               </p>
             ) : ledger.status === "incomplete" ? (
@@ -1172,7 +1172,7 @@ function LiveDrawBody({
                       disabled={busy !== null}
                       onClick={() => void run("pick", () => selectDraw(entry))}
                       className={[
-                        "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px]",
+                        "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-base",
                         entry.drawId === drawId ? "bg-[#ECFDF5] ring-1 ring-[#A7F3D0]" : "bg-[#F5EFEB]"
                       ].join(" ")}
                     >
@@ -1181,7 +1181,7 @@ function LiveDrawBody({
                         {entry.superseded ? ` · ${t("drawLive.drawSuperseded")}` : ""}
                         {entry.legacy ? ` · ${t("drawLive.drawLegacy")}` : ""}
                       </span>
-                      <span className="shrink-0 text-[11px] text-[#6F625D]">
+                      <span className="shrink-0 text-base text-[#4F4137]">
                         {entry.state === "sealing"
                           ? t("drawLive.drawSealCount", { count: entry.sealCount })
                           : entry.state === "committed"
@@ -1247,7 +1247,7 @@ function LiveDrawBody({
                   </div>
                 ) : null}
                 {missedThisRound.length > 0 ? (
-                  <label data-testid="reopen-exclude" className="mt-2 flex items-start gap-2 text-[12px]">
+                  <label data-testid="reopen-exclude" className="mt-2 flex items-start gap-2 text-base">
                     <input
                       type="checkbox"
                       data-testid="reopen-exclude-box"
@@ -1285,7 +1285,7 @@ function LiveDrawBody({
             <h3 className={HEADING}>{t("drawLive.cancelledTitle")}</h3>
             <ul className="mt-2 space-y-2">
               {detail.cancellations.map((entry) => (
-                <li key={entry.cancellationId} className="rounded-lg bg-[#F5EFEB] px-2.5 py-2 text-[12px]">
+                <li key={entry.cancellationId} className="rounded-lg bg-[#F5EFEB] px-2.5 py-2 text-base">
                   <p className="font-semibold">
                     {t("drawLive.cancelledRow", {
                       round: entry.round,
@@ -1351,7 +1351,7 @@ function LiveDrawBody({
         {round1 !== null && round1.state === "paid" ? (
           <section className={CARD} data-draw-panel="paid">
             <h3 className={HEADING}>{t("drawLive.payoutTitle")}</h3>
-            <p data-testid="payout-done" className="mt-2 text-[12px] font-semibold text-[#065F46]">
+            <p data-testid="payout-done" className="mt-2 text-base font-semibold text-[#065F46]">
               {receipt !== null && !receipt.alreadyPaid && receipt.ledgerSequence !== null
                 ? t(receipt.replayed ? "drawLive.payoutReplayed" : "drawLive.payoutDone", {
                     sequence: receipt.ledgerSequence ?? "?"
@@ -1369,21 +1369,21 @@ function LiveDrawBody({
             {canPay && winnerId !== null && round1.payoutAmount !== null && round1.reserveAmount !== null ? (
               <>
                 <p className={HINT}>{t("drawLive.payoutDetail")}</p>
-                <dl className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-[12px]">
-                  <dt className="text-[#6F625D]">{t("drawLive.payoutWinner")}</dt>
+                <dl className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-base">
+                  <dt className="text-[#4F4137]">{t("drawLive.payoutWinner")}</dt>
                   <dd className="font-semibold">{labelFor(winnerId)}</dd>
-                  <dt className="text-[#6F625D]">{t("drawLive.payoutAmount")}</dt>
+                  <dt className="text-[#4F4137]">{t("drawLive.payoutAmount")}</dt>
                   <dd data-testid="payout-amount" className="font-semibold">
                     {formatEtbDisplay(round1.payoutAmount)} {copy.currency}
                   </dd>
-                  <dt className="text-[#6F625D]">{t("drawLive.payoutReserve")}</dt>
+                  <dt className="text-[#4F4137]">{t("drawLive.payoutReserve")}</dt>
                   <dd>{formatEtbDisplay(round1.reserveAmount)} {copy.currency}</dd>
-                  <dt className="text-[#6F625D]">{t("drawLive.payoutDebit")}</dt>
+                  <dt className="text-[#4F4137]">{t("drawLive.payoutDebit")}</dt>
                   <dd data-testid="payout-debit">
                     {readyGroup.payoutExpenseCode}{" "}
                     <span className="sened-hash">{readyGroup.payoutExpenseAccountId ?? t("drawLive.accountMissing")}</span>
                   </dd>
-                  <dt className="text-[#6F625D]">{t("drawLive.payoutCredit")}</dt>
+                  <dt className="text-[#4F4137]">{t("drawLive.payoutCredit")}</dt>
                   <dd data-testid="payout-credit">
                     {readyGroup.potCashCode}{" "}
                     <span className="sened-hash">{readyGroup.potCashAccountId ?? t("drawLive.accountMissing")}</span>
@@ -1396,7 +1396,7 @@ function LiveDrawBody({
                     onChange={(event) => setConfirmPayout(event.target.checked)}
                     className="mt-0.5 h-4 w-4 accent-[#C6532B]"
                   />
-                  <span className="text-[11px] leading-4 text-[#6B4E16]">{t("drawLive.payoutConfirm")}</span>
+                  <span className="text-base leading-relaxed text-[#6B4E16]">{t("drawLive.payoutConfirm")}</span>
                 </label>
                 <button
                   type="button"
@@ -1408,7 +1408,7 @@ function LiveDrawBody({
                 </button>
               </>
             ) : (
-              <p data-testid="payout-blocked" role="alert" className="mt-2 text-[12px] font-semibold text-[#863214]">
+              <p data-testid="payout-blocked" role="alert" className="mt-2 text-base font-semibold text-[#863214]">
                 {t("drawLive.payoutBlocked")}
               </p>
             )}
@@ -1515,23 +1515,23 @@ function DrawPanel({
         <h3 className={HEADING}>
           {t("drawLive.drawRow", { round: session.round })} · {t(`drawLive.lifecycle.${session.state}`)}
         </h3>
-        <span className="text-[11px] text-[#6F625D]">{shortId(session.drawId)}</span>
+        <span className="text-base text-[#4F4137]">{shortId(session.drawId)}</span>
       </div>
 
       {sealing ? (
-        <p data-testid="seal-progress" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
+        <p data-testid="seal-progress" className="mt-2 text-base font-semibold text-[#1C1410]">
           {t("drawLive.sealProgress", { sealed: sealedCount, total: eligible.length })}
         </p>
       ) : (
-        <p data-testid="nonce-progress" className="mt-2 text-[12px] font-semibold text-[#1C1410]">
+        <p data-testid="nonce-progress" className="mt-2 text-base font-semibold text-[#1C1410]">
           {t("drawLive.nonceProgress", { released: releasedCount, total: sealedMembers.length })}
         </p>
       )}
       <ul className="mt-2 space-y-1">
         {eligible.map((id) => (
-          <li key={id} className="flex items-center justify-between gap-2 rounded-lg bg-[#F5EFEB] px-2.5 py-1.5 text-[12px]">
+          <li key={id} className="flex items-center justify-between gap-2 rounded-lg bg-[#F5EFEB] px-2.5 py-1.5 text-base">
             <span className="min-w-0 truncate">{labelFor(id)}</span>
-            <span className="shrink-0 text-[11px] text-[#6F625D]">
+            <span className="shrink-0 text-base text-[#4F4137]">
               {sealedIds.has(id) ? t("drawLive.badge.sealed") : t("drawLive.badge.notSealed")}
               {!sealing && sealedIds.has(id)
                 ? ` · ${releasedIds.has(id) ? t("drawLive.badge.released") : t("drawLive.badge.notReleased")}`
@@ -1572,7 +1572,7 @@ function DrawPanel({
 
       {/* This member's part. The nonce itself is never rendered. */}
       <div data-testid="my-part" className="mt-3 border-t border-dashed border-[#E4D9CE] pt-3">
-        <h4 className="text-[12px] font-bold text-[#1C1410]">{t("drawLive.mineTitle")}</h4>
+        <h4 className="text-base font-bold text-[#1C1410]">{t("drawLive.mineTitle")}</h4>
         <p className={HINT}>{t("drawLive.mineDetail")}</p>
 
         {myUserId === null || !iAmEligible ? (
@@ -1635,7 +1635,7 @@ function DrawPanel({
 
       {isTreasurer && sealing ? (
         <div data-testid="commit-form" className="mt-3 space-y-2 border-t border-dashed border-[#E4D9CE] pt-3">
-          <h4 className="text-[12px] font-bold text-[#1C1410]">{t("drawLive.ceremonyTitle")}</h4>
+          <h4 className="text-base font-bold text-[#1C1410]">{t("drawLive.ceremonyTitle")}</h4>
           <p className={HINT}>{t("drawLive.commitDetail")}</p>
           {needsAll ? (
             <p data-testid="commit-needs-all" role="status" className={NOTICE}>
@@ -1714,7 +1714,7 @@ function DrawPanel({
 
       {isTreasurer && committed ? (
         <div data-testid="reveal-form" className="mt-3 space-y-2 border-t border-dashed border-[#E4D9CE] pt-3">
-          <h4 className="text-[12px] font-bold text-[#1C1410]">{t("drawLive.ceremonyTitle")}</h4>
+          <h4 className="text-base font-bold text-[#1C1410]">{t("drawLive.ceremonyTitle")}</h4>
           <p className={GOOD}>{t("drawLive.commitDone")}</p>
           <p className={HINT}>{t("drawLive.revealDetail")}</p>
           {pending > 0 ? (
@@ -1746,7 +1746,7 @@ function DrawPanel({
 
       {isTreasurer && (sealing || committed) ? (
         <div data-testid="cancel-form" className="mt-3 space-y-2 border-t border-dashed border-[#E4D9CE] pt-3">
-          <h4 className="text-[12px] font-bold text-[#1C1410]">{t("drawLive.cancelTitle")}</h4>
+          <h4 className="text-base font-bold text-[#1C1410]">{t("drawLive.cancelTitle")}</h4>
           <p className={HINT}>{t("drawLive.cancelDetail")}</p>
           {committed && session.revealRequested ? (
             <p data-testid="cancel-reveal-opened" className={NOTICE}>
@@ -1810,32 +1810,32 @@ function ComparePanel({
   return (
     <section className={CARD} aria-label={t("drawLive.compareTitle")} data-draw-panel="compare">
       <h3 className={HEADING}>{t("drawLive.compareTitle")}</h3>
-      <p className="mt-1 text-[12px] text-[#6F625D]">
+      <p className="mt-1 text-base text-[#4F4137]">
         {t("drawLive.stateLine", { state: t(`drawLive.state.${wire.round.state}`) })}
       </p>
       {!check.revealed ? (
-        <p data-testid="compare-pending" className="mt-2 text-[12px] font-semibold text-[#6B4E16]">
+        <p data-testid="compare-pending" className="mt-2 text-base font-semibold text-[#6B4E16]">
           {t("drawLive.verifyNotRevealed")}
         </p>
       ) : (
         <>
-          <dl className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-[12px]">
+          <dl className="mt-3 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5 text-base">
             <dt className="font-semibold">{t("drawLive.compareDevice")}</dt>
             <dd data-testid="verdict-device" className="font-semibold">
               {verdict(check.local.verified)}
-              {check.local.winnerMemberId !== null ? ` — ${labelFor(check.local.winnerMemberId)}` : ""}
+              {check.local.winnerMemberId !== null ? `: ${labelFor(check.local.winnerMemberId)}` : ""}
             </dd>
             <dt className="font-semibold">{t("drawLive.compareServer")}</dt>
             <dd data-testid="verdict-server">
               {verdict(wire.verification.verified)}
-              {wire.round.winnerMemberId !== null ? ` — ${labelFor(wire.round.winnerMemberId)}` : ""}
+              {wire.round.winnerMemberId !== null ? `: ${labelFor(wire.round.winnerMemberId)}` : ""}
             </dd>
           </dl>
           <p
             role="status"
             data-testid="compare-result"
             className={[
-              "mt-3 rounded-xl border px-3 py-2 text-[12px] font-semibold",
+              "mt-3 rounded-xl border px-3 py-2 text-base font-semibold",
               agree
                 ? "border-[#A7F3D0] bg-[#ECFDF5] text-[#065F46]"
                 : "border-[#C6532B] bg-[#FDEDE6] text-[#863214]"
@@ -1846,7 +1846,7 @@ function ComparePanel({
           {!agree ? (
             <ul className="mt-2 space-y-1">
               {check.disagreements.map((kind: DisagreementKind) => (
-                <li key={kind} className="text-[12px] text-[#863214]">
+                <li key={kind} className="text-base text-[#863214]">
                   • {t(`drawLive.disagree.${kind}`)}
                 </li>
               ))}

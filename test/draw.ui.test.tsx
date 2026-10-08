@@ -36,8 +36,8 @@ function panel(name: string): ReturnType<typeof within> {
 async function sealCommitment(): Promise<void> {
   const user = userEvent.setup();
   render(<DrawBoard />);
-  await user.click(screen.getByRole("button", { name: "ቃል መዋጮ አስገባ" }));
-  await screen.findByRole("button", { name: "ዘመኑን አሳይ" });
+  await user.click(screen.getByRole("button", { name: "እጣውን ቆልፍ" }));
+  await screen.findByRole("button", { name: "አሸናፊውን አውጣ" });
 }
 
 describe("DrawBoard ceremony", () => {
@@ -50,9 +50,9 @@ describe("DrawBoard ceremony", () => {
     expect(viewBoxes()).toContain("0 0 54 62");
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "ቃል መዋጮ አስገባ" }));
-    await screen.findByRole("button", { name: "ዘመኑን አሳይ" });
-    await user.click(screen.getByRole("button", { name: "ዘመኑን አሳይ" }));
+    await user.click(screen.getByRole("button", { name: "እጣውን ቆልፍ" }));
+    await screen.findByRole("button", { name: "አሸናፊውን አውጣ" });
+    await user.click(screen.getByRole("button", { name: "አሸናፊውን አውጣ" }));
 
     // MesobBasket (0 0 70 82) is the celebration. Both had zero importers at
     // `main`; the ceremony is what gives them a home.
@@ -64,20 +64,20 @@ describe("DrawBoard ceremony", () => {
   it("shows the three ceremony steps in order", () => {
     render(<DrawBoard />);
 
-    expect(screen.getByText("ደረጃ 1 — ቃል መዋጮ")).toBeInTheDocument();
-    expect(screen.getByText("ደረጃ 2 — መስበር")).toBeInTheDocument();
-    expect(screen.getByText("ደረጃ 3 — ማረጋገጥ")).toBeInTheDocument();
+    expect(screen.getByText("እጣውን መቆለፍ")).toBeInTheDocument();
+    expect(screen.getByText("አሸናፊውን መምረጥ")).toBeInTheDocument();
+    expect(screen.getByText("ማረጋገጥ")).toBeInTheDocument();
   });
 
   it("publishes a commitment and roster digest after sealing", async () => {
     render(<DrawBoard />);
-    expect(screen.getByText("እጅግ ቃል መዋጮ አልተሰጠም።")).toBeInTheDocument();
+    expect(screen.getByText("እስካሁን ምንም እጣ አልተቆለፈም።")).toBeInTheDocument();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "ቃል መዋጮ አስገባ" }));
+    await user.click(screen.getByRole("button", { name: "እጣውን ቆልፍ" }));
 
     await waitFor(() => {
-      expect(screen.getByText("ቃል መዋጮው ተሸጥቷል፤ አባላቱ ተሸጥተዋል።")).toBeInTheDocument();
+      expect(screen.getByText("እጣው ተቆልፏል፤ የአባላት ዝርዝርም ታትሟል።")).toBeInTheDocument();
     });
     expect(panel("commitment").getAllByText(/^[0-9a-f]{64}$/).length).toBeGreaterThanOrEqual(2);
   });
@@ -85,7 +85,7 @@ describe("DrawBoard ceremony", () => {
   it("verifies an honest reveal on-device and names a winner", async () => {
     await sealCommitment();
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "ዘመኑን አሳይ" }));
+    await user.click(screen.getByRole("button", { name: "አሸናፊውን አውጣ" }));
 
     await waitFor(() => {
       expect(panel("verify").getByText("ተረጋግጧል")).toBeInTheDocument();
@@ -101,7 +101,7 @@ describe("DrawBoard ceremony", () => {
     await sealCommitment();
     const user = userEvent.setup();
     await user.click(screen.getByRole("checkbox"));
-    await user.click(screen.getByRole("button", { name: "ዘመኑን አሳይ" }));
+    await user.click(screen.getByRole("button", { name: "አሸናፊውን አውጣ" }));
 
     // The engine refuses before it ever names a winner. No winner is shown, and
     // the verification panel keeps reporting the honest "not yet" state rather
@@ -119,7 +119,7 @@ describe("DrawBoard ceremony", () => {
   it("explains the reserve instead of paying out the whole pot", async () => {
     await sealCommitment();
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "ዘመኑን አሳይ" }));
+    await user.click(screen.getByRole("button", { name: "አሸናፊውን አውጣ" }));
 
     await waitFor(() => {
       expect(panel("risk").getByText("የመሶብ ጠቅላላ")).toBeInTheDocument();
@@ -133,7 +133,7 @@ describe("DrawBoard ceremony", () => {
     // The payout is strictly less than the pot, and the reserve is the gap.
     expect(payout).not.toBe(pot);
     expect(reserve).not.toMatch(/^Br 0\.00/);
-    expect(risk.getByText(/ማስጠንቀቂያው/)).toBeInTheDocument();
+    expect(risk.getByText(/የመጠባበቂያ ገንዘቡ አይበቃም/)).toBeInTheDocument();
   });
 
   it("keeps a past winner out of the remaining draws", async () => {
@@ -141,14 +141,14 @@ describe("DrawBoard ceremony", () => {
     const user = userEvent.setup();
 
     for (let round = 1; round <= 2; round += 1) {
-      await user.click(screen.getByRole("button", { name: "ዘመኑን አሳይ" }));
+      await user.click(screen.getByRole("button", { name: "አሸናፊውን አውጣ" }));
       await waitFor(() => {
         expect(screen.getByText("እጣ ተጠናቋል")).toBeInTheDocument();
       });
       await user.click(screen.getByRole("button", { name: "ወደ ቀጣይ ዙር ቀጥል" }));
       if (round < 2) {
-        await user.click(screen.getByRole("button", { name: "ቃል መዋጮ አስገባ" }));
-        await screen.findByRole("button", { name: "ዘመኑን አሳይ" });
+        await user.click(screen.getByRole("button", { name: "እጣውን ቆልፍ" }));
+        await screen.findByRole("button", { name: "አሸናፊውን አውጣ" });
       }
     }
 
@@ -159,11 +159,11 @@ describe("DrawBoard ceremony", () => {
   it("shows no English words in the Amharic page header and seal stamp, and the English ones after the switch", async () => {
     const user = userEvent.setup();
     const { container } = render(<DrawPage />);
-    expect(screen.queryByText("VERIFIABLE DRAW")).toBeNull();
-    expect(screen.getByText("ሊረጋገጥ የሚችል እጣ")).toBeInTheDocument();
+    expect(screen.queryByText("A draw you can check")).toBeNull();
+    expect(screen.getByText("ሁሉም ሊያረጋግጠው የሚችል እጣ")).toBeInTheDocument();
     expect(container.textContent).not.toContain("SEALED");
     await user.click(screen.getByRole("button", { name: "Switch to English" }));
-    expect(screen.getByText("VERIFIABLE DRAW")).toBeInTheDocument();
+    expect(screen.getByText("A draw you can check")).toBeInTheDocument();
   });
 
   it("switches to English without losing the ceremony", async () => {
@@ -173,7 +173,7 @@ describe("DrawBoard ceremony", () => {
     await user.click(screen.getByRole("button", { name: "Switch to English" }));
 
     expect(screen.getByText("Mesob draw ceremony")).toBeInTheDocument();
-    expect(screen.getByText("Step 1 — Commit")).toBeInTheDocument();
+    expect(screen.getAllByText("Lock the draw").length).toBeGreaterThan(0);
   });
 });
 

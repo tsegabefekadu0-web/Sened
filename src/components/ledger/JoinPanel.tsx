@@ -1,5 +1,6 @@
 "use client";
 
+import { BODY_TEXT, PRIMARY_BUTTON, SimpleScreen } from "@/components/shell/SimpleScreen";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CircleAlert, CircleCheck, UsersRound } from "lucide-react";
@@ -102,104 +103,84 @@ export function JoinPanel({ initialLocale = "am" }: { readonly initialLocale?: L
   const success = outcome ? SUCCESS.has(outcome.status) : false;
   const signedOut = session.status === "signed-out" && phase.kind === "joining";
 
+  const toggleLocale = () => setLocale(locale === "am" ? "en" : "am");
+
   return (
-    <main className="min-h-screen w-full bg-[#120D0A] flex items-center justify-center sm:py-6 antialiased">
-      <div className="w-full max-w-md bg-[#FAF6F0] min-h-[100dvh] sm:min-h-0 sm:rounded-3xl sm:border sm:border-[#382B24]/50 sm:shadow-[0_25px_80px_rgba(0,0,0,0.85)] overflow-hidden">
-        <div className="bg-[#2A1D17] text-[#F3E6D3] px-6 py-5 flex items-center justify-between">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-2 min-h-11 text-sm font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
-          >
-            <ArrowLeft className="w-4 h-4" aria-hidden="true" />
-            {t("auth.backHome")}
+    <SimpleScreen
+      locale={locale}
+      onToggleLocale={toggleLocale}
+      icon={<UsersRound className="h-9 w-9" aria-hidden="true" />}
+      title={t("join.title")}
+    >
+      {(session.status === "loading" || phase.kind === "reading") && (
+        <p role="status" className={BODY_TEXT}>
+          {t("join.loading")}
+        </p>
+      )}
+
+      {session.status === "unconfigured" && (
+        <div className="space-y-5">
+          <p role="alert" className={BODY_TEXT} data-testid="join-outcome">
+            {t("join.notConfigured")}
+          </p>
+          <Link href="/" className={PRIMARY_BUTTON}>
+            {t("auth.notConfiguredAction")}
           </Link>
-          <button
-            type="button"
-            onClick={() => setLocale(locale === "am" ? "en" : "am")}
-            className="min-h-11 px-3 text-sm font-semibold rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
+        </div>
+      )}
+
+      {phase.kind === "missing" && session.status !== "unconfigured" && (
+        <p role="alert" className={`${BODY_TEXT} font-semibold`} data-testid="join-outcome">
+          {t("join.missingToken")}
+        </p>
+      )}
+
+      {signedOut && (
+        <div className="space-y-5">
+          <p className={BODY_TEXT} data-testid="join-outcome">
+            {t("join.signInRequired")}
+          </p>
+          <Link href="/sign-in" className={PRIMARY_BUTTON}>
+            {t("join.signIn")}
+          </Link>
+        </div>
+      )}
+
+      {signedIn && phase.kind === "joining" && (
+        <p role="status" className={BODY_TEXT}>
+          {t("join.joining")}
+        </p>
+      )}
+
+      {outcome && (
+        <div className="space-y-5">
+          <p
+            role={success ? "status" : "alert"}
+            data-testid="join-outcome"
+            data-outcome={outcome.status}
+            className={`flex items-start gap-3 text-left font-ethiopic text-[18px] font-semibold leading-[1.6] ${success ? "text-[#2A1D17]" : "text-[#8F2D12]"}`}
           >
-            {locale === "am" ? t("shell.english") : t("shell.amharic")}
-          </button>
+            {success ? (
+              <CircleCheck className="h-6 w-6 shrink-0 text-[#2F6B2A]" aria-hidden="true" />
+            ) : (
+              <CircleAlert className="h-6 w-6 shrink-0" aria-hidden="true" />
+            )}
+            <span>{t(OUTCOME_COPY[outcome.status])}</span>
+          </p>
+          {RETRYABLE.has(outcome.status) && (
+            <button
+              type="button"
+              onClick={() => void redeem()}
+              className="flex min-h-[60px] w-full items-center justify-center rounded-2xl border-2 border-[#A9411D] font-ethiopic text-[20px] font-bold text-[#8F2D12] focus:outline-none focus-visible:ring-4 focus-visible:ring-[#F3C769]"
+            >
+              {t("join.retry")}
+            </button>
+          )}
+          <Link href="/ledger" className={PRIMARY_BUTTON}>
+            {t("join.openLedger")}
+          </Link>
         </div>
-
-        <div className="px-6 py-8 space-y-6">
-          <h1 className="flex items-center gap-3 text-2xl font-extrabold text-[#2A1D17]">
-            <UsersRound className="w-6 h-6 text-[#C6532B]" aria-hidden="true" />
-            {t("join.title")}
-          </h1>
-
-          {(session.status === "loading" || phase.kind === "reading") && (
-            <p role="status" className="text-sm text-[#6B5648]">
-              {t("join.loading")}
-            </p>
-          )}
-
-          {session.status === "unconfigured" && (
-            <p role="alert" className="text-sm font-semibold text-[#A6401F]" data-testid="join-outcome">
-              {t("join.notConfigured")}
-            </p>
-          )}
-
-          {phase.kind === "missing" && session.status !== "unconfigured" && (
-            <p role="alert" className="text-sm font-semibold text-[#A6401F]" data-testid="join-outcome">
-              {t("join.missingToken")}
-            </p>
-          )}
-
-          {signedOut && (
-            <div className="space-y-4">
-              <p className="text-sm leading-6 text-[#6B5648]" data-testid="join-outcome">
-                {t("join.signInRequired")}
-              </p>
-              <Link
-                href="/sign-in"
-                className="w-full min-h-12 rounded-2xl bg-gradient-to-r from-[#C6532B] to-[#D9A441] text-[#1E130D] font-bold flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
-              >
-                {t("join.signIn")}
-              </Link>
-            </div>
-          )}
-
-          {signedIn && phase.kind === "joining" && (
-            <p role="status" className="text-sm text-[#6B5648]">
-              {t("join.joining")}
-            </p>
-          )}
-
-          {outcome && (
-            <div className="space-y-4">
-              <p
-                role={success ? "status" : "alert"}
-                data-testid="join-outcome"
-                data-outcome={outcome.status}
-                className={`flex items-start gap-3 text-sm font-semibold ${success ? "text-[#2A1D17]" : "text-[#A6401F]"}`}
-              >
-                {success ? (
-                  <CircleCheck className="w-5 h-5 shrink-0 text-[#4F7A3A]" aria-hidden="true" />
-                ) : (
-                  <CircleAlert className="w-5 h-5 shrink-0" aria-hidden="true" />
-                )}
-                <span>{t(OUTCOME_COPY[outcome.status])}</span>
-              </p>
-              {RETRYABLE.has(outcome.status) && (
-                <button
-                  type="button"
-                  onClick={() => void redeem()}
-                  className="w-full min-h-12 rounded-2xl border border-[#C6532B] text-[#C6532B] font-bold focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
-                >
-                  {t("join.retry")}
-                </button>
-              )}
-              <Link
-                href="/ledger"
-                className="w-full min-h-12 rounded-2xl bg-gradient-to-r from-[#C6532B] to-[#D9A441] text-[#1E130D] font-bold flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
-              >
-                {t("join.openLedger")}
-              </Link>
-            </div>
-          )}
-        </div>
-      </div>
-    </main>
+      )}
+    </SimpleScreen>
   );
 }

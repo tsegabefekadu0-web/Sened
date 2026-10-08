@@ -75,7 +75,7 @@ describe("home screen: signed in shows the group ledger", () => {
     await screen.findByText("42,500.75");
     expect(screen.queryByText("175,000")).not.toBeInTheDocument();
     expect(screen.queryByText(am("home.sample.notice"))).not.toBeInTheDocument();
-    expect(screen.queryByText("Gabi Member")).not.toBeInTheDocument();
+    expect(screen.queryByText("ወ/ሮ አልማዝ ተ")).not.toBeInTheDocument();
     const rows = screen.getAllByText(/ልይል ቁጥር/).map((el) => el.textContent);
     expect(rows).toEqual([am("shell.feed.ledgerContribution", { sequence: 8 }), am("shell.feed.ledgerContribution", { sequence: 7 })]);
     // Never a verified badge for a ledger row: nothing here carries provenance.
@@ -267,7 +267,7 @@ describe("home screen: signed in shows the group ledger", () => {
     render(<SenedHome />);
     expect(await screen.findByRole("alert")).toHaveTextContent(am(key));
     expect(screen.queryByText("175,000")).not.toBeInTheDocument();
-    expect(screen.queryByText("Gabi Member")).not.toBeInTheDocument();
+    expect(screen.queryByText("ወ/ሮ አልማዝ ተ")).not.toBeInTheDocument();
     expect(screen.getByText(am("shell.debter.unavailable"))).toBeInTheDocument();
     expect(await digestText()).toContain(am("audio.script.unavailable"));
   });
@@ -284,7 +284,7 @@ describe("home screen: signed out shows labelled sample data", () => {
     render(<SenedHome />);
     expect(screen.getByText(am("home.sample.notice"))).toBeInTheDocument();
     expect(screen.getByText("175,000")).toBeInTheDocument();
-    expect(screen.getByText("Gabi Member")).toBeInTheDocument();
+    expect(screen.getByText("ወ/ሮ አልማዝ ተ")).toBeInTheDocument();
     expect(hoisted.load).not.toHaveBeenCalled();
     const script = await digestText();
     expect(script).toContain(am("audio.script.sample"));

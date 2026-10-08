@@ -293,9 +293,9 @@ export function ContributionFeed({
   };
 
   return (
-    <section className="w-full max-w-md md:max-w-none mx-auto px-4 md:px-0 pt-4 md:pt-2 pb-20 md:pb-8 select-none">
+    <section className="w-full select-none px-4 pb-6 pt-4">
       {/* Section Title */}
-      <h3 className="text-[17px] font-bold text-[#140E0A] tracking-tight mb-3.5 px-0.5 font-sans">
+      <h3 className="mb-3 px-0.5 font-ethiopic text-[20px] font-bold leading-snug text-[#140E0A]">
         {t("shell.feed.title")}
       </h3>
 
@@ -303,8 +303,8 @@ export function ContributionFeed({
         // §12.7: an honest empty state. This used to fall back to two fixture
         // rows carrying bank badges nobody verified.
         <div className="rounded-2xl border border-dashed border-[#D9C8B5] bg-[#F3ECE2] px-4 py-8 text-center">
-          <p className="text-sm font-semibold text-[#5C4A3D]">{t("shell.feed.empty")}</p>
-          <p className="mt-1 text-xs leading-relaxed text-[#8A7A6D]">
+          <p className="text-base font-semibold text-[#4F4137]">{t("shell.feed.empty")}</p>
+          <p className="mt-1 text-base leading-relaxed text-[#4F4137]">
             {t("shell.feed.emptyBody")}
           </p>
         </div>
@@ -315,8 +315,16 @@ export function ContributionFeed({
             return (
               <div
                 key={c.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => openReceipt(c)}
-                className="flex items-center justify-between gap-3.5 cursor-pointer group active:scale-[0.99] transition-transform"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    openReceipt(c);
+                  }
+                }}
+                className="group flex min-h-[88px] cursor-pointer items-center justify-between gap-3.5 rounded-2xl bg-white/70 px-3 py-3 transition-transform active:scale-[0.99] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
               >
                 {/* Left: portrait in a Tibeb border (frame chosen from the member id) */}
                 <MemberAvatar
@@ -330,7 +338,7 @@ export function ContributionFeed({
                 {/* Middle: Trust badge + Name + Reference */}
                 <div className="flex-1 min-w-0 pr-1">
                   {verified ? (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#138A4B] text-white text-[11px] font-semibold shadow-xs">
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#138A4B] text-white text-base font-semibold shadow-xs">
                       <Check className="w-3 h-3 stroke-[3]" />
                       <span>{channelLabel(c)}</span>{" "}
                       <span>{t("shell.feed.verifiedWord")}</span>
@@ -350,23 +358,23 @@ export function ContributionFeed({
                       ) : null}
                     </span>
                   ) : c.source === "ledger" ? (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-[11px] font-semibold">
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-base font-semibold">
                       <FileText className="w-3 h-3 stroke-[3]" />
                       {t("shell.feed.recorded")}
                     </span>
                   ) : (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-[11px] font-semibold">
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E8D9BE] text-[#6B5433] text-base font-semibold">
                       <Clock className="w-3 h-3 stroke-[3]" />
                       {t("shell.feed.pending")}
                     </span>
                   )}
 
-                  <h4 className="text-[15px] font-bold text-[#140E0A] leading-snug mt-1 truncate font-sans">
+                  <h4 className="mt-1 font-ethiopic text-[18px] font-bold leading-snug text-[#140E0A]">
                     {c.name}
                   </h4>
 
                   {verified && c.memberLabel ? (
-                    <p className="text-[12px] font-semibold text-[#4A3B32] mt-0.5 truncate font-sans" data-testid="feed-paid-by">
+                    <p className="text-base font-semibold text-[#4A3B32] mt-0.5 font-sans" data-testid="feed-paid-by">
                       {t("shell.feed.paidBy")}: {c.memberLabel}
                     </p>
                   ) : null}
@@ -375,7 +383,7 @@ export function ContributionFeed({
                       verification. Labelled as such and never styled as verified. */}
                   {!verified && c.treasurerPayer ? (
                     <p
-                      className="text-[12px] font-semibold text-[#6B5433] mt-0.5 truncate font-sans"
+                      className="text-base font-semibold text-[#6B5433] mt-0.5 font-sans"
                       data-testid="feed-paid-by-treasurer"
                     >
                       {t("shell.feed.paidBy")}: {c.treasurerPayer.memberLabel} · {t("shell.feed.recordedByTreasurer")}
@@ -383,14 +391,14 @@ export function ContributionFeed({
                   ) : null}
 
                   {!verified && c.treasurerPayer && (shownChannel(c) || shownNote(c)) ? (
-                    <p className="text-[12px] font-normal text-[#6B5433] mt-0.5 truncate font-sans" data-testid="feed-channel-note">
+                    <p className="text-base font-normal text-[#6B5433] mt-0.5 font-sans" data-testid="feed-channel-note">
                       {shownChannel(c) ? <span data-testid="feed-channel">{channelLabel(c)}</span> : null}
                       {shownChannel(c) && shownNote(c) ? " · " : null}
                       {shownNote(c) ? <span data-testid="feed-note">{shownNote(c)}</span> : null}
                     </p>
                   ) : null}
 
-                  <p className="text-[12px] font-normal text-[#7D6F66] mt-0.5 truncate font-sans">
+                  <p className="text-base font-normal text-[#4F4137] mt-0.5 font-sans">
                     {c.transactionId
                       ? `${t("shell.feed.reference")}: ${c.transactionId}`
                       : t("shell.feed.noReference")}
@@ -402,16 +410,14 @@ export function ContributionFeed({
                   <div className="relative w-[70px] h-[76px] rounded-[16px] overflow-hidden shrink-0 shadow-sm border border-[#DECDBB] bg-[#EFE6D9]">
                     <Image
                       src={c.secondaryAvatar}
-                      alt={`${c.name} — ${t("shell.feed.secondaryAvatarAlt")}`}
+                      alt={`${c.name}: ${t("shell.feed.secondaryAvatarAlt")}`}
                       fill
                       sizes="70px"
                       className="object-cover"
                       priority
                     />
                   </div>
-                ) : (
-                  <div className="w-[70px] shrink-0" />
-                )}
+                ) : null}
               </div>
             );
           })}
@@ -426,10 +432,10 @@ export function ContributionFeed({
           <div className="w-full max-w-sm rounded-[28px] bg-[#FAF7F2] border border-[#D9C8B5] p-5 shadow-2xl relative select-text">
             <button
               onClick={() => setSelected(null)}
-              className="absolute top-4 right-4 p-1.5 rounded-full bg-[#EAE0D3] text-[#4A3B32] hover:bg-[#DDCFBF] transition-all"
+              className="absolute right-3 top-3 flex h-12 w-12 items-center justify-center rounded-full bg-[#EAE0D3] text-[#4A3B32] transition-all hover:bg-[#DDCFBF]"
               aria-label={t("shell.feed.close")}
             >
-              <X className="w-4 h-4" />
+              <X className="h-6 w-6" aria-hidden="true" />
             </button>
 
             <div
@@ -440,7 +446,7 @@ export function ContributionFeed({
               ) : (
                 <Clock className="w-5 h-5 stroke-[2.5]" />
               )}
-              <span className="text-xs font-bold uppercase tracking-wider">
+              <span className="text-base font-bold  ">
                 {isVerified(selected)
                   ? t("shell.feed.verifiedTitle")
                   : selected.source === "ledger"
@@ -449,7 +455,7 @@ export function ContributionFeed({
               </span>
             </div>
 
-            <h3 className="text-lg font-bold text-[#1F1714]">{selected.name}</h3>
+            <h3 className="font-ethiopic text-[22px] font-bold leading-snug text-[#1F1714]">{selected.name}</h3>
             <p className="text-2xl font-extrabold text-[#1F1714] mt-1 font-sans">
               {selected.amountWire !== undefined
                 ? `${formatEtbGrouped(selected.amountWire)} ${t("shell.debter.currency")}`
@@ -458,15 +464,15 @@ export function ContributionFeed({
                   : "—"}
             </p>
 
-            <div className="mt-4 pt-3 border-t border-[#E5DACD] space-y-2 text-xs">
+            <div className="mt-4 pt-3 border-t border-[#E5DACD] space-y-2 text-base">
               <div className="flex justify-between gap-4">
-                <span className="text-[#7A6B60]">{t("shell.feed.channel")}:</span>
+                <span className="text-[#4F4137]">{t("shell.feed.channel")}:</span>
                 <span className="font-semibold text-[#1F1714] text-right">
                   {channelLabel(selected)}
                 </span>
               </div>
               <div className="flex justify-between gap-4">
-                <span className="text-[#7A6B60]">{t("shell.feed.reference")}:</span>
+                <span className="text-[#4F4137]">{t("shell.feed.reference")}:</span>
                 <span className="font-mono font-semibold text-[#1F1714] text-right break-all">
                   {shownReference(selected) ?? selected.transactionId ?? "—"}
                 </span>
@@ -475,18 +481,18 @@ export function ContributionFeed({
                 <>
                   {selected.memberLabel ? (
                     <div className="flex justify-between gap-4">
-                      <span className="text-[#7A6B60]">{t("shell.feed.paidBy")}:</span>
+                      <span className="text-[#4F4137]">{t("shell.feed.paidBy")}:</span>
                       <span className="font-semibold text-[#1F1714] text-right break-all">{selected.memberLabel}</span>
                     </div>
                   ) : null}
                   <div className="flex justify-between gap-4">
-                    <span className="text-[#7A6B60]">{t("shell.feed.verifiedBy")}:</span>
+                    <span className="text-[#4F4137]">{t("shell.feed.verifiedBy")}:</span>
                     <span className="font-semibold text-[#138A4B] text-right break-all">
                       {selected.verifiedBy}
                     </span>
                   </div>
                   <div className="flex justify-between gap-4">
-                    <span className="text-[#7A6B60]">{t("shell.feed.verifiedAt")}:</span>
+                    <span className="text-[#4F4137]">{t("shell.feed.verifiedAt")}:</span>
                     <span className="font-semibold text-[#1F1714] text-right">
                       {selected.verifiedAt ?? "—"}
                     </span>
@@ -500,18 +506,18 @@ export function ContributionFeed({
                   {selected.treasurerPayer ? (
                     <div data-testid="feed-treasurer-payer" className="space-y-2">
                       <div className="flex justify-between gap-4">
-                        <span className="text-[#7A6B60]">{t("shell.feed.paidBy")}:</span>
+                        <span className="text-[#4F4137]">{t("shell.feed.paidBy")}:</span>
                         <span className="font-semibold text-[#1F1714] text-right break-all">{selected.treasurerPayer.memberLabel}</span>
                       </div>
                       <div className="flex justify-between gap-4">
-                        <span className="text-[#7A6B60]">{t("shell.feed.treasurerRecordedAt")}:</span>
+                        <span className="text-[#4F4137]">{t("shell.feed.treasurerRecordedAt")}:</span>
                         <span className="font-semibold text-[#6B5433] text-right">
                           {t("shell.feed.recordedByTreasurer")} · {selected.treasurerPayer.recordedAtLabel}
                         </span>
                       </div>
                       {shownNote(selected) ? (
                         <div className="flex justify-between gap-4">
-                          <span className="text-[#7A6B60]">{t("shell.feed.note")}:</span>
+                          <span className="text-[#4F4137]">{t("shell.feed.note")}:</span>
                           <span className="font-semibold text-[#1F1714] text-right break-words" data-testid="feed-detail-note">
                             {shownNote(selected)}
                           </span>
@@ -535,7 +541,7 @@ export function ContributionFeed({
             {/* Owner / treasurer only, and only for a ledger row that no bank
                 receipt names (a verified row's payer cannot be overridden). */}
             {attribution && selected.source === "ledger" && !isVerified(selected) ? (
-              <div className="mt-4 pt-3 border-t border-[#E5DACD] text-xs" data-testid="feed-attribute-payer">
+              <div className="mt-4 pt-3 border-t border-[#E5DACD] text-base" data-testid="feed-attribute-payer">
                 <p className="font-bold text-[#1F1714]">
                   {selected.treasurerPayer ? t("shell.feed.attribute.correctTitle") : t("shell.feed.attribute.title")}
                 </p>
@@ -543,12 +549,12 @@ export function ContributionFeed({
                   {selected.treasurerPayer ? t("shell.feed.attribute.correctHelp") : t("shell.feed.attribute.help")}
                 </p>
                 <label className="mt-2 block">
-                  <span className="text-[#7A6B60]">{t("shell.feed.attribute.memberLabel")}</span>
+                  <span className="text-[#4F4137]">{t("shell.feed.attribute.memberLabel")}</span>
                   <select
                     data-testid="feed-attribute-member"
                     value={payerChoice}
                     onChange={(event) => setPayerChoice(event.target.value)}
-                    className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                    className="mt-1 w-full min-h-12 rounded-lg border border-[#D9C8B5] bg-white px-3 py-2 text-base text-[#1F1714]"
                   >
                     <option value="">{t("shell.feed.attribute.choose")}</option>
                     {attribution.members.map((member) => (
@@ -559,12 +565,12 @@ export function ContributionFeed({
                   </select>
                 </label>
                 <label className="mt-2 block">
-                  <span className="text-[#7A6B60]">{t("shell.feed.attribute.channelLabel")}</span>
+                  <span className="text-[#4F4137]">{t("shell.feed.attribute.channelLabel")}</span>
                   <select
                     data-testid="feed-attribute-channel"
                     value={payerChannel}
                     onChange={(event) => setPayerChannel(isContributionChannel(event.target.value) ? event.target.value : "")}
-                    className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                    className="mt-1 w-full min-h-12 rounded-lg border border-[#D9C8B5] bg-white px-3 py-2 text-base text-[#1F1714]"
                   >
                     <option value="">{t("shell.feed.channelNone")}</option>
                     {CONTRIBUTION_CHANNELS.map((option) => (
@@ -575,7 +581,7 @@ export function ContributionFeed({
                   </select>
                 </label>
                 <label className="mt-2 block">
-                  <span className="text-[#7A6B60]">{t("shell.feed.attribute.noteLabel")}</span>
+                  <span className="text-[#4F4137]">{t("shell.feed.attribute.noteLabel")}</span>
                   <input
                     type="text"
                     data-testid="feed-attribute-note"
@@ -583,20 +589,20 @@ export function ContributionFeed({
                     onChange={(event) => setPayerNote(event.target.value)}
                     maxLength={CONTRIBUTION_NOTE_MAX * 2}
                     autoComplete="off"
-                    className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                    className="mt-1 w-full min-h-12 rounded-lg border border-[#D9C8B5] bg-white px-3 py-2 text-base text-[#1F1714]"
                   />
-                  <span className="mt-1 block text-[11px] leading-snug text-[#6B5433]">{t("shell.feed.attribute.noteHelp")}</span>
+                  <span className="mt-1 block text-base leading-relaxed text-[#6B5433]">{t("shell.feed.attribute.noteHelp")}</span>
                 </label>
                 {selected.treasurerPayer ? (
                   <label className="mt-2 block">
-                    <span className="text-[#7A6B60]">{t("shell.feed.attribute.reasonLabel")}</span>
+                    <span className="text-[#4F4137]">{t("shell.feed.attribute.reasonLabel")}</span>
                     <textarea
                       data-testid="feed-attribute-reason"
                       value={payerReason}
                       onChange={(event) => setPayerReason(event.target.value)}
                       rows={2}
                       maxLength={1000}
-                      className="mt-1 w-full rounded-lg border border-[#D9C8B5] bg-white px-2 py-2 text-[13px] text-[#1F1714]"
+                      className="mt-1 w-full min-h-12 rounded-lg border border-[#D9C8B5] bg-white px-3 py-2 text-base text-[#1F1714]"
                     />
                   </label>
                 ) : null}
@@ -605,7 +611,7 @@ export function ContributionFeed({
                   data-testid="feed-attribute-submit"
                   disabled={payerBusy}
                   onClick={() => void submitPayer(selected)}
-                  className="mt-3 w-full py-2 rounded-xl bg-[#6B5433] text-[#FAF7F2] font-semibold text-sm disabled:opacity-60"
+                  className="mt-3 min-h-12 w-full py-2 rounded-xl bg-[#6B5433] text-[#FAF7F2] font-semibold text-base disabled:opacity-60"
                 >
                   {payerBusy
                     ? t("shell.feed.attribute.saving")
@@ -627,7 +633,7 @@ export function ContributionFeed({
 
             <button
               onClick={() => setSelected(null)}
-              className="w-full mt-5 py-2.5 rounded-xl bg-[#2A1F1A] text-[#FAF7F2] font-semibold text-sm hover:bg-[#3D2E27] active:scale-[0.98] transition-all"
+              className="mt-5 min-h-12 w-full py-2.5 rounded-xl bg-[#2A1F1A] text-[#FAF7F2] font-semibold text-base hover:bg-[#3D2E27] active:scale-[0.98] transition-all"
             >
               {t("shell.feed.close")}
             </button>

@@ -64,25 +64,25 @@ export function TabPanel({
   return (
     <section
       aria-label={t(TITLES[tab] as never)}
-      className="absolute inset-x-0 top-[132px] z-40 mx-4 max-w-[364px] rounded-3xl border border-[#DECDBB] bg-[#FAF6F0] p-5 shadow-[0_18px_40px_-12px_rgba(38,30,26,0.45)]"
+      className="absolute inset-x-4 top-[132px] z-40 rounded-3xl border border-[#DECDBB] bg-[#FAF6F0] p-5 shadow-[0_18px_40px_-12px_rgba(38,30,26,0.45)]"
     >
       <div className="flex items-center gap-3">
         <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[#F0E6D8] text-[#A3441F]">
           <Icon className="h-5 w-5 stroke-[2.2]" aria-hidden="true" />
         </span>
-        <h2 className="font-ethiopic text-lg font-bold text-[#1F1714]">
+        <h2 className="font-ethiopic text-[22px] font-bold text-[#1F1714]">
           {t(TITLES[tab] as never)}
         </h2>
       </div>
 
-      <p className="mt-3 text-sm leading-relaxed text-[#6B5B4E]">
+      <p className="mt-3 font-ethiopic text-[18px] leading-[1.65] text-[#3A2C22]">
         {t("tab.panels.pending" as never)}
       </p>
 
       {destination ? (
         <Link
           href={destination.href}
-          className="mt-4 inline-flex items-center gap-2 rounded-xl bg-[#2A1F1A] px-4 py-2.5 text-sm font-semibold text-[#FAF7F2] transition-colors hover:bg-[#3D2E27] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
+          className="mt-4 inline-flex min-h-12 items-center gap-2 rounded-xl bg-[#2A1F1A] px-5 py-2.5 text-[18px] font-semibold text-[#FAF7F2] transition-colors hover:bg-[#3D2E27] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
         >
           {t(destination.labelKey as never)}
         </Link>
@@ -91,7 +91,7 @@ export function TabPanel({
       <button
         type="button"
         onClick={onBack}
-        className="mt-4 ml-3 inline-flex items-center gap-1.5 text-sm font-semibold text-[#8A7A6D] hover:text-[#3D2E27] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
+        className="ml-3 mt-4 inline-flex min-h-12 items-center gap-1.5 text-[18px] font-bold text-[#4F4137] hover:text-[#3D2E27] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
       >
         <ArrowLeft className="h-4 w-4" aria-hidden="true" />
         {t("tab.panels.back" as never)}

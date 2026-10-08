@@ -384,14 +384,14 @@ export function VoiceModal({
         </button>
 
         <div className="text-center mb-5">
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-terracotta-500/20 text-terracotta-400 border border-terracotta-500/30 text-xs font-bold mb-2">
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-terracotta-500/20 text-terracotta-400 border border-terracotta-500/30 text-base font-bold mb-2">
             <Mic className="w-3.5 h-3.5" />
             {t("voice.badge")}
           </div>
           <h2 id="sened-voice-title" className="text-xl font-bold font-ethiopic text-parchment-50">
             {t("voice.title")}
           </h2>
-          <p className="text-xs text-parchment-300 mt-0.5">{t("voice.subtitle")}</p>
+          <p className="text-base text-parchment-300 mt-0.5">{t("voice.subtitle")}</p>
         </div>
 
         {/* ── Real microphone: AnalyserNode bars, not CSS ping ─────────────── */}
@@ -417,7 +417,7 @@ export function VoiceModal({
             </div>
           </div>
 
-          <p className="text-xs font-semibold text-gold-400 mt-4 font-ethiopic" aria-live="polite">
+          <p className="text-base font-semibold text-gold-400 mt-4 font-ethiopic" aria-live="polite">
             {stage === "requesting" && t("voice.permissionRequest")}
             {stage === "recording" && t("voice.recordingElapsed", { seconds: elapsedSeconds })}
             {stage === "stopping" && t("voice.transcribing")}
@@ -448,7 +448,7 @@ export function VoiceModal({
             <span className="sened-voice-meter__fill" style={{ width: `${Math.round(level * 100)}%` }} />
           </div>
           {clipping && (
-            <p className="text-[10px] text-terracotta-400 mt-1" role="status">
+            <p className="text-base text-terracotta-400 mt-1" role="status">
               {t("voice.a11y.clipping")}
             </p>
           )}
@@ -480,7 +480,7 @@ export function VoiceModal({
               const next = mode === "voice" ? "type" : "voice";
               setMode(next);
             }}
-            className="py-3 px-4 rounded-2xl font-bold text-sm font-ethiopic flex items-center gap-2 bg-coffee-800 text-parchment-200 hover:bg-coffee-700 active:scale-95 transition-all"
+            className="py-3 px-4 rounded-2xl font-bold text-base font-ethiopic flex items-center gap-2 bg-coffee-800 text-parchment-200 hover:bg-coffee-700 active:scale-95 transition-all"
           >
             {mode === "voice" ? <Type className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
             {mode === "voice" ? t("voice.typeInstead") : t("voice.voiceInstead")}
@@ -513,11 +513,11 @@ export function VoiceModal({
         {/* ── Transcript: live interim, then the final text ───────────────── */}
         {mode === "voice" && (transcript || interim) && (
           <div className="p-3.5 rounded-2xl bg-coffee-950 border border-coffee-800 mb-4">
-            <p className="text-[10px] uppercase tracking-wider text-parchment-400 mb-1">
+            <p className="text-base   text-parchment-400 mb-1">
               {t("voice.transcriptLabel")}
             </p>
             <p
-              className={`text-sm font-medium font-ethiopic leading-relaxed sened-voice-interim ${
+              className={`text-base font-medium font-ethiopic leading-relaxed sened-voice-interim ${
                 transcript ? "sened-voice-interim--final" : ""
               }`}
             >
@@ -529,7 +529,7 @@ export function VoiceModal({
 
         {mode === "type" && (
           <div className="mb-4">
-            <label htmlFor="sened-voice-typed" className="text-[10px] uppercase tracking-wider text-parchment-400">
+            <label htmlFor="sened-voice-typed" className="text-base   text-parchment-400">
               {t("voice.transcriptLabel")}
             </label>
             <textarea
@@ -538,7 +538,7 @@ export function VoiceModal({
               onChange={(event) => setTyped(event.target.value)}
               rows={3}
               placeholder={t("voice.transcriptPlaceholder")}
-              className="mt-1 w-full rounded-2xl bg-coffee-950 border border-coffee-800 p-3 text-sm font-ethiopic text-parchment-100 placeholder:text-parchment-400/60 focus:border-gold-500/60 focus:outline-none resize-y"
+              className="mt-1 w-full rounded-2xl bg-coffee-950 border border-coffee-800 p-3 text-base font-ethiopic text-parchment-100 placeholder:text-parchment-400/60 focus:border-gold-500/60 focus:outline-none resize-y"
             />
           </div>
         )}
@@ -587,7 +587,7 @@ export function VoiceModal({
               </button>
 
               {onRecordLocally && (
-                <p className="text-[10px] text-center text-parchment-400 leading-relaxed">
+                <p className="text-base text-center text-parchment-400 leading-relaxed">
                   {t("voice.recordLocallyBody")}
                 </p>
               )}
@@ -615,7 +615,7 @@ export function VoiceModal({
             </div>
           )}
 
-          <p className="text-[10px] text-center text-parchment-400 flex items-start justify-center gap-1">
+          <p className="text-base text-center text-parchment-400 flex items-start justify-center gap-1">
             <ShieldAlert className="w-3 h-3 text-gold-400 shrink-0 mt-px" />
             {t("voice.provisionalNotice")}
           </p>
@@ -652,9 +652,9 @@ function ExtractionPanel({
   };
 
   return (
-    <div className="p-3.5 rounded-2xl bg-coffee-800/60 border border-gold-500/30 mb-5 space-y-2 text-xs">
+    <div className="p-3.5 rounded-2xl bg-coffee-800/60 border border-gold-500/30 mb-5 space-y-2 text-base">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] uppercase tracking-wider text-parchment-400">
+        <span className="text-base   text-parchment-400">
           {t("voice.extractedTitle")}
         </span>
         <span className="sened-voice-provisional">
@@ -668,7 +668,7 @@ function ExtractionPanel({
       </div>
       <div className="flex items-center justify-between text-parchment-300">
         <span>{t("voice.fieldAmount")}</span>
-        <strong className="text-emerald-400 font-sans text-sm font-bold">
+        <strong className="text-emerald-400 font-sans text-base font-bold">
           {draft.amount === null ? (
             <span className="text-parchment-400 font-normal">{t("voice.fieldAmountMissing")}</span>
           ) : (

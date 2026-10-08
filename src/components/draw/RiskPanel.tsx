@@ -49,7 +49,7 @@ export function RiskPanel({ locale = "am", risk, currencyLabel }: RiskPanelProps
       aria-label={tr("drawRisk.aria")}
       data-draw-panel="risk"
     >
-      <h3 className="font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]">
+      <h3 className="font-ethiopic text-base font-bold  text-[#1C1410]">
         {tr("drawRisk.title")}
       </h3>
 
@@ -78,10 +78,10 @@ export function RiskPanel({ locale = "am", risk, currencyLabel }: RiskPanelProps
             : "border-[#E5B450] bg-[#FBF3E2]"
         ].join(" ")}
       >
-        <p className="text-[12px] font-bold text-[#1C1410]">
+        <p className="text-base font-bold text-[#1C1410]">
           {risk.reserveAdequate ? tr("drawRisk.adequate") : tr("drawRisk.inadequate")}
         </p>
-        <p className="mt-1 text-[11px] leading-4 text-[#065F46]">
+        <p className="mt-1 text-base leading-relaxed text-[#065F46]">
           {tr("drawRisk.covers", {
             count: risk.reserveCoversDefaults >= Number.MAX_SAFE_INTEGER ? "∞" : risk.reserveCoversDefaults
           })}
@@ -95,7 +95,7 @@ export function RiskPanel({ locale = "am", risk, currencyLabel }: RiskPanelProps
           ? risk.noteItems.map(noteText)
           : risk.notes
         ).map((note, index) => (
-          <li key={index} className="text-[11px] leading-4 text-[#6F625D]">
+          <li key={index} className="text-base leading-relaxed text-[#4F4137]">
             • {note}
           </li>
         ))}
@@ -117,12 +117,12 @@ function Row({
 }) {
   return (
     <div className="flex items-baseline justify-between gap-3 border-b border-dashed border-[#E4D9CE] pb-2 last:border-0">
-      <dt className="font-ethiopic text-[13px] text-[#6F625D]">{label}</dt>
+      <dt className="font-ethiopic text-base text-[#4F4137]">{label}</dt>
       <dd
         className={[
-          "font-sans text-[14px] tabular-nums",
+          "font-sans text-base tabular-nums",
           emphasis ? "font-bold text-[#C6532B]" : "font-semibold",
-          muted ? "text-[#6F625D]" : "text-[#1C1410]"
+          muted ? "text-[#4F4137]" : "text-[#1C1410]"
         ].join(" ")}
       >
         {value}

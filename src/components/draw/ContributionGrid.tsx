@@ -30,18 +30,18 @@ export interface ContributionGridProps {
 }
 
 const CARD = "sened-draw-shell rounded-[22px] border border-[#DCCFC7] p-4 shadow-card";
-const HEADING = "font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]";
-const HINT = "mt-1 text-[11px] leading-4 text-[#6F625D]";
-const FIELD = "mt-1 w-full rounded-xl border border-[#DCCFC7] bg-white px-3 py-2 font-sans text-[13px] text-[#1C1410]";
-const LABEL = "block text-[11px] font-semibold text-[#6F625D]";
+const HEADING = "font-ethiopic text-base font-bold  text-[#1C1410]";
+const HINT = "mt-1 text-base leading-relaxed text-[#4F4137]";
+const FIELD = "mt-1 w-full rounded-xl border border-[#DCCFC7] bg-white px-3 py-2 font-sans text-base text-[#1C1410]";
+const LABEL = "block text-base font-semibold text-[#4F4137]";
 const PRIMARY =
-  "min-h-9 rounded-xl bg-[#C6532B] px-3 font-sans text-[12px] font-bold text-[#FAF6F0] disabled:opacity-50";
+  "min-h-12 rounded-xl bg-[#C6532B] px-3 font-sans text-base font-bold text-[#FAF6F0] disabled:opacity-50";
 
 /** Text AND a glyph carry the status, never colour alone. */
 const CELL_STYLE: Record<ContributionCell["status"], { readonly glyph: string; readonly className: string }> = {
   met: { glyph: "✓", className: "bg-[#ECFDF5] text-[#065F46]" },
   flagged: { glyph: "!", className: "bg-[#FBF3E2] font-semibold text-[#863214]" },
-  not_due: { glyph: "–", className: "bg-[#F5EFEB] text-[#6F625D]" }
+  not_due: { glyph: "–", className: "bg-[#F5EFEB] text-[#4F4137]" }
 };
 
 /**
@@ -129,7 +129,7 @@ export function ContributionGrid({ locale, state, myUserId, isTreasurer, labelFo
             data-testid="contribution-grid-scroll"
             className="relative mt-2 max-w-full overflow-x-auto rounded-xl border border-[#DCCFC7]"
           >
-            <table className="w-max min-w-full border-collapse text-[11px]">
+            <table className="w-max min-w-full border-collapse text-base">
               <caption className="sr-only">{tr("contributions.tableCaption")}</caption>
               <thead>
                 <tr>
@@ -165,10 +165,10 @@ export function ContributionGrid({ locale, state, myUserId, isTreasurer, labelFo
                           {memberName(member)}
                         </span>
                         {member.winRound !== null ? (
-                          <span className="block text-[10px] text-[#6F625D]">{tr("contributions.won", { round: member.winRound })}</span>
+                          <span className="block text-base text-[#4F4137]">{tr("contributions.won", { round: member.winRound })}</span>
                         ) : null}
-                        {!member.active ? <span className="block text-[10px] text-[#6F625D]">{tr("contributions.inactive")}</span> : null}
-                        <span className="block text-[10px] text-[#6F625D]">
+                        {!member.active ? <span className="block text-base text-[#4F4137]">{tr("contributions.inactive")}</span> : null}
+                        <span className="block text-base text-[#4F4137]">
                           {tr("contributions.tally", { met: tally.met, flagged: tally.flagged })}
                         </span>
                       </th>
@@ -188,7 +188,7 @@ export function ContributionGrid({ locale, state, myUserId, isTreasurer, labelFo
                               {style.glyph}
                             </span>
                             <span>{status}</span>
-                            {source !== null ? <span className="block text-[10px] opacity-80">{source}</span> : null}
+                            {source !== null ? <span className="block text-base opacity-80">{source}</span> : null}
                           </td>
                         );
                       })}
@@ -199,11 +199,11 @@ export function ContributionGrid({ locale, state, myUserId, isTreasurer, labelFo
             </table>
           </div>
           {view.flaggedCount > 0 ? (
-            <p data-testid="contribution-grid-flagged" className="mt-2 text-[12px] font-semibold text-[#863214]">
+            <p data-testid="contribution-grid-flagged" className="mt-2 text-base font-semibold text-[#863214]">
               {tr("contributions.flaggedSummary", { count: view.flaggedCount })}
             </p>
           ) : null}
-          <ul className="mt-2 space-y-0.5 text-[11px] leading-4 text-[#6F625D]" data-testid="contribution-grid-legend">
+          <ul className="mt-2 space-y-0.5 text-base leading-relaxed text-[#4F4137]" data-testid="contribution-grid-legend">
             <li>{tr("contributions.legendMet")}</li>
             <li>{tr("contributions.legendFlagged")}</li>
             <li>{tr("contributions.legendNotDue")}</li>
@@ -215,18 +215,18 @@ export function ContributionGrid({ locale, state, myUserId, isTreasurer, labelFo
       )}
 
       <div className="mt-3 border-t border-[#DCCFC7] pt-3" data-testid="gate-policy">
-        <h4 className="text-[12px] font-bold text-[#1C1410]">{tr("contributions.gate.title")}</h4>
-        <p data-testid="gate-policy-current" className="mt-1 text-[12px] font-semibold text-[#1C1410]">
+        <h4 className="text-base font-bold text-[#1C1410]">{tr("contributions.gate.title")}</h4>
+        <p data-testid="gate-policy-current" className="mt-1 text-base font-semibold text-[#1C1410]">
           {tr("contributions.gate.current", { policy: policyName(view.contributionGate) })}
         </p>
         <p className={HINT}>{tr(`contributions.gate.explain.${view.contributionGate}` as MessageKey)}</p>
 
         <details className="mt-2" data-testid="gate-history">
-          <summary className="cursor-pointer text-[12px] font-semibold text-[#1C1410]">{tr("contributions.gate.history")}</summary>
+          <summary className="cursor-pointer text-base font-semibold text-[#1C1410]">{tr("contributions.gate.history")}</summary>
           {view.gateEvents.length === 0 && view.overrides.length === 0 ? (
             <p className={HINT}>{tr("contributions.gate.historyEmpty")}</p>
           ) : (
-            <ul className="mt-1 space-y-1 text-[11px] leading-4 text-[#453630]">
+            <ul className="mt-1 space-y-1 text-base leading-relaxed text-[#453630]">
               {view.gateEvents.map((event) => (
                 <li key={`${event.at}-${event.to}`} data-testid="gate-event">
                   {tr("contributions.gate.eventRow", {
@@ -256,7 +256,7 @@ export function ContributionGrid({ locale, state, myUserId, isTreasurer, labelFo
 
         {isTreasurer ? (
           <details className="mt-2 rounded-xl border border-[#DCCFC7] bg-[#FAF7F2] px-3 py-2" data-testid="gate-change">
-            <summary className="cursor-pointer text-[12px] font-semibold text-[#1C1410]">{tr("contributions.gate.change")}</summary>
+            <summary className="cursor-pointer text-base font-semibold text-[#1C1410]">{tr("contributions.gate.change")}</summary>
             <div className="mt-2 space-y-2">
               <label className="block">
                 <span className={LABEL}>{tr("contributions.gate.changeTo")}</span>
@@ -295,10 +295,10 @@ export function ContributionGrid({ locale, state, myUserId, isTreasurer, labelFo
           <p
             role={message.ok ? "status" : "alert"}
             data-testid="gate-change-message"
-            className={`mt-2 text-[12px] font-semibold ${message.ok ? "text-[#065F46]" : "text-[#863214]"}`}
+            className={`mt-2 text-base font-semibold ${message.ok ? "text-[#065F46]" : "text-[#863214]"}`}
           >
             {message.text}
-            {message.detail ? <span className="block text-[11px] font-normal text-[#6F625D]">{message.detail}</span> : null}
+            {message.detail ? <span className="block text-base font-normal text-[#4F4137]">{message.detail}</span> : null}
           </p>
         ) : null}
       </div>

@@ -76,7 +76,7 @@ export function GroupSwitcher({
     return (
       <p
         data-testid="group-switcher"
-        className={`min-w-0 truncate text-xs font-semibold ${colors.label} ${className}`}
+        className={`min-w-0 truncate text-base font-semibold ${colors.label} ${className}`}
         title={optionLabel(only)}
       >
         {t("groups.switcher.single", { name: nameLabel(only), role: roleLabel(only) })}
@@ -86,7 +86,7 @@ export function GroupSwitcher({
 
   return (
     <div data-testid="group-switcher" className={`min-w-0 ${className}`}>
-      <label htmlFor={id} className={`block text-[11px] font-bold uppercase tracking-wide ${colors.label}`}>
+      <label htmlFor={id} className={`block text-base font-bold   ${colors.label}`}>
         {t("groups.switcher.label")}
       </label>
       <select
@@ -94,7 +94,7 @@ export function GroupSwitcher({
         value={needsChoice || activeGroupId === null ? "" : activeGroupId}
         onChange={(event) => select(event.target.value)}
         aria-describedby={needsChoice ? `${id}-hint` : undefined}
-        className={`mt-1 block min-h-11 w-full min-w-0 max-w-full rounded-xl border px-3 text-sm font-semibold focus:outline-none focus-visible:ring-2 ${colors.control}`}
+        className={`mt-1 block min-h-12 w-full min-w-0 max-w-full rounded-xl border px-3 text-base font-semibold focus:outline-none focus-visible:ring-2 ${colors.control}`}
       >
         {(needsChoice || activeGroupId === null) && (
           <option value="" disabled>
@@ -108,11 +108,11 @@ export function GroupSwitcher({
         ))}
       </select>
       {needsChoice && (
-        <p id={`${id}-hint`} role="status" className={`mt-1 text-xs font-semibold ${colors.hint}`}>
+        <p id={`${id}-hint`} role="status" className={`mt-1 text-base font-semibold ${colors.hint}`}>
           {t("groups.switcher.chooseHint")}
         </p>
       )}
-      {stale && <p className={`mt-1 text-[11px] ${colors.hint}`}>{t("groups.switcher.stale")}</p>}
+      {stale && <p className={`mt-1 text-base ${colors.hint}`}>{t("groups.switcher.stale")}</p>}
     </div>
   );
 }

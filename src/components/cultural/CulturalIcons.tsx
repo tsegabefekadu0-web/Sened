@@ -132,8 +132,10 @@ export function ScallopedPlaque({
   title = "አድምጥ",
   onClick,
   isPlaying = false,
+  ariaLabel,
 }: {
   title?: string;
+  ariaLabel?: string;
   onClick?: () => void;
   isPlaying?: boolean;
 }) {
@@ -144,13 +146,13 @@ export function ScallopedPlaque({
       className={`relative inline-flex items-center justify-center cursor-pointer transition-all focus:outline-none select-none ${
         isPlaying ? "scale-105" : "hover:scale-[1.02] active:scale-95"
       }`}
-      aria-label="የቦሌ መድኃኔዓለም እቁብ ሪፖርት አድምጥ"
+      aria-label={ariaLabel ?? title}
     >
       <svg
         viewBox="0 0 148 48"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
-        className="w-36 h-12 drop-shadow-md"
+        className="h-14 w-44 drop-shadow-md"
       >
         <defs>
           <linearGradient id="plaqueGold" x1="0" y1="0" x2="0" y2="1">
@@ -203,11 +205,11 @@ export function ScallopedPlaque({
         <svg
           viewBox="0 0 24 24"
           fill="currentColor"
-          className={`w-4 h-4 ${isPlaying ? "animate-bounce" : ""}`}
+          className={`h-5 w-5 ${isPlaying ? "animate-bounce" : ""}`}
         >
           <path d="M11 5L6 9H2v6h4l5 4V5zM15.54 8.46a5 5 0 010 7.07l-1.41-1.41a3 3 0 000-4.24l1.41-1.42zM18.36 5.64a9 9 0 010 12.72l-1.41-1.41a7 7 0 000-9.9l1.41-1.41z" />
         </svg>
-        <span className="font-ethiopic text-sm tracking-wide font-extrabold">{title}</span>
+        <span className="font-ethiopic text-[20px] font-extrabold leading-none">{title}</span>
       </div>
     </button>
   );

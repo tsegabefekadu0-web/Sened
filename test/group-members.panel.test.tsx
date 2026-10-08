@@ -232,7 +232,7 @@ describe("GroupMembersPanel", () => {
       </ActiveGroupProvider>
     );
     // Several groups and none chosen: no members are loaded on a guess.
-    expect(await screen.findByText(/Choose one with the group switcher/, { selector: "p[role='status'].text-sm" })).toBeInTheDocument();
+    expect(await screen.findByText(/Choose one with the group switcher/, { selector: "p[role='status'].text-base" })).toBeInTheDocument();
     expect(hoisted.api.loadMembers).not.toHaveBeenCalled();
 
     const switcher = screen.getByRole("combobox", { name: "Group" });

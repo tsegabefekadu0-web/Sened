@@ -212,6 +212,6 @@ describe("/governance page and navigation", () => {
 
   it("is linked from the workspace links", () => {
     render(<WorkspaceLinks />);
-    expect(screen.getByRole("link", { name: /Bylaws/ })).toHaveAttribute("href", "/governance");
+    expect(screen.getByRole("link", { name: /የቡድን ደንብ/ })).toHaveAttribute("href", "/governance");
   });
 });

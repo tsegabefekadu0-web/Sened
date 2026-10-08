@@ -104,7 +104,7 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
   if (!signedIn) {
     return (
       <PanelShell t={t}>
-        <p className="text-sm text-inkMuted" role={session.status === "loading" ? "status" : undefined}>
+        <p className="text-base text-inkMuted" role={session.status === "loading" ? "status" : undefined}>
           {session.status === "loading" ? t("members.loading") : t("members.signedOut")}
         </p>
       </PanelShell>
@@ -113,14 +113,14 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
   if (load.kind === "loading") {
     return (
       <PanelShell t={t}>
-        <p role="status" className="text-sm text-inkMuted">{t("members.loading")}</p>
+        <p role="status" className="text-base text-inkMuted">{t("members.loading")}</p>
       </PanelShell>
     );
   }
   if (load.kind === "message") {
     return (
       <PanelShell t={t}>
-        <p role="status" className="text-sm text-inkMuted">{t(load.key)}</p>
+        <p role="status" className="text-base text-inkMuted">{t(load.key)}</p>
       </PanelShell>
     );
   }
@@ -185,10 +185,10 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
         {members.map((member) => (
           <li key={member.userId} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
             <div>
-              <p className="text-sm font-bold text-coffee-900">
+              <p className="text-base font-bold text-coffee-900">
                 {member.email ?? t("members.anonymous", { id: member.userId.slice(0, 8) })}
               </p>
-              <p className="text-xs text-inkMuted">
+              <p className="text-base text-inkMuted">
                 {t(ROLE_LABEL[member.role])} · {t("members.joined", { date: formatDate(member.joinedAt, locale) })}
               </p>
             </div>
@@ -196,7 +196,7 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
               <button
                 type="button"
                 onClick={() => void toggleTreasurer(member)}
-                className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-coffee-900/15 px-3 text-sm font-semibold text-coffee-900 transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta"
+                className="inline-flex min-h-12 items-center gap-2 rounded-xl border border-coffee-900/15 px-3 text-base font-semibold text-coffee-900 transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta"
               >
                 <UserCog aria-hidden="true" className="h-4 w-4" />
                 {member.role === "treasurer" ? t("members.removeTreasurer") : t("members.makeTreasurer")}
@@ -207,7 +207,7 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
       </ul>
 
       {actionFailed && (
-        <p role="alert" className="mt-3 text-sm font-semibold text-terracotta-700">
+        <p role="alert" className="mt-3 text-base font-semibold text-terracotta-700">
           {actionFailed === "role" ? t("members.roleFailed") : t("invites.revokeFailed")}
         </p>
       )}
@@ -216,12 +216,12 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
         <div className="mt-8 space-y-6">
           <form onSubmit={(event) => void create(event)} noValidate aria-label={t("invites.create")} className="flex flex-wrap items-end gap-4">
             <div>
-              <label htmlFor="invite-expiry" className="block text-sm font-bold text-coffee-900">{t("invites.expiryLabel")}</label>
+              <label htmlFor="invite-expiry" className="block text-base font-bold text-coffee-900">{t("invites.expiryLabel")}</label>
               <select
                 id="invite-expiry"
                 value={expiryHours}
                 onChange={(event) => setExpiryHours(Number(event.target.value))}
-                className="mt-2 min-h-11 rounded-xl border border-coffee-900/15 bg-white px-3 text-coffee-900"
+                className="mt-2 min-h-12 rounded-xl border border-coffee-900/15 bg-white px-3 text-coffee-900"
               >
                 {EXPIRY_OPTIONS.map((option) => (
                   <option key={option.hours} value={option.hours}>{t(option.label)}</option>
@@ -229,7 +229,7 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
               </select>
             </div>
             <div>
-              <label htmlFor="invite-uses" className="block text-sm font-bold text-coffee-900">{t("invites.usesLabel")}</label>
+              <label htmlFor="invite-uses" className="block text-base font-bold text-coffee-900">{t("invites.usesLabel")}</label>
               <input
                 id="invite-uses"
                 type="number"
@@ -238,13 +238,13 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
                 max={50}
                 value={maxUses}
                 onChange={(event) => setMaxUses(event.target.value)}
-                className="mt-2 min-h-11 w-24 rounded-xl border border-coffee-900/15 bg-white px-3 text-coffee-900"
+                className="mt-2 min-h-12 w-24 rounded-xl border border-coffee-900/15 bg-white px-3 text-coffee-900"
               />
             </div>
             <button
               type="submit"
               disabled={creating}
-              className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-terracotta-600 px-4 text-sm font-bold text-white transition-colors hover:bg-terracotta-700 disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2"
+              className="inline-flex min-h-12 items-center gap-2 rounded-xl bg-terracotta-600 px-4 text-base font-bold text-white transition-colors hover:bg-terracotta-700 disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2"
             >
               <Link2 aria-hidden="true" className="h-4 w-4" />
               {creating ? t("invites.creating") : t("invites.create")}
@@ -252,34 +252,34 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
           </form>
 
           {createFailed && (
-            <p role="alert" className="text-sm font-semibold text-terracotta-700">{t("invites.createFailed")}</p>
+            <p role="alert" className="text-base font-semibold text-terracotta-700">{t("invites.createFailed")}</p>
           )}
 
           {created && (
             <div className="rounded-2xl border border-coffee-900/15 bg-parchment-50 p-4" data-testid="created-invite">
-              <p role="status" className="text-sm font-semibold text-coffee-900">{t("invites.created")}</p>
-              <label htmlFor="invite-link" className="mt-3 block text-xs font-bold text-inkMuted">{t("invites.linkLabel")}</label>
+              <p role="status" className="text-base font-semibold text-coffee-900">{t("invites.created")}</p>
+              <label htmlFor="invite-link" className="mt-3 block text-base font-bold text-inkMuted">{t("invites.linkLabel")}</label>
               <div className="mt-1 flex flex-wrap gap-2">
                 <input
                   id="invite-link"
                   readOnly
                   value={created.url}
                   onFocus={(event) => event.currentTarget.select()}
-                  className="min-h-11 min-w-0 flex-1 rounded-xl border border-coffee-900/15 bg-white px-3 text-xs text-coffee-900"
+                  className="min-h-12 min-w-0 flex-1 rounded-xl border border-coffee-900/15 bg-white px-3 text-base text-coffee-900"
                 />
                 <button
                   type="button"
                   onClick={() => void copy()}
-                  className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-coffee-900/15 px-3 text-sm font-semibold text-coffee-900 hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta"
+                  className="inline-flex min-h-12 items-center gap-2 rounded-xl border border-coffee-900/15 px-3 text-base font-semibold text-coffee-900 hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta"
                 >
                   <Copy aria-hidden="true" className="h-4 w-4" />
                   {copyState === "copied" ? t("invites.copied") : t("invites.copy")}
                 </button>
               </div>
               {copyState === "failed" && (
-                <p role="alert" className="mt-2 text-xs font-semibold text-terracotta-700">{t("invites.copyFailed")}</p>
+                <p role="alert" className="mt-2 text-base font-semibold text-terracotta-700">{t("invites.copyFailed")}</p>
               )}
-              <p className="mt-2 text-xs text-inkMuted">
+              <p className="mt-2 text-base text-inkMuted">
                 {t("invites.expiresOn", { date: formatDate(created.expiresAt, locale) })} · {t("invites.uses", { used: 0, max: created.maxUses })}
               </p>
             </div>
@@ -287,20 +287,20 @@ export function GroupMembersPanel({ locale }: { readonly locale: Locale }) {
 
           <div>
             <h3 className="text-base font-bold text-coffee-950">{t("invites.activeTitle")}</h3>
-            {invitesFailed && <p role="alert" className="mt-2 text-sm text-terracotta-700">{t("invites.listFailed")}</p>}
+            {invitesFailed && <p role="alert" className="mt-2 text-base text-terracotta-700">{t("invites.listFailed")}</p>}
             {invites.length === 0 && !invitesFailed ? (
-              <p className="mt-2 text-sm text-inkMuted">{t("invites.none")}</p>
+              <p className="mt-2 text-base text-inkMuted">{t("invites.none")}</p>
             ) : (
               <ul className="mt-3 space-y-2" data-testid="invite-list">
                 {invites.map((invite) => (
                   <li key={invite.inviteId} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-coffee-900/15 bg-parchment-50 px-4 py-3">
-                    <p className="text-xs text-inkMuted">
+                    <p className="text-base text-inkMuted">
                       {t("invites.expiresOn", { date: formatDate(invite.expiresAt, locale) })} · {t("invites.uses", { used: invite.useCount, max: invite.maxUses })}
                     </p>
                     <button
                       type="button"
                       onClick={() => void revoke(invite.inviteId)}
-                      className="min-h-11 rounded-xl border border-terracotta px-3 text-sm font-semibold text-terracotta-700 hover:bg-terracotta-600 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta"
+                      className="min-h-12 rounded-xl border border-terracotta px-3 text-base font-semibold text-terracotta-700 hover:bg-terracotta-600 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta"
                     >
                       {t("invites.revoke")}
                     </button>

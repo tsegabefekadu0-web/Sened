@@ -241,7 +241,7 @@ export function GovernanceCopilot({ locale, loadConfirmations = fetchCitationCon
       <div className="flex-1 overflow-y-auto" data-governance-panel="results">
         {recommendation === null ? (
           <div className="p-4">
-            <p role="alert" className="rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2.5 text-[13px] text-[#1C1410]">
+            <p role="alert" className="rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2.5 text-base text-[#1C1410]">
               {t("governance.error.engine")}
             </p>
             <button type="button" onClick={restart} className={secondaryButton}>
@@ -264,12 +264,12 @@ export function GovernanceCopilot({ locale, loadConfirmations = fetchCitationCon
   return (
     <div className="flex-1 overflow-y-auto" data-governance-panel="dialog">
       <div className="mx-auto w-full max-w-xl px-4 py-5">
-        <p className="rounded-xl border border-[#DCCFC7] bg-[#F5EFEB] px-3 py-2 text-[12px] leading-snug text-[#6F625D]">
+        <p className="rounded-xl border border-[#DCCFC7] bg-[#F5EFEB] px-3 py-2 text-base leading-relaxed text-[#4F4137]">
           {t("governance.advisory")}
         </p>
 
         <div className="mt-5 flex items-center justify-between">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#B8862F]" data-testid="governance-progress">
+          <p className="text-base font-semibold   text-[#6B4E0E]" data-testid="governance-progress">
             {t("governance.step.progress", { current: stepIndex + 1, total: steps.length })}
           </p>
           <div className="flex gap-1" aria-hidden="true">
@@ -309,9 +309,9 @@ export function GovernanceCopilot({ locale, loadConfirmations = fetchCitationCon
 }
 
 const primaryButton =
-  "min-h-11 flex-1 rounded-xl bg-[#C6532B] px-4 font-sans text-[14px] font-bold text-[#FAF6F0] transition-colors hover:bg-[#A9411D] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#D4A244]";
+  "min-h-12 flex-1 rounded-xl bg-[#C6532B] px-4 font-sans text-base font-bold text-[#FAF6F0] transition-colors hover:bg-[#A9411D] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#D4A244]";
 const secondaryButton =
-  "min-h-11 rounded-xl border border-[#DCCFC7] bg-[#FAF6F0] px-4 font-sans text-[14px] font-semibold text-[#3A2C22] transition-colors hover:border-[#C9B49C] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]";
+  "min-h-12 rounded-xl border border-[#DCCFC7] bg-[#FAF6F0] px-4 font-sans text-base font-semibold text-[#3A2C22] transition-colors hover:border-[#C9B49C] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]";
 const inputClass =
   "mt-3 block min-h-12 w-full rounded-xl border border-[#DCCFC7] bg-white px-3 font-sans text-[16px] text-[#1C1410] focus:border-[#C6532B] focus:outline-none focus:ring-2 focus:ring-[#C6532B]/30";
 
@@ -332,7 +332,7 @@ function StepBody({
   const message = error === null ? null : t(error);
   const errorNode =
     message === null ? null : (
-      <p id={errorId} role="alert" className="mt-2 text-[13px] font-semibold text-[#A9411D]">
+      <p id={errorId} role="alert" className="mt-2 text-base font-semibold text-[#A9411D]">
         {message}
       </p>
     );
@@ -345,10 +345,10 @@ function StepBody({
     unit: MessageKey | null
   ) => (
     <div>
-      <label htmlFor={`governance-${key}`} className="block font-ethiopic text-[18px] font-bold leading-snug text-[#1C1410]">
+      <label htmlFor={`governance-${key}`} className="block font-ethiopic text-[18px] font-bold leading-relaxed text-[#1C1410]">
         {t(question)}
       </label>
-      <p id={`governance-${key}-hint`} className="mt-1 text-[13px] text-[#6F625D]">
+      <p id={`governance-${key}-hint`} className="mt-1 text-base text-[#4F4137]">
         {t(hint)}
       </p>
       <div className="relative">
@@ -364,7 +364,7 @@ function StepBody({
           className={inputClass}
         />
         {unit !== null ? (
-          <span className="pointer-events-none absolute right-3 top-1/2 mt-1.5 -translate-y-1/2 text-[12px] font-semibold text-[#9A8877]">
+          <span className="pointer-events-none absolute right-3 top-1/2 mt-1.5 -translate-y-1/2 text-base font-semibold text-[#4F4137]">
             {t(unit)}
           </span>
         ) : null}
@@ -433,8 +433,8 @@ function Choice<V extends string>({
 }) {
   return (
     <fieldset>
-      <legend className="font-ethiopic text-[18px] font-bold leading-snug text-[#1C1410]">{legend}</legend>
-      <p className="mt-1 text-[13px] text-[#6F625D]">{hint}</p>
+      <legend className="font-ethiopic text-[18px] font-bold leading-relaxed text-[#1C1410]">{legend}</legend>
+      <p className="mt-1 text-base text-[#4F4137]">{hint}</p>
       <div role="radiogroup" aria-label={legend} className="mt-3 grid gap-2.5">
         {options.map((option) => {
           const active = option.value === selected;
@@ -451,9 +451,9 @@ function Choice<V extends string>({
                   : "border-[#DCCFC7] bg-[#FAF6F0] hover:border-[#C9B49C]"
               }`}
             >
-              <span className="block font-ethiopic text-[15px] font-bold text-[#1C1410]">{option.label}</span>
+              <span className="block font-ethiopic text-base font-bold text-[#1C1410]">{option.label}</span>
               {option.description ? (
-                <span className="mt-0.5 block text-[12px] text-[#6F625D]">{option.description}</span>
+                <span className="mt-0.5 block text-base text-[#4F4137]">{option.description}</span>
               ) : null}
             </button>
           );
@@ -506,19 +506,19 @@ function Results({
   return (
     <div className="mx-auto w-full max-w-2xl px-4 py-5">
       <h2 className="font-ethiopic text-[20px] font-bold text-[#1C1410]">{t("governance.results.title")}</h2>
-      <p className="mt-1 text-[13px] font-semibold text-[#6F625D]" data-testid="governance-summary">
+      <p className="mt-1 text-base font-semibold text-[#4F4137]" data-testid="governance-summary">
         {summary}
       </p>
-      <p className="mt-3 rounded-xl border border-[#DCCFC7] bg-[#F5EFEB] px-3 py-2 text-[12px] leading-snug text-[#6F625D]">
+      <p className="mt-3 rounded-xl border border-[#DCCFC7] bg-[#F5EFEB] px-3 py-2 text-base leading-relaxed text-[#4F4137]">
         {t("governance.advisory")}
       </p>
 
       {recommendation.warnings.length > 0 ? (
         <section aria-label={t("governance.results.warnings")} className="mt-4 rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2.5">
-          <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-[#8A6A22]">
+          <h3 className="text-base font-bold   text-[#6B4E0E]">
             {t("governance.results.warnings")}
           </h3>
-          <ul className="mt-1 list-disc space-y-1 pl-4 text-[13px] text-[#1C1410]">
+          <ul className="mt-1 list-disc space-y-1 pl-4 text-base text-[#1C1410]">
             {recommendation.warnings.map((warning) => (
               <li key={warning.code}>{t(warning.messageKey, warning.vars)}</li>
             ))}
@@ -533,22 +533,22 @@ function Results({
       </div>
 
       <section aria-label={t("governance.results.sources")} className="mt-6">
-        <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-[#B8862F]">
+        <h3 className="text-base font-bold   text-[#6B4E0E]">
           {t("governance.results.sources")}
         </h3>
         <ul className="mt-2 space-y-2">
           {recommendation.citations.map((id) => (
             <li key={id} className="rounded-xl border border-[#DCCFC7] bg-white px-3 py-2">
-              <p className="text-[13px] font-bold text-[#1C1410]">
+              <p className="text-base font-bold text-[#1C1410]">
                 {CITATION_CATALOGUE[id].authors} ({CITATION_CATALOGUE[id].year})
               </p>
-              <p className="text-[13px] italic text-[#3A2C22]">{CITATION_CATALOGUE[id].title}</p>
-              <p className="text-[11px] text-[#6F625D]">{CITATION_CATALOGUE[id].venue}</p>
-              <p className="mt-1 text-[12px] text-[#6F625D]">{t(`governance.cite.${id}.finding` as MessageKey)}</p>
+              <p className="text-base italic text-[#3A2C22]">{CITATION_CATALOGUE[id].title}</p>
+              <p className="text-base text-[#4F4137]">{CITATION_CATALOGUE[id].venue}</p>
+              <p className="mt-1 text-base text-[#4F4137]">{t(`governance.cite.${id}.finding` as MessageKey)}</p>
             </li>
           ))}
         </ul>
-        <p className="mt-3 text-[12px] text-[#6F625D]" data-testid="governance-source-status" role="status">
+        <p className="mt-3 text-base text-[#4F4137]" data-testid="governance-source-status" role="status">
           {confirmation === null
             ? t("governance.source.checking")
             : confirmation.kind === "scholarxiv"
@@ -562,7 +562,7 @@ function Results({
         </p>
       </section>
 
-      <p className="mt-4 text-[12px] leading-snug text-[#6F625D]">{t("governance.results.disclaimer")}</p>
+      <p className="mt-4 text-base leading-relaxed text-[#4F4137]">{t("governance.results.disclaimer")}</p>
 
       <button type="button" onClick={onRestart} className={`${secondaryButton} mt-5 w-full`}>
         {t("governance.startOver")}
@@ -586,26 +586,26 @@ function ClauseCard({
       data-clause={clause.id}
       aria-labelledby={`clause-${clause.id}`}
     >
-      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[#B8862F]">
+      <p className="text-base font-semibold   text-[#6B4E0E]">
         {t(`governance.topic.${clause.topic}` as MessageKey)}
       </p>
       <h3 id={`clause-${clause.id}`} className="mt-0.5 font-ethiopic text-[16px] font-bold text-[#1C1410]">
         {t(clause.titleKey)}
       </h3>
-      <p className="mt-2 text-[14px] leading-relaxed text-[#2C241E]">{t(clause.summaryKey, clause.vars)}</p>
+      <p className="mt-2 text-base leading-relaxed text-[#2C241E]">{t(clause.summaryKey, clause.vars)}</p>
 
       <dl className="mt-3 divide-y divide-[#EBE2D8] rounded-xl border border-[#EBE2D8] bg-white px-3">
         {clause.parameters.map((parameter) => (
           <div key={parameter.key} className="flex items-baseline justify-between gap-3 py-2">
-            <dt className="text-[12px] text-[#6F625D]">{t(`governance.param.${parameter.key}` as MessageKey)}</dt>
-            <dd className="text-right text-[13px] font-bold tabular-nums text-[#1C1410]">
+            <dt className="text-base text-[#4F4137]">{t(`governance.param.${parameter.key}` as MessageKey)}</dt>
+            <dd className="text-right text-base font-bold tabular-nums text-[#1C1410]">
               {formatParameter(parameter, t)}
             </dd>
           </div>
         ))}
       </dl>
 
-      <p className="mt-3 text-[12px] leading-snug text-[#6F625D]">
+      <p className="mt-3 text-base leading-relaxed text-[#4F4137]">
         <span className="font-bold text-[#3A2C22]">{t("governance.results.rationale")}: </span>
         {t(clause.rationaleKey, clause.vars)}
       </p>
@@ -638,7 +638,7 @@ function CitationChip({
         ? t("governance.cite.notFound")
         : null;
   const className =
-    "inline-flex min-h-8 items-center gap-1.5 rounded-full border border-[#D4A244]/60 bg-[#FBF3E2] px-3 text-[12px] font-semibold text-[#6B4F14]";
+    "inline-flex min-h-12 items-center gap-1.5 rounded-full border border-[#D4A244]/60 bg-[#FBF3E2] px-3 text-base font-semibold text-[#6B4F14]";
   const body = (
     <>
       <span>{citation.label}</span>

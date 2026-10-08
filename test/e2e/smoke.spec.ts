@@ -107,9 +107,9 @@ test.describe("the mobile shell", () => {
 
   test("opens a contribution and still claims no verifier", async ({ page }) => {
     await page.goto("/");
-    await page.getByText("Gabi Member").click();
+    await page.getByText("ወ/ሮ አልማዝ ተ").click();
 
-    await expect(page.getByText(/በመጠባበቅ ላይ — አልተረጋገጠም/)).toBeVisible();
+    await expect(page.getByText(/በመጠባበቅ ላይ፤ አልተረጋገጠም/)).toBeVisible();
     await expect(page.getByText(/ከተናገረ ስለሆነ ነው/)).toBeVisible();
   });
 
@@ -139,24 +139,19 @@ test.describe("the mobile shell", () => {
     // By role and exact name. The microphone button is also a `button` in that
     // nav, so counting by position is fragile, and a loose text match for
     // "ደብተር" also catches the Debter card and the workspace link.
-    await page.getByRole("button", { name: "አባላት", exact: true }).click();
-    const members = page.getByRole("region", { name: "አባላት", exact: true });
-    await expect(members).toBeVisible();
-    await expect(members).toHaveText(/ገና አልተገነበም/);
-
     await page.getByRole("button", { name: "መለያ", exact: true }).click();
     const profile = page.getByRole("region", { name: "መለያ", exact: true });
     await expect(profile).toBeVisible();
     await expect(profile).toHaveText(/ገና አልተገነበም/);
   });
 
-  test("the ledger slot links to the real dashboard rather than an empty panel", async ({ page }) => {
+  test("the ledger and draw slots in the bottom bar open their real screens", async ({ page }) => {
     await page.goto("/");
 
-    await page.getByRole("button", { name: "ደብተር", exact: true }).click();
-    const panel = page.getByRole("region", { name: "ደብተር", exact: true });
-    await expect(panel).toBeVisible();
-    await panel.locator("a[href='/ledger']").click();
+    const bar = page.getByRole("navigation", { name: "ዋና ዝርዝር" });
+    await expect(bar.getByRole("link", { name: "ደብተር", exact: true })).toHaveAttribute("href", "/ledger");
+    await expect(bar.getByRole("link", { name: "እጣ", exact: true })).toHaveAttribute("href", "/draw");
+    await bar.getByRole("link", { name: "ደብተር", exact: true }).click();
 
     await expect(page).toHaveURL(/\/ledger$/);
   });
@@ -173,7 +168,7 @@ test.describe("the mobile shell", () => {
       .click();
 
     await expect(page).toHaveURL(/\/draw$/);
-    await expect(page.getByText(/ደረጃ 1/)).toBeVisible();
+    await expect(page.getByText("እጣውን መቆለፍ").first()).toBeVisible();
   });
 
   test("declares the web app manifest, so the PWA is installable", async ({ page }) => {
@@ -257,9 +252,9 @@ test.describe("the fair draw route", () => {
 
     // The Node hasher is not in this bundle, so a working ceremony proves the
     // WebCrypto path is the one actually executing.
-    await expect(page.getByText(/ደረጃ 1/)).toBeVisible();
-    await expect(page.getByText(/ደረጃ 2/)).toBeVisible();
-    await expect(page.getByText(/ደረጃ 3/)).toBeVisible();
+    await expect(page.getByText("እጣውን መቆለፍ").first()).toBeVisible();
+    await expect(page.getByText(/አሸናፊውን መምረጥ/).first()).toBeVisible();
+    await expect(page.getByText(/ማረጋገጥ/).first()).toBeVisible();
 
     const subtle = await page.evaluate(() => typeof globalThis.crypto?.subtle?.digest);
     expect(subtle).toBe("function");
@@ -344,7 +339,7 @@ test.describe("the mic dock records a spoken contribution for real", () => {
     // (until then the page is in its "loading" state with no feed). The sample
     // notice is shown in exactly that state, so waiting on it is the real signal
     // that hydration finished; counting earlier reads 0 and races the sample rows.
-    await expect(page.getByText(/የናሙና መረጃ — ይህ የቡድንዎ መዝገብ አይደለም/)).toBeVisible();
+    await expect(page.getByText(/ይህ የናሙና መረጃ ነው፤ የቡድንዎ መዝገብ አይደለም/)).toBeVisible();
     const before = await page.getByText("በመጠባበቅ ላይ").count();
 
     // The mic dock opens the modal.
@@ -376,7 +371,7 @@ test.describe("the mic dock records a spoken contribution for real", () => {
     // Opening it states the amount and, still, no verifier.
     await recorded.click();
     await expect(page.getByText("5,000 ብር")).toBeVisible();
-    await expect(page.getByText(/በመጠባበቅ ላይ — አልተረጋገጠም/)).toBeVisible();
+    await expect(page.getByText(/በመጠባበቅ ላይ፤ አልተረጋገጠም/)).toBeVisible();
 
     const text = await bodyText(page);
     expect(text).not.toContain("Links.et Core Trust Engine");

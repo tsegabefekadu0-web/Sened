@@ -47,14 +47,14 @@ type Form =
   | { readonly kind: "supersede"; readonly guaranteeId: string; readonly winnerId: string; readonly guarantorId: string };
 
 const CARD = "sened-draw-shell rounded-[22px] border border-[#DCCFC7] p-4 shadow-card";
-const HEADING = "font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]";
-const HINT = "mt-1 text-[11px] leading-4 text-[#6F625D]";
-const FIELD = "mt-1 w-full rounded-xl border border-[#DCCFC7] bg-white px-3 py-2 font-sans text-[13px] text-[#1C1410]";
-const LABEL = "block text-[11px] font-semibold text-[#6F625D]";
+const HEADING = "font-ethiopic text-base font-bold  text-[#1C1410]";
+const HINT = "mt-1 text-base leading-relaxed text-[#4F4137]";
+const FIELD = "mt-1 w-full rounded-xl border border-[#DCCFC7] bg-white px-3 py-2 font-sans text-base text-[#1C1410]";
+const LABEL = "block text-base font-semibold text-[#4F4137]";
 const SECONDARY =
-  "min-h-9 rounded-xl border border-[#453630] px-3 font-sans text-[12px] font-semibold text-[#1C1410] disabled:opacity-50";
+  "min-h-12 rounded-xl border border-[#453630] px-3 font-sans text-base font-semibold text-[#1C1410] disabled:opacity-50";
 const PRIMARY =
-  "min-h-9 rounded-xl bg-[#C6532B] px-3 font-sans text-[12px] font-bold text-[#FAF6F0] disabled:opacity-50";
+  "min-h-12 rounded-xl bg-[#C6532B] px-3 font-sans text-base font-bold text-[#FAF6F0] disabled:opacity-50";
 const OPEN_STATES: readonly Guarantee["state"][] = ["proposed", "accepted"];
 
 /**
@@ -121,7 +121,7 @@ export function CollateralPanel({
   const header = (
     <>
       <h3 className={HEADING}>{tr("collateral.title")}</h3>
-      <p data-testid="collateral-advisory" className="mt-1 text-[11px] font-semibold leading-4 text-[#6B4E16]">
+      <p data-testid="collateral-advisory" className="mt-1 text-base font-semibold leading-relaxed text-[#6B4E16]">
         {tr("collateral.advisory")}
       </p>
     </>
@@ -153,7 +153,7 @@ export function CollateralPanel({
       ? "border-[#A7F3D0] bg-[#ECFDF5] text-[#065F46]"
       : status === "flagged"
         ? "border-[#E5B450] bg-[#FBF3E2] text-[#6B4E16]"
-        : "border-[#DCCFC7] bg-[#F5EFEB] text-[#6F625D]";
+        : "border-[#DCCFC7] bg-[#F5EFEB] text-[#4F4137]";
 
   const candidatesFor = (winner: CollateralWinner, excludeGuarantor?: string): readonly string[] => {
     const open = new Set(
@@ -174,16 +174,16 @@ export function CollateralPanel({
         key={guarantee.guaranteeId}
         data-testid="guarantee-row"
         data-guarantee-state={guarantee.state}
-        className={`rounded-lg px-2.5 py-2 text-[12px] ${open ? "bg-[#F5EFEB]" : "bg-[#F5EFEB] opacity-70"}`}
+        className={`rounded-lg px-2.5 py-2 text-base ${open ? "bg-[#F5EFEB]" : "bg-[#F5EFEB] opacity-70"}`}
       >
         <p className="font-semibold text-[#1C1410]">
           {tr("collateral.guarantorRow", { member: who(guarantee.guarantorMemberId), winner: labelFor(winner.memberId) })}
         </p>
-        <p data-testid="guarantee-state" className="text-[11px] text-[#6F625D]">
+        <p data-testid="guarantee-state" className="text-base text-[#4F4137]">
           {tr(`collateral.state.${guarantee.state}` as MessageKey)}
         </p>
         {guarantee.reason && !open ? (
-          <p className="text-[11px] text-[#6F625D]">{tr("collateral.state.reason", { reason: guarantee.reason })}</p>
+          <p className="text-base text-[#4F4137]">{tr("collateral.state.reason", { reason: guarantee.reason })}</p>
         ) : null}
 
         {/* Only the guarantor is offered the confirm/decline controls: it is their promise. */}
@@ -369,7 +369,7 @@ export function CollateralPanel({
             </dl>
           )}
           {summary.reserveCoversOverdue !== null && summary.flaggedCount > 0 ? (
-            <p data-testid="collateral-covers" className={`mt-2 text-[11px] font-semibold ${summary.reserveCoversOverdue ? "text-[#065F46]" : "text-[#863214]"}`}>
+            <p data-testid="collateral-covers" className={`mt-2 text-base font-semibold ${summary.reserveCoversOverdue ? "text-[#065F46]" : "text-[#863214]"}`}>
               {tr(summary.reserveCoversOverdue ? "collateral.reserveCovers" : "collateral.reserveShort")}
             </p>
           ) : null}
@@ -387,7 +387,7 @@ export function CollateralPanel({
               const candidates = candidatesFor(winner);
               return (
                 <li key={winner.memberId} data-testid="collateral-winner" data-winner-id={winner.memberId} className="rounded-xl border border-[#E4D9CE] p-3">
-                  <p className="text-[13px] font-bold text-[#1C1410]">
+                  <p className="text-base font-bold text-[#1C1410]">
                     {tr("collateral.winnerTitle", { member: who(winner.memberId), round: winner.round })}
                   </p>
                   {winner.owed.length === 0 ? (
@@ -408,7 +408,7 @@ export function CollateralPanel({
                             key={entry.round}
                             data-testid="collateral-round"
                             data-round-status={entry.status}
-                            className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusTone(entry.status)}`}
+                            className={`rounded-full border px-2 py-0.5 text-base font-semibold ${statusTone(entry.status)}`}
                           >
                             {roundLabel(entry)}
                           </li>
@@ -417,7 +417,7 @@ export function CollateralPanel({
                     </>
                   )}
 
-                  <p className="mt-3 text-[11px] font-bold uppercase tracking-wide text-[#6F625D]">{tr("collateral.guarantors")}</p>
+                  <p className="mt-3 text-base font-bold   text-[#4F4137]">{tr("collateral.guarantors")}</p>
                   {winner.guarantees.length === 0 ? (
                     <p data-testid="collateral-no-guarantor" className={HINT}>
                       {tr("collateral.noGuarantor")}
@@ -498,10 +498,10 @@ export function CollateralPanel({
         <p
           role={message.ok ? "status" : "alert"}
           data-testid="collateral-message"
-          className={`mt-2 text-[12px] font-semibold ${message.ok ? "text-[#065F46]" : "text-[#863214]"}`}
+          className={`mt-2 text-base font-semibold ${message.ok ? "text-[#065F46]" : "text-[#863214]"}`}
         >
           {message.text}
-          {message.detail ? <span className="mt-1 block font-mono text-[11px] font-normal">{message.detail}</span> : null}
+          {message.detail ? <span className="mt-1 block font-mono text-base font-normal">{message.detail}</span> : null}
         </p>
       ) : null}
     </section>
@@ -511,8 +511,8 @@ export function CollateralPanel({
 function Figure({ label, value, testId }: { readonly label: string; readonly value: string; readonly testId: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3 border-b border-dashed border-[#E4D9CE] pb-1.5 last:border-0">
-      <dt className="font-ethiopic text-[12px] text-[#6F625D]">{label}</dt>
-      <dd data-testid={testId} className="font-sans text-[13px] font-semibold tabular-nums text-[#1C1410]">
+      <dt className="font-ethiopic text-base text-[#4F4137]">{label}</dt>
+      <dd data-testid={testId} className="font-sans text-base font-semibold tabular-nums text-[#1C1410]">
         {value}
       </dd>
     </div>

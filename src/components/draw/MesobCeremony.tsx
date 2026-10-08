@@ -65,7 +65,7 @@ export function MesobCeremony({
     <section
       className="sened-draw-ceremony select-none rounded-[28px] px-5 pb-6 pt-7 text-center"
       aria-live="polite"
-      aria-label={`የእጣ ሥርዓት — ${roundLabel}`}
+      aria-label={`የእጣ ሥርዓት: ${roundLabel}`}
     >
       {celebrating && !reducedMotion ? (
         <div className="sened-confetti is-falling" aria-hidden="true">
@@ -83,7 +83,7 @@ export function MesobCeremony({
         </div>
       ) : null}
 
-      <p className="font-ethiopic text-[13px] font-semibold tracking-[0.22em] text-[#F3C769]">
+      <p className="font-ethiopic text-[20px] font-bold leading-relaxed text-[#F3C769]">
         {roundLabel}
       </p>
 
@@ -99,8 +99,7 @@ export function MesobCeremony({
         </div>
 
         {phase === "sealed" || phase === "shaking" ? (
-          <div className="sened-seal absolute right-[14%] top-[6%] flex h-[46px] w-[46px] items-center justify-center rounded-full border-2 border-[#F3C769] bg-[#863214] text-[9px] font-bold leading-none tracking-tight text-[#F3C769]">
-            <span className="font-ethiopic">ቃል</span>
+          <div className="sened-seal absolute right-[14%] top-[6%] flex min-h-[48px] items-center justify-center rounded-2xl border-2 border-[#F3C769] bg-[#863214] px-3 text-base font-bold leading-none text-[#F3C769]">
             <span className="font-sans">{sealLabel ?? "SEALED"}</span>
           </div>
         ) : null}
@@ -111,22 +110,22 @@ export function MesobCeremony({
       <div className="mx-auto mt-5 min-h-[76px] max-w-[320px]">
         {celebrating ? (
           <>
-            <p className="font-ethiopic text-[26px] font-bold leading-tight text-[#FAF6F0]">
+            <p className="font-ethiopic text-[26px] font-bold leading-relaxed text-[#FAF6F0]">
               {winnerName ?? "አሸናፊ"}
             </p>
-            <p className="mt-1 text-[12px] font-medium tracking-[0.14em] text-[#D4A244]">
+            <p className="mt-1 text-[18px] font-semibold leading-relaxed text-[#F3C769]">
               እጣ ተጠናቋል
             </p>
           </>
         ) : phase === "shaking" ? (
-          <p className="text-[13px] font-medium text-[#EBE2D8]">
-            {reducedMotion ? "እጣዎች በመሶብ ውስጥ በመሆን ላይ እየተጠበቀ ነው" : "መሶቡ እየተጨማረ ነው…"}
+          <p className="text-[18px] font-medium leading-[1.6] text-[#EBE2D8]">
+            {reducedMotion ? "አሸናፊው እየተመረጠ ነው…" : "መሶቡ እየተነቀነቀ ነው…"}
           </p>
         ) : (
-          <p className="text-[13px] font-medium text-[#DDD0C2]">
+          <p className="text-[18px] font-medium leading-[1.6] text-[#EBE2D8]">
             {phase === "sealed"
-              ? "ቃል መዋጮው ተዘጋጅቷል፤ ዘመኑ እስኪተገልጥ አልተቻለም"
-              : "ሦስት ደረጃዎች — ቃል መዋጮ · መስበር · ማረጋገጥ"}
+              ? "እጣው ተቆልፏል። አሸናፊው ገና አልወጣም።"
+              : "እጣውን መቆለፍ፣ አሸናፊውን መምረጥ፣ ከዚያ ማረጋገጥ።"}
           </p>
         )}
       </div>

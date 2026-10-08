@@ -108,7 +108,7 @@ describe("JoinPanel", () => {
     hoisted.session = { status: "unconfigured" };
     openWith(`#token=${TOKEN}`);
     render(<JoinPanel initialLocale="en" />);
-    expect(await screen.findByText(/Sign-in is not configured in this build/)).toBeInTheDocument();
+    expect(await screen.findByText(/not switched on/)).toBeInTheDocument();
   });
 
   it("renders in Amharic", async () => {

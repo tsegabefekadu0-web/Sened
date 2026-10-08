@@ -251,15 +251,25 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden no-scrollbar">
-      <p
-        role="note"
-        data-testid="draw-demo-banner"
-        className="mx-auto mt-3 w-full max-w-md rounded-xl border border-[#E5B450] bg-[#FBF3E2] px-3 py-2 text-[12px] font-semibold leading-5 text-[#6B4E16] md:max-w-5xl"
-      >
-        {copy.demoBanner}
-        {demoNotice ? ` ${demoNotice}` : ""}
-      </p>
-      <MesobCeremony
+      <div className="px-4 pt-3">
+        <div
+          role="note"
+          data-testid="draw-demo-banner"
+          className="rounded-2xl border border-[#E5B450] bg-[#FBF3E2] px-4 py-3 text-[18px] font-semibold leading-[1.6] text-[#5E430F]"
+        >
+          <p>{copy.demoBanner}</p>
+          {demoNotice ? (
+            <details className="mt-1">
+              <summary className="flex min-h-12 cursor-pointer items-center text-base font-bold text-[#863214] underline underline-offset-4">
+                {locale === "am" ? "ተጨማሪ" : "More"}
+              </summary>
+              <p className="pb-1 text-base font-medium leading-relaxed">{demoNotice}</p>
+            </details>
+          ) : null}
+        </div>
+      </div>
+      <div className="px-4 pt-3">
+        <MesobCeremony
         phase={phase}
         reducedMotion={reducedMotion}
         roundLabel={copy.roundLabel(roundNumber, TOTAL_ROUNDS)}
@@ -270,12 +280,13 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
             : (eligible.find((member) => member.memberId === reveal.winnerMemberId)?.displayName ?? reveal.winnerMemberId)
         }
       />
+      </div>
 
-      <div className="mx-auto w-full max-w-md md:max-w-5xl md:grid md:grid-cols-12 md:gap-6 md:space-y-0 space-y-3 px-4 md:px-6 pb-6">
-        {/* Left Column on Desktop: Ceremony Action Card, Risk, Verification */}
-        <div className="md:col-span-6 space-y-3">
+      <div className="mt-3 w-full space-y-3 px-4 pb-6">
+        
+        <div className="space-y-3">
           <div className="sened-draw-shell rounded-[22px] border border-[#DCCFC7] p-4 shadow-card">
-            <h3 className="font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]">
+            <h3 className="font-ethiopic text-base font-bold  text-[#1C1410]">
               {copy.ceremonyTitle}
             </h3>
 
@@ -306,7 +317,7 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
             {error ? (
               <p
                 role="alert"
-                className="mt-3 rounded-xl border border-[#C6532B] bg-[#FDEDE6] px-3 py-2 text-[12px] font-semibold text-[#863214]"
+                className="mt-3 rounded-xl border border-[#C6532B] bg-[#FDEDE6] px-3 py-2 text-base font-semibold text-[#863214]"
               >
                 {error}
               </p>
@@ -329,7 +340,7 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
                     onChange={(event) => setTampersSeed(event.target.checked)}
                     className="mt-0.5 h-4 w-4 accent-[#C6532B]"
                   />
-                  <span className="text-[11px] leading-4 text-[#6B4E16]">
+                  <span className="text-base leading-relaxed text-[#6B4E16]">
                     {copy.tamperToggle}
                   </span>
                 </label>
@@ -350,17 +361,17 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
           ) : null}
         </div>
 
-        {/* Right Column on Desktop: Rotation & Commitment Sections */}
-        <div className="md:col-span-6 space-y-3">
+        
+        <div className="space-y-3">
           <section
             className="sened-draw-shell rounded-[22px] border border-[#DCCFC7] p-4 shadow-card"
             aria-label={copy.rotationTitle}
             data-draw-panel="rotation"
           >
-            <h3 className="font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]">
+            <h3 className="font-ethiopic text-base font-bold  text-[#1C1410]">
               {copy.rotationTitle}
             </h3>
-            <p className="mt-1.5 text-[12px] leading-5 text-[#6F625D]">{copy.rotationDetail}</p>
+            <p className="mt-1.5 text-base leading-relaxed text-[#4F4137]">{copy.rotationDetail}</p>
             <ul className="mt-3 space-y-1.5">
               {ROSTER.map((member) => {
                 const hasWon = winners.includes(member.memberId);
@@ -371,14 +382,14 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
                     className={[
                       "flex items-center justify-between gap-2 rounded-lg px-2.5 py-2",
                       hasWon
-                        ? "bg-[#F5EFEB] text-[#A0A0A0] line-through"
+                        ? "bg-[#F5EFEB] text-[#6B5E57] line-through"
                         : isEligible
                           ? "bg-[#ECFDF5] text-[#065F46]"
                           : "bg-[#FBF3E2] text-[#6B4E16]"
                     ].join(" ")}
                   >
-                    <span className="font-ethiopic text-[13px] font-semibold">{member.displayName}</span>
-                    <span className="font-sans text-[11px] font-semibold">
+                    <span className="font-ethiopic text-base font-semibold">{member.displayName}</span>
+                    <span className="font-sans text-base font-semibold">
                       {hasWon ? copy.alreadyWon : copy.eligible}
                     </span>
                   </li>
@@ -392,28 +403,28 @@ export function DrawBoard({ locale = "am", demoNotice }: DrawBoardProps) {
             aria-label={copy.commitmentTitle}
             data-draw-panel="commitment"
           >
-            <h3 className="font-ethiopic text-[15px] font-bold tracking-wide text-[#1C1410]">
+            <h3 className="font-ethiopic text-base font-bold  text-[#1C1410]">
               {copy.commitmentTitle}
             </h3>
             {commitment === null ? (
-              <p className="mt-2 text-[12px] text-[#6F625D]">{copy.commitmentIdle}</p>
+              <p className="mt-2 text-base text-[#4F4137]">{copy.commitmentIdle}</p>
             ) : (
               <dl className="mt-2 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1.5">
-                <dt className="text-[11px] font-semibold text-[#6F625D]">commitment</dt>
+                <dt className="text-base font-semibold text-[#4F4137]">commitment</dt>
                 <dd className="sened-hash">{commitment.commitment}</dd>
-                <dt className="text-[11px] font-semibold text-[#6F625D]">rosterDigest</dt>
+                <dt className="text-base font-semibold text-[#4F4137]">rosterDigest</dt>
                 <dd className="sened-hash">{rosterDigest}</dd>
-                <dt className="text-[11px] font-semibold text-[#6F625D]">{copy.participants}</dt>
-                <dd className="font-sans text-[12px] font-semibold">{commitment.participants.length}</dd>
-                <dt className="text-[11px] font-semibold text-[#6F625D]">pot</dt>
-                <dd className="font-sans text-[12px] font-semibold">
+                <dt className="text-base font-semibold text-[#4F4137]">{copy.participants}</dt>
+                <dd className="font-sans text-base font-semibold">{commitment.participants.length}</dd>
+                <dt className="text-base font-semibold text-[#4F4137]">pot</dt>
+                <dd className="font-sans text-base font-semibold">
                   {formatEtbDisplay(POT_AMOUNT)} {copy.currency}
                 </dd>
               </dl>
             )}
           </section>
 
-          <p className="px-1 text-[11px] leading-4 text-[#8A7C74]">{copy.localNote}</p>
+          <p className="px-1 text-base leading-relaxed text-[#4F4137]">{copy.localNote}</p>
         </div>
       </div>
     </div>
@@ -438,19 +449,19 @@ function Step({
       <span
         aria-hidden="true"
         className={[
-          "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold",
+          "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-base font-bold",
           done
             ? "bg-[#16A34A] text-white"
             : active
               ? "bg-[#C6532B] text-white"
-              : "bg-[#E4D9CE] text-[#8A7C74]"
+              : "bg-[#E4D9CE] text-[#4F4137]"
         ].join(" ")}
       >
         {done ? "✓" : index}
       </span>
       <span className="min-w-0">
-        <span className="block font-ethiopic text-[13px] font-bold text-[#1C1410]">{label}</span>
-        <span className="block text-[11px] leading-4 text-[#6F625D]">{detail}</span>
+        <span className="block font-ethiopic text-base font-bold text-[#1C1410]">{label}</span>
+        <span className="block text-base leading-relaxed text-[#4F4137]">{detail}</span>
       </span>
     </li>
   );
@@ -467,7 +478,7 @@ function ActionButton({
     <button
       type="button"
       onClick={onClick}
-      className="min-h-11 w-full rounded-2xl bg-[#C6532B] px-4 py-3 font-ethiopic text-[15px] font-bold tracking-wide text-[#FAF6F0] shadow-[0_8px_20px_rgba(198,83,43,0.32)] transition-transform active:scale-[0.98]"
+      className="min-h-12 w-full rounded-2xl bg-[#C6532B] px-4 py-3 font-ethiopic text-base font-bold  text-[#FAF6F0] shadow-[0_8px_20px_rgba(198,83,43,0.32)] transition-transform active:scale-[0.98]"
     >
       {label}
     </button>

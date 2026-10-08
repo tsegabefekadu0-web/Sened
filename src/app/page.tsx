@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { Mic } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Header } from "@/components/shell/Header";
 import { WorkspaceLinks } from "@/components/shell/WorkspaceLinks";
@@ -11,7 +12,8 @@ import {
   type MemberContribution,
   type PayerAttribution
 } from "@/components/contributions/ContributionFeed";
-import { BottomVoiceNav } from "@/components/navigation/BottomVoiceNav";
+import { BottomNav } from "@/components/navigation/BottomNav";
+import { AppFrame } from "@/components/shell/AppFrame";
 import { VoiceModal } from "@/components/voice/VoiceModal";
 import { AudioDigestModal } from "@/components/voice/AudioDigestModal";
 import { ProfilePanel } from "@/components/shell/ProfilePanel";
@@ -80,9 +82,8 @@ const referenceContributions: MemberContribution[] = [
   {
     id: "1",
     memberId: "sample-member-1",
-    name: "Ethiopian elders, Members",
+    name: "አቶ በቀለ ገ",
     avatar: "/avatars/elder_photo.png",
-    secondaryAvatar: "/avatars/man_photo.png",
     channel: "telebirr",
     transactionId: "C0970153",
     status: "PROVISIONAL"
@@ -90,7 +91,7 @@ const referenceContributions: MemberContribution[] = [
   {
     id: "2",
     memberId: "sample-member-2",
-    name: "Gabi Member",
+    name: "ወ/ሮ አልማዝ ተ",
     avatar: "/avatars/woman_photo.png",
     channel: "cbe",
     transactionId: "C0370320",
@@ -131,7 +132,7 @@ export default function SenedHome() {
   // (loading, unconfigured, signed out) keeps the on-device provisional path.
   const session = useSession();
   const signedIn = session.status === "signed-in";
-  const [activeTab, setActiveTab] = useState<"home" | "ledger" | "members" | "profile">("home");
+  const [activeTab, setActiveTab] = useState<"home" | "profile">("home");
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isDigestModalOpen, setIsDigestModalOpen] = useState(false);
   // Text the voice assistant handed over for review in the existing draft modal.
@@ -334,70 +335,79 @@ export default function SenedHome() {
   );
 
   return (
-    <main className="min-h-screen w-full bg-[#120D0A] flex flex-col items-center justify-center sm:py-6 antialiased selection:bg-amber-500 selection:text-coffee-950">
-      {/* Responsive Shell Frame: Native 100% on phone, expansive premium dashboard canvas on desktop */}
-      <div className="w-full md:max-w-5xl lg:max-w-6xl bg-[#FAF6F0] h-[100dvh] md:h-[92vh] md:min-h-[820px] md:max-h-[960px] flex flex-col relative overflow-hidden md:rounded-3xl md:border md:border-[#382B24]/50 md:shadow-[0_25px_80px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.06)]">
-        {/* Dark Ethiopian Coffee Header with Embroidery, Meskel Cross & Audio Plaque */}
-        <Header
-          locale={locale}
-          onOpenDigest={() => setIsDigestModalOpen(true)}
-          isPlayingAudio={isDigestModalOpen}
-        />
+    <AppFrame>
+      {/* Dark Ethiopian header: diamond border, group name, gold listen pill */}
+      <Header
+        locale={locale}
+        onOpenDigest={() => setIsDigestModalOpen(true)}
+        isPlayingAudio={isDigestModalOpen}
+      />
 
-        {/* Main Content Area: Native vertical stream on mobile, 2-column responsive dashboard on desktop */}
-        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden no-scrollbar">
-          <div className="w-full md:grid md:grid-cols-12 md:gap-6 md:p-6 md:items-start max-w-5xl mx-auto">
-            {/* Left Column on Desktop: Debter Treasury Card & Built Tools */}
-            <div className="md:col-span-6 space-y-4">
-              {notice !== null && (
-                <p
-                  role={home.kind === "live" && home.result.status !== "empty" && home.result.status !== "ready" ? "alert" : "status"}
-                  className="mx-4 md:mx-0 mt-4 rounded-xl border border-dashed border-[#C6532B]/50 bg-[#FBEFE6] px-3 py-2 text-xs font-semibold leading-5 text-[#8A4B2A]"
-                >
-                  {notice}
-                </p>
-              )}
-              <DebterCard potBalance={potBalance} onDrawClick={() => router.push("/draw")} />
-              <WorkspaceLinks locale={locale} />
-              {/* Owner / treasurer only (the same gate as "attribute payer"): a quick way in
-                  to the record-contribution form on the ledger page. */}
-              {payerAttribution ? (
-                <p className="px-4 md:px-0">
-                  <Link
-                    href="/ledger#record-contribution"
-                    data-testid="home-record-contribution"
-                    className="flex min-h-11 w-full flex-col justify-center rounded-2xl border border-[#C6532B]/40 bg-[#FBEFE6] px-4 py-2.5 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
-                  >
-                    <span className="text-sm font-bold text-[#8A4B2A]">{t("home.record.cta")}</span>
-                    <span className="text-xs leading-5 text-[#6B5B4E]">{t("home.record.ctaHelp")}</span>
-                  </Link>
-                </p>
-              ) : null}
-              <p className="px-4 md:px-0 text-center">
-                <Link
-                  href="/sign-in"
-                  className="inline-flex min-h-11 items-center text-xs font-semibold text-[#8A4B2A] underline underline-offset-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
-                >
-                  {signedIn ? t("auth.linkSignedIn") : t("auth.link")}
-                </Link>
-              </p>
-            </div>
-
-            {/* Right Column on Desktop: Member Contribution Feed */}
-            <div className="md:col-span-6">
-              <ContributionFeed contributions={contributions} locale={locale} attribution={payerAttribution} />
-            </div>
+      {/* One column, top to bottom: balance, the one big action, the list, then the quiet links.
+          The bottom padding keeps the last row clear of the navigation bar. */}
+      <div className="no-scrollbar min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-8">
+        <div className="space-y-4">
+          {notice !== null && (
+            <p
+              role={home.kind === "live" && home.result.status !== "empty" && home.result.status !== "ready" ? "alert" : "status"}
+              className="mx-4 mt-9 rounded-2xl border border-dashed border-[#A9411D]/60 bg-[#FBEFE6] px-4 py-3 font-ethiopic text-[18px] font-semibold leading-[1.65] text-[#6E3414]"
+            >
+              {notice}
+            </p>
+          )}
+          <div className={notice !== null ? "[&>div]:pt-0" : ""}>
+            <DebterCard potBalance={potBalance} onDrawClick={() => router.push("/draw")} />
           </div>
-        </div>
 
-        {/* Curved Dark Espresso Voice Navigation Bar.
-            The slots are real where a destination exists and say so plainly
-            where one does not — see `TabPanel` below. */}
-        <BottomVoiceNav
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          onVoiceClick={() => setIsVoiceModalOpen(true)}
-        />
+          {/* The one thing people do most: say a contribution out loud. */}
+          <div className="px-4">
+            <button
+              type="button"
+              onClick={() => setIsVoiceModalOpen(true)}
+              className="flex min-h-[76px] w-full items-center gap-4 rounded-2xl border-2 border-[#F3C769]/70 bg-gradient-to-b from-[#B84A22] to-[#8F2D12] px-4 py-3 text-left text-white shadow-[0_10px_22px_rgba(143,45,18,0.35)] transition-transform active:scale-[0.98] focus:outline-none focus-visible:ring-4 focus-visible:ring-[#F3C769]"
+            >
+              <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[#1A1412] ring-2 ring-[#F3C769]">
+                <Mic className="h-7 w-7 text-[#F3C769]" aria-hidden="true" />
+              </span>
+              <span className="min-w-0">
+                <span className="block font-ethiopic text-[22px] font-bold leading-snug">{t("shell.nav.voiceAria")}</span>
+                <span className="block font-ethiopic text-[18px] leading-snug text-[#FFE9DA]">{t("home.speak.hint")}</span>
+              </span>
+            </button>
+          </div>
+
+          {/* Owner / treasurer only (the same gate as "attribute payer"): a quick way in
+              to the record-contribution form on the ledger page. */}
+          {payerAttribution ? (
+            <p className="px-4">
+              <Link
+                href="/ledger#record-contribution"
+                data-testid="home-record-contribution"
+                className="flex min-h-[64px] w-full flex-col justify-center rounded-2xl border border-[#A9411D]/50 bg-[#FBEFE6] px-4 py-2.5 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
+              >
+                <span className="font-ethiopic text-[18px] font-bold leading-snug text-[#6E3414]">{t("home.record.cta")}</span>
+                <span className="font-ethiopic text-base leading-snug text-[#4F4137]">{t("home.record.ctaHelp")}</span>
+              </Link>
+            </p>
+          ) : null}
+
+          <ContributionFeed contributions={contributions} locale={locale} attribution={payerAttribution} />
+
+          <WorkspaceLinks locale={locale} />
+
+          <p className="px-4 text-center">
+            <Link
+              href="/sign-in"
+              className="inline-flex min-h-12 items-center px-4 font-ethiopic text-[18px] font-bold text-[#6E3414] underline underline-offset-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
+            >
+              {signedIn ? t("auth.linkSignedIn") : t("auth.link")}
+            </Link>
+          </p>
+        </div>
+      </div>
+
+      {/* The one navigation: four places, each with its name under its icon. */}
+      <BottomNav activeTab={activeTab} onTabChange={setActiveTab} locale={locale} />
 
         {activeTab === "profile" && signedIn && (
           <ProfilePanel onBack={() => setActiveTab("home")} locale={locale} />
@@ -438,7 +448,6 @@ export default function SenedHome() {
           contributedCount={home.kind === "sample" ? SAMPLE_CONTRIBUTED_COUNT : undefined}
           totalMembers={home.kind === "sample" ? SAMPLE_TOTAL_MEMBERS : undefined}
         />
-      </div>
-    </main>
+    </AppFrame>
   );
 }

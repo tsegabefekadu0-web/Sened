@@ -51,20 +51,20 @@ export function HapticsToggle({ locale }: { readonly locale: Locale }) {
   return (
     <div data-testid="haptics-toggle" className="border-b border-[#DCCFC7] bg-[#FAF6F0] px-4 py-2">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-[12px] font-semibold text-[#1C1410]">{translate(locale, "draw.haptics.label")}</span>
+        <span className="text-base font-semibold text-[#1C1410]">{translate(locale, "draw.haptics.label")}</span>
         <button
           type="button"
           role="switch"
           aria-checked={supported && enabled}
           disabled={!supported}
           onClick={() => setHapticsEnabled(!enabled)}
-          className="min-h-9 min-w-[64px] rounded-xl border border-[#DCCFC7] px-3 text-[11px] font-semibold text-[#1C1410] disabled:opacity-50"
+          className="min-h-12 min-w-[64px] rounded-xl border border-[#DCCFC7] px-3 text-base font-semibold text-[#1C1410] disabled:opacity-50"
         >
           {supported && enabled ? translate(locale, "draw.haptics.on") : translate(locale, "draw.haptics.off")}
         </button>
       </div>
       {note ? (
-        <p data-testid="haptics-note" className="mt-1 text-[11px] leading-4 text-[#6F625D]">
+        <p data-testid="haptics-note" className="mt-1 text-base leading-relaxed text-[#4F4137]">
           {note}
         </p>
       ) : null}

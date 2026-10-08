@@ -363,7 +363,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
   }
 
   const inputClass =
-    "mt-2 block min-h-11 w-full rounded-xl border border-coffee-900/20 bg-white/75 px-3 text-sm text-coffee-900 focus:border-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50";
+    "mt-2 block min-h-12 w-full rounded-xl border border-coffee-900/20 bg-white/75 px-3 text-base text-coffee-900 focus:border-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50";
   const errorFor = (name: FieldError) => (fieldError === name ? name : null);
 
   return (
@@ -387,30 +387,30 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
 
         <div className="rounded-2xl border border-coffee-900/15 bg-parchment-50 p-6 shadow-card sm:p-8">
           {!signedIn ? (
-            <p data-testid="record-state" className="text-sm leading-6 text-inkMuted">
+            <p data-testid="record-state" className="text-base leading-6 text-inkMuted">
               {t("record.signIn")}
             </p>
           ) : context === "loading" ? (
-            <p role="status" data-testid="record-state" className="text-sm font-semibold leading-6 text-inkMuted">
+            <p role="status" data-testid="record-state" className="text-base font-semibold leading-6 text-inkMuted">
               {t("record.loading")}
             </p>
           ) : context.status !== "ready" ? (
             <p
               role={context.status === "read-only" ? "status" : "alert"}
               data-testid="record-state"
-              className="flex items-start gap-2 text-sm font-semibold leading-6 text-terracotta-700"
+              className="flex items-start gap-2 text-base font-semibold leading-6 text-terracotta-700"
             >
               <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
               {t(CONTEXT_MESSAGES[context.status])}
             </p>
           ) : (
             <form aria-labelledby="record-heading" onSubmit={(event) => void submit(event)} noValidate>
-              <p data-testid="record-target-group" className="mb-5 text-sm font-semibold text-coffee-900">
+              <p data-testid="record-target-group" className="mb-5 text-base font-semibold text-coffee-900">
                 {t("record.targetGroup", { group: context.groupName || shortGroupId(context.groupId) })}
               </p>
               <div className="grid gap-5 sm:grid-cols-2">
                 <div>
-                  <label htmlFor="record-amount" className="text-sm font-bold text-coffee-900">
+                  <label htmlFor="record-amount" className="text-base font-bold text-coffee-900">
                     {t("record.amountLabel")} <span aria-hidden="true">*</span>
                   </label>
                   <input
@@ -428,14 +428,14 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                     aria-describedby={errorFor("amount") ? "record-amount-help record-amount-error" : "record-amount-help"}
                     className={inputClass}
                   />
-                  <p id="record-amount-help" className="mt-2 text-xs leading-5 text-inkMuted">
+                  <p id="record-amount-help" className="mt-2 text-base leading-relaxed text-inkMuted">
                     {t("record.amountHelp")}
                   </p>
                   {errorFor("amount") ? <FieldMessage id="record-amount-error" text={t("record.error.amount")} /> : null}
                 </div>
 
                 <div>
-                  <label htmlFor="record-date" className="text-sm font-bold text-coffee-900">
+                  <label htmlFor="record-date" className="text-base font-bold text-coffee-900">
                     {t("record.dateLabel")} <span aria-hidden="true">*</span>
                   </label>
                   <input
@@ -456,7 +456,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                 </div>
 
                 <div className="sm:col-span-2">
-                  <label htmlFor="record-payer" className="text-sm font-bold text-coffee-900">
+                  <label htmlFor="record-payer" className="text-base font-bold text-coffee-900">
                     {t("record.payerLabel")} <span aria-hidden="true">*</span>
                   </label>
                   <select
@@ -482,7 +482,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                 </div>
 
                 <div>
-                  <label htmlFor="record-channel" className="text-sm font-bold text-coffee-900">
+                  <label htmlFor="record-channel" className="text-base font-bold text-coffee-900">
                     {t("record.channelLabel")}
                   </label>
                   <select
@@ -504,7 +504,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                 </div>
 
                 <div>
-                  <label htmlFor="record-note" className="text-sm font-bold text-coffee-900">
+                  <label htmlFor="record-note" className="text-base font-bold text-coffee-900">
                     {t("record.noteLabel")}
                   </label>
                   <input
@@ -521,7 +521,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                     aria-describedby={errorFor("note") ? "record-note-help record-note-error" : "record-note-help"}
                     className={inputClass}
                   />
-                  <p id="record-note-help" className="mt-2 text-xs leading-5 text-inkMuted">
+                  <p id="record-note-help" className="mt-2 text-base leading-relaxed text-inkMuted">
                     {t("record.noteHelp")}
                   </p>
                   {errorFor("note") ? <FieldMessage id="record-note-error" text={t("record.error.note")} /> : null}
@@ -530,7 +530,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                 {context.cyclesLoaded ? (
                   <>
                     <div>
-                      <label htmlFor="record-cycle" className="text-sm font-bold text-coffee-900">
+                      <label htmlFor="record-cycle" className="text-base font-bold text-coffee-900">
                         {t("record.cycleLabel")}
                       </label>
                       <select
@@ -548,7 +548,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                       </select>
                     </div>
                     <div>
-                      <label htmlFor="record-round" className="text-sm font-bold text-coffee-900">
+                      <label htmlFor="record-round" className="text-base font-bold text-coffee-900">
                         {t("record.roundLabel")}
                       </label>
                       <input
@@ -571,7 +571,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                         className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-60`}
                       />
                       {cycle ? (
-                        <p id="record-round-help" className="mt-2 text-xs leading-5 text-inkMuted">
+                        <p id="record-round-help" className="mt-2 text-base leading-relaxed text-inkMuted">
                           {cycle.nextRound === null
                             ? t("record.roundHelp", { total: cycle.totalRounds })
                             : t("record.roundHelpNext", { total: cycle.totalRounds, next: cycle.nextRound })}
@@ -590,7 +590,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                     </div>
                   </>
                 ) : (
-                  <p className="text-xs leading-5 text-inkMuted sm:col-span-2" data-testid="record-cycles-unavailable">
+                  <p className="text-base leading-relaxed text-inkMuted sm:col-span-2" data-testid="record-cycles-unavailable">
                     {t("record.cyclesUnavailable")}
                   </p>
                 )}
@@ -601,14 +601,14 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                   type="submit"
                   disabled={submitting}
                   aria-busy={submitting}
-                  className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-terracotta-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-terracotta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+                  className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-terracotta-600 px-4 py-2.5 text-base font-bold text-white transition-colors hover:bg-terracotta-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
                 >
                   {submitting ? t("record.saving") : t("record.submit")}
                 </button>
               </div>
 
               {submitting ? (
-                <p role="status" className="mt-4 text-xs font-semibold leading-5 text-inkMuted">
+                <p role="status" className="mt-4 text-base font-semibold leading-relaxed text-inkMuted">
                   {t("record.saving")}
                 </p>
               ) : null}
@@ -617,7 +617,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
                 <p
                   role="alert"
                   data-testid="record-failure"
-                  className="mt-4 flex items-start gap-2 text-xs font-semibold leading-5 text-terracotta-700"
+                  className="mt-4 flex items-start gap-2 text-base font-semibold leading-relaxed text-terracotta-700"
                 >
                   <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
                   {t(FAILURE_MESSAGES[failure])}
@@ -625,7 +625,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
               ) : null}
 
               {lateResult ? (
-                <p role="status" data-testid="record-late-result" className="mt-4 text-xs font-semibold leading-5 text-inkMuted">
+                <p role="status" data-testid="record-late-result" className="mt-4 text-base font-semibold leading-relaxed text-inkMuted">
                   {t(lateResult.saved ? "record.lateSaved" : "record.lateUnknown", { group: lateResult.group })}
                 </p>
               ) : null}
@@ -649,7 +649,7 @@ export function RecordContributionForm({ locale = "en", deps }: RecordContributi
 
 function FieldMessage({ id, text }: { readonly id: string; readonly text: string }) {
   return (
-    <p id={id} role="alert" className="mt-2 flex items-start gap-2 text-xs font-semibold leading-5 text-terracotta-700">
+    <p id={id} role="alert" className="mt-2 flex items-start gap-2 text-base font-semibold leading-relaxed text-terracotta-700">
       <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" />
       {text}
     </p>
@@ -675,7 +675,7 @@ function PostedResult({
     <div
       role="status"
       data-testid="record-result"
-      className={`mt-5 flex items-start gap-3 rounded-xl border p-4 text-sm leading-6 ${
+      className={`mt-5 flex items-start gap-3 rounded-xl border p-4 text-base leading-6 ${
         attributed ? "border-[#B7DFC1] bg-[#EFFAF1] text-[#166534]" : "border-[#E5C9A8] bg-[#FBF1E3] text-[#7A4B12]"
       }`}
     >
@@ -713,12 +713,12 @@ function PostedResult({
               type="button"
               onClick={onRetry}
               disabled={retrying}
-              className="mt-3 inline-flex min-h-11 items-center justify-center rounded-xl border border-coffee-900/25 bg-white/70 px-4 text-sm font-bold text-coffee-900 transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50 disabled:cursor-not-allowed disabled:opacity-60"
+              className="mt-3 inline-flex min-h-12 items-center justify-center rounded-xl border border-coffee-900/25 bg-white/70 px-4 text-base font-bold text-coffee-900 transition-colors hover:border-terracotta hover:text-terracotta focus:outline-none focus-visible:ring-2 focus-visible:ring-terracotta focus-visible:ring-offset-2 focus-visible:ring-offset-parchment-50 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {retrying ? t("record.retrying") : t("record.retry")}
             </button>
             {retryError ? (
-              <p role="alert" data-testid="record-retry-error" className="mt-2 text-xs font-semibold">
+              <p role="alert" data-testid="record-retry-error" className="mt-2 text-base font-semibold">
                 {t(retryError)}
               </p>
             ) : null}

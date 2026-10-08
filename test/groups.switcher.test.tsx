@@ -189,6 +189,6 @@ describe("Header", () => {
     );
     const select = await screen.findByRole("combobox", { name: "Group" });
     expect(select.className).toContain("w-full");
-    expect(select.className).toContain("min-h-11");
+    expect(select.className).toContain("min-h-12");
   });
 });

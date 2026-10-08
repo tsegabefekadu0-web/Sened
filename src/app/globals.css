@@ -200,3 +200,22 @@ body {
   border-radius: 2px;
   margin: 0 auto;
 }
+
+/*
+ * The Voxide launcher is fixed 24px from the bottom by the widget itself and the
+ * widget has no offset prop, so it would sit on top of the bottom navigation bar.
+ * Lift it clear of the bar (about 4.5rem tall plus the phone safe area).
+ */
+.vx-enter[style*="2147483647"] {
+  bottom: calc(6rem + env(safe-area-inset-bottom)) !important;
+}
+
+
+/*
+ * The Voxide launcher is fixed 24px from the bottom by the widget itself and the
+ * widget has no offset prop, so it would sit on top of the bottom navigation bar.
+ * Lift it clear of the bar (about 4.5rem tall plus the phone safe area).
+ */
+.vx-enter[style*="2147483647"] {
+  bottom: calc(6rem + env(safe-area-inset-bottom)) !important;
+}

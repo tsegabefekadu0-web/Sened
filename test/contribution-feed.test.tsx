@@ -54,7 +54,7 @@ describe("a provisional contribution is shown as pending, never as verified", ()
 
     await user.click(screen.getByText("Gabi Member"));
 
-    expect(screen.getByText("በመጠባበቅ ላይ — አልተረጋገጠም")).toBeInTheDocument();
+    expect(screen.getByText("በመጠባበቅ ላይ፤ አልተረጋገጠም")).toBeInTheDocument();
     expect(screen.getByText(/ይህ ልይል ከተናገረ ስለሆነ ነው/)).toBeInTheDocument();
 
     // The two fabrications this file exists to prevent.

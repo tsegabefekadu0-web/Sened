@@ -206,12 +206,12 @@ export function AudioDigestModal({
         </button>
 
         <div className="text-center mb-4">
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gold-500/20 text-gold-300 border border-gold-500/30 text-xs font-bold mb-2">
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gold-500/20 text-gold-300 border border-gold-500/30 text-base font-bold mb-2">
             <Volume2 className="w-3.5 h-3.5 text-gold-400" />
             {t("audio.badge")}
           </div>
           <h2 className="text-xl font-bold font-ethiopic text-parchment-50">{t("audio.title")}</h2>
-          <p className="text-xs text-parchment-300">{t("audio.subtitle")}</p>
+          <p className="text-base text-parchment-300">{t("audio.subtitle")}</p>
         </div>
 
         <div className="p-4 rounded-2xl bg-coffee-950 border border-coffee-800 flex flex-col items-center justify-center gap-3 my-4">
@@ -247,7 +247,7 @@ export function AudioDigestModal({
             <div className="bg-gold-400 h-full" style={{ width: `${Math.round(progress * 100)}%` }} />
           </div>
 
-          <div className="w-full flex items-center justify-between text-[11px] font-mono text-parchment-300">
+          <div className="w-full flex items-center justify-between text-base font-mono text-parchment-300">
             <span>{Math.round(progress * 100)}%</span>
             <span className="text-gold-400 font-semibold font-ethiopic" aria-live="polite">
               {statusLabel()}
@@ -277,7 +277,7 @@ export function AudioDigestModal({
           className="p-4 rounded-2xl bg-parchment-100 text-coffee-950 border border-parchment-300 shadow-inner mb-5 max-h-36 overflow-y-auto"
           aria-label={t("audio.captionLabel")}
         >
-          <p className="text-xs sm:text-sm font-medium font-ethiopic leading-relaxed">{digestScript}</p>
+          <p className="text-base sm:text-base font-medium font-ethiopic leading-relaxed">{digestScript}</p>
         </div>
 
         {/* ── Playback controls: play, pause, speed ───────────────────────── */}
@@ -318,7 +318,7 @@ export function AudioDigestModal({
         </div>
 
         <div className="flex items-center justify-center gap-3">
-          <span className="text-[10px] uppercase tracking-wider text-parchment-400">
+          <span className="text-base   text-parchment-400">
             {t("audio.speedLabel")}
           </span>
           <div

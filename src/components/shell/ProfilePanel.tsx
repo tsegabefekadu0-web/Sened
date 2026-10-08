@@ -112,23 +112,23 @@ export function ProfilePanel({
   return (
     <section
       aria-label={t("tab.panels.profile")}
-      className="absolute inset-x-0 top-[132px] z-40 mx-4 max-w-[364px] rounded-3xl border border-[#DECDBB] bg-[#FAF6F0] p-5 shadow-[0_18px_40px_-12px_rgba(38,30,26,0.45)]"
+      className="absolute inset-x-4 top-[132px] z-40 rounded-3xl border border-[#DECDBB] bg-[#FAF6F0] p-5 shadow-[0_18px_40px_-12px_rgba(38,30,26,0.45)]"
     >
       <div className="flex items-center gap-3">
         <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[#F0E6D8] text-[#A3441F]">
           <User className="h-5 w-5 stroke-[2.2]" aria-hidden="true" />
         </span>
-        <h2 className="font-ethiopic text-lg font-bold text-[#1F1714]">{t("tab.panels.profile")}</h2>
+        <h2 className="font-ethiopic text-[22px] font-bold text-[#1F1714]">{t("tab.panels.profile")}</h2>
       </div>
 
       <GroupSwitcher locale={locale} tone="light" className="mt-3" />
 
       {load.status === "loading" ? (
-        <p role="status" className="mt-3 text-sm text-[#6B5B4E]">
+        <p role="status" className="mt-3 text-base text-[#4F4137]">
           {t("profile.loading")}
         </p>
       ) : load.status !== "ready" ? (
-        <p role={load.status === "error" ? "alert" : "status"} className="mt-3 text-sm leading-relaxed text-[#6B5B4E]">
+        <p role={load.status === "error" ? "alert" : "status"} className="mt-3 text-base leading-relaxed text-[#4F4137]">
           {t(LOAD_NOTICE[load.status])}
         </p>
       ) : (
@@ -140,13 +140,13 @@ export function ProfilePanel({
             attireLabel={attireLabel}
           />
           <fieldset className="min-w-0 flex-1" disabled={save === "saving"}>
-            <legend className="text-sm font-bold text-[#1F1714]">{t("profile.attire.legend")}</legend>
-            <p className="mt-1 text-xs leading-relaxed text-[#6B5B4E]">{t("profile.attire.hint")}</p>
+            <legend className="text-base font-bold text-[#1F1714]">{t("profile.attire.legend")}</legend>
+            <p className="mt-1 text-base leading-relaxed text-[#4F4137]">{t("profile.attire.hint")}</p>
             <div className="mt-2 space-y-1.5">
               {OPTIONS.map((option) => (
                 <label
                   key={option.value}
-                  className="flex cursor-pointer items-start gap-2 rounded-xl border border-[#DECDBB] bg-white/60 px-2.5 py-2 has-[:checked]:border-[#C6532B] has-[:checked]:bg-[#FBEFE6] has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[#C6532B]"
+                  className="flex cursor-pointer items-start gap-2 min-h-12 rounded-xl border border-[#DECDBB] bg-white/60 px-3 py-2.5 has-[:checked]:border-[#C6532B] has-[:checked]:bg-[#FBEFE6] has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[#C6532B]"
                 >
                   <input
                     type="radio"
@@ -154,16 +154,16 @@ export function ProfilePanel({
                     value={option.value}
                     checked={attire === option.value}
                     onChange={() => choose(option.value)}
-                    className="mt-0.5 h-4 w-4 accent-[#C6532B]"
+                    className="mt-0.5 h-6 w-6 accent-[#C6532B]"
                   />
                   <span className="min-w-0">
-                    <span className="block text-sm font-semibold text-[#1F1714]">{t(option.label)}</span>
-                    <span className="block text-xs text-[#6B5B4E]">{t(option.hint)}</span>
+                    <span className="block text-base font-semibold text-[#1F1714]">{t(option.label)}</span>
+                    <span className="block text-base text-[#4F4137]">{t(option.hint)}</span>
                   </span>
                 </label>
               ))}
             </div>
-            <p role={save === "error" ? "alert" : "status"} className="mt-2 min-h-[1rem] text-xs font-semibold text-[#6B5B4E]">
+            <p role={save === "error" ? "alert" : "status"} className="mt-2 min-h-[1rem] text-base font-semibold text-[#4F4137]">
               {save === "saving" ? t("profile.attire.saving") : save === "saved" ? t("profile.attire.saved") : save === "error" ? t("profile.attire.saveError") : ""}
             </p>
           </fieldset>
@@ -173,7 +173,7 @@ export function ProfilePanel({
       <button
         type="button"
         onClick={onBack}
-        className="mt-4 inline-flex items-center gap-1.5 text-sm font-semibold text-[#8A7A6D] hover:text-[#3D2E27] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
+        className="mt-4 inline-flex min-h-12 items-center gap-1.5 text-[18px] font-bold text-[#4F4137] hover:text-[#3D2E27] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C6532B]"
       >
         <ArrowLeft className="h-4 w-4" aria-hidden="true" />
         {t("tab.panels.back")}

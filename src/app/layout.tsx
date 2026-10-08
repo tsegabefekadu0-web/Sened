@@ -36,6 +36,9 @@ export const metadata: Metadata = {
     title: "Sened",
     statusBarStyle: "black-translucent"
   },
+  // Chrome deprecated apple-mobile-web-app-capable (emitted above for iOS) in
+  // favour of this standard tag; both are kept so neither platform loses it.
+  other: { "mobile-web-app-capable": "yes" },
   icons: {
     icon: [
       { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },

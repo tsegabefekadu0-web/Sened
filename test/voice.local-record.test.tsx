@@ -1,3 +1,4 @@
+import React from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -22,7 +23,7 @@ import { parseContributionUtterance } from "@/lib/voice/parser";
 const AMHARIC = "\u1208\u1218\u1235\u12a8\u1228\u121d \u12c8\u122d \u12a5\u1241\u1265 5,000 \u1265\u122d \u1274\u120c\u1265\u122d \u12a0\u1235\u1308\u1265\u127b\u1208\u1201 \u1261\u1325\u1229 9BF42 \u1290\u12cd";
 
 async function typeSentence(user: ReturnType<typeof userEvent.setup>, text: string) {
-  await user.click(screen.getByRole("button", { name: "Type instead" }));
+  await user.click(screen.getByRole("button", { name: "Or type it" }));
   await user.type(screen.getByLabelText("What was heard"), text);
 }
 
@@ -40,15 +41,14 @@ describe("the voice modal with no verifier wired", () => {
     expect(screen.queryByRole("button", { name: /Send to the bank/i })).not.toBeInTheDocument();
   });
 
-  it("says the note stays on the device and is not a receipt", async () => {
+  it("says the note is only a draft until the bank check makes it final", async () => {
     const user = userEvent.setup();
     render(<VoiceModal isOpen onClose={() => {}} onRecordLocally={vi.fn()} locale="en" />);
 
     await typeSentence(user, AMHARIC);
 
-    expect(
-      screen.getByText(/Kept on this phone only\. It is not a receipt/i)
-    ).toBeInTheDocument();
+    // One short sentence replaces the two disclaimer paragraphs: still no promise of a receipt.
+    expect(screen.getByText("This is only a draft. It becomes final after the bank check.")).toBeInTheDocument();
   });
 
   it("hands the caller the extraction and states where the text came from", async () => {
@@ -160,5 +160,61 @@ describe("a sound extraction and a blocked one", () => {
     const draft = parseContributionUtterance(AMHARIC);
     expect(draft.blocking).toBe(false);
     expect(draft.amountWire).toBe("5000.00");
+  });
+});
+
+describe("the draft is read back in the reader's own script", () => {
+  it("shows the Ethiopian month in Ge'ez and the amount in birr in Amharic", async () => {
+    const user = userEvent.setup();
+    render(<VoiceModal isOpen onClose={() => {}} onRecordLocally={vi.fn()} locale="am" />);
+
+    await user.click(screen.getByRole("button", { name: "ወይም ይጻፉ" }));
+    await user.type(screen.getByLabelText("የተሰማው"), AMHARIC);
+
+    expect(screen.getByText("መስከረም")).toBeInTheDocument(); // መስከረም
+    expect(screen.getByText("5,000 ብር")).toBeInTheDocument(); // 5,000 ብር
+    expect(screen.queryByText(/Meskerem|ETB/)).not.toBeInTheDocument();
+  });
+
+  it("keeps Latin month and ETB in English", async () => {
+    const user = userEvent.setup();
+    render(<VoiceModal isOpen onClose={() => {}} onRecordLocally={vi.fn()} locale="en" />);
+
+    await typeSentence(user, AMHARIC);
+
+    expect(screen.getByText("Meskerem")).toBeInTheDocument();
+    expect(screen.getByText("5,000 ETB")).toBeInTheDocument();
+  });
+});
+
+describe("the voice modal as a sheet", () => {
+  it("has a close button of at least 48px, closes on Escape, and gives focus back to its opener", async () => {
+    const user = userEvent.setup();
+    function Host() {
+      const [open, setOpen] = React.useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            opener
+          </button>
+          <VoiceModal isOpen={open} onClose={() => setOpen(false)} locale="en" />
+        </>
+      );
+    }
+    render(<Host />);
+    const opener = screen.getByRole("button", { name: "opener" });
+
+    await user.click(opener);
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(close.className).toMatch(/h-12 w-12/);
+    expect(close).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+
+    await user.click(opener);
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(opener).toHaveFocus();
   });
 });

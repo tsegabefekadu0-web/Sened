@@ -263,14 +263,14 @@ test.describe("the fair draw route", () => {
 
 test.describe("the offline console", () => {
   test("uses real IndexedDB and reports its connection honestly", async ({ page }) => {
-    await page.goto("/offline");
+    await page.goto("/offline?debug=1");
 
     const hasIndexedDb = await page.evaluate(() => typeof indexedDB !== "undefined");
     expect(hasIndexedDb).toBe(true);
 
     // Exactly the three strings `offline.connectivity.*` defines. Guessing at
     // the wording here would assert nothing, and a missing banner would let a
-    // fabricated default pass as an honest one.
+    // fabricated default pass as an honest one. (The developer desk, ?debug=1.)
     await expect(
       page
         .getByText("Online")
@@ -283,7 +283,7 @@ test.describe("the offline console", () => {
   test("shows the honest empty state rather than sample members", async ({ page }) => {
     // A fresh browser profile has no roster. Inventing two would be the same
     // class of lie the contribution feed used to tell.
-    await page.goto("/offline");
+    await page.goto("/offline?debug=1");
 
     await expect(
       page.getByText("No members are stored on this device yet. They arrive after the first sync.")
@@ -295,7 +295,7 @@ test.describe("the offline console", () => {
     // triples were generated into the shared dictionary at integration, and this
     // is the assertion that they are reachable from a rendered page rather than
     // merely present in a type.
-    await page.goto("/offline");
+    await page.goto("/offline?debug=1");
 
     await expect(page.getByRole("button", { name: "አማርኛ" })).toBeVisible();
     await page.getByRole("button", { name: "አማርኛ" }).click();
@@ -310,20 +310,47 @@ test.describe("the offline console", () => {
 });
 
 test.describe("the voice route", () => {
-  test("extracts a real Amharic contribution and marks it provisional", async ({ page }) => {
+  const SENTENCE = "ለመስከረም ወር እቁብ 5,000 ብር በቴሌብር አስገብቻለሁ፣ ቁጥሩ 9BF42 ነው";
+
+  test("reads a typed Amharic contribution back in Amharic and marks it provisional", async ({ page }) => {
     await page.goto("/voice");
 
-    // The reference sentence from ROADMAP 3.1, typed rather than spoken so the
-    // test needs no microphone.
-    const amount = page.getByTestId("extraction-amount");
-    if ((await amount.count()) > 0) {
-      await expect(amount).toBeVisible();
-    }
+    await page.getByRole("button", { name: "ወይም ይጻፉ" }).click();
+    await page.getByLabel("የተሰማው").fill(SENTENCE);
 
-    // Whatever the panel shows, a voice extraction must never read as verified.
+    await expect(page.getByTestId("extraction-amount")).toHaveText("5,000 ብር");
+    await expect(page.getByText("መስከረም", { exact: true })).toBeVisible();
+    // Never Latin month names or ETB in Amharic mode.
     const text = await bodyText(page);
+    expect(text).not.toMatch(/Meskerem|ETB/);
+    expect(text).toContain("ይህ ረቂቅ ብቻ ነው");
+    // A voice extraction must never read as verified.
     expect(text).not.toMatch(/verified\s*[:=]\s*true/i);
   });
+
+  test("keeps the developer lab behind ?debug=1", async ({ page }) => {
+    await page.goto("/voice");
+    expect(await bodyText(page)).not.toMatch(/ZERO-TRUST|Entity extraction|Speech providers/i);
+
+    await page.goto("/voice?debug=1");
+    await expect(page.getByRole("heading", { name: /Entity extraction/i })).toBeVisible();
+  });
+});
+
+test.describe("no screen is a dead end", () => {
+  // As an installed app there is no browser back button, so every main screen
+  // must carry the same bottom bar and a way home.
+  for (const path of ["/draw", "/ledger", "/governance", "/offline", "/voice"]) {
+    test(path + " has the bottom bar and leads home", async ({ page }) => {
+      await page.goto(path);
+      // Hidden controls are not matched, so on a wide ledger this finds the home link
+      // at the top and on a phone it finds the bottom bar.
+      const home = page.getByRole("link", { name: /^(መነሻ|Home|Back home)$/ }).first();
+      await expect(home).toBeVisible();
+      await home.click();
+      await expect(page).toHaveURL(/\/$/);
+    });
+  }
 });
 
 test.describe("the mic dock records a spoken contribution for real", () => {
@@ -346,7 +373,7 @@ test.describe("the mic dock records a spoken contribution for real", () => {
     await page.getByRole("button", { name: /በድምጽ አስመዝግብ/ }).click();
 
     // No microphone in CI, so the modal offers to type instead.
-    await page.getByRole("button", { name: "በጽሑፍ አለጥፍ" }).click();
+    await page.getByRole("button", { name: "ወይም ይጻፉ" }).click();
     await page
       .getByLabel("የተሰማው")
       .fill("ለመስከረም ወር እቁብ 5,000 ብር በቴሌብር አስገብቻለሁ፣ ቁጥሩ 9BF42 ነው");
@@ -354,8 +381,8 @@ test.describe("the mic dock records a spoken contribution for real", () => {
     const record = page.getByRole("button", { name: "በዚህ መሣሪያ ላይ አስቀምጥ" });
     await expect(record).toBeEnabled();
 
-    // The label must not promise a receipt.
-    await expect(page.getByText(/በዚህ ስልክ ላይ ብቻ ይቀራል/)).toBeVisible();
+    // The sheet must not promise a receipt: a draft until the bank check.
+    await expect(page.getByText(/የባንክ ማረጋገጫ ሲደርስ የመጨረሻ ይሆናል/)).toBeVisible();
 
     await record.click();
 
@@ -387,7 +414,7 @@ test.describe("the mic dock records a spoken contribution for real", () => {
 
     await page.goto("/");
     await page.getByRole("button", { name: /በድምጽ አስመዝግብ/ }).click();
-    await page.getByRole("button", { name: "በጽሑፍ አለጥፍ" }).click();
+    await page.getByRole("button", { name: "ወይም ይጻፉ" }).click();
     await page.getByLabel("የተሰማው").fill(sentence);
 
     const record = page.getByRole("button", { name: "በዚህ መሣሪያ ላይ አስቀምጥ" });
@@ -481,7 +508,7 @@ test.describe("service worker and the offline shell", () => {
       // served from the precache, so URL and document agree for hydration.
       await page.goto("/ledger", { waitUntil: "domcontentloaded" });
       await expect(page).toHaveURL(/\/offline$/);
-      await expect(page.getByText("Offline ledger desk").or(page.getByText("የመስመር መዝገብ ጠረጴዛ")).first()).toBeVisible();
+      await expect(page.getByText("Saved while offline").or(page.getByText("ያለ ኢንተርኔት የተቀመጡ")).first()).toBeVisible();
       expect(failures).toEqual([]);
     } finally {
       await context.setOffline(false);

@@ -7,6 +7,7 @@ import { createTranslator } from "@/lib/i18n";
 import { useAppLocale } from "@/lib/appLocale";
 
 import { AppFrame } from "@/components/shell/AppFrame";
+import { BottomNav } from "@/components/navigation/BottomNav";
 import { GovernanceCopilot } from "./GovernanceCopilot";
 
 export function GovernanceWorkspace() {
@@ -15,7 +16,7 @@ export function GovernanceWorkspace() {
 
   return (
     <AppFrame>
-        <header className="flex items-center justify-between gap-3 border-b border-[#322722] bg-[#1C1410] px-4 py-3 select-none">
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[#322722] bg-[#1C1410] px-4 py-3 select-none">
           <div className="flex items-center gap-2.5">
             <MeskelCross className="h-7 w-7 drop-shadow-sm" />
             <div>
@@ -34,12 +35,15 @@ export function GovernanceWorkspace() {
             {locale === "am" ? t("shell.english") : t("shell.amharic")}
           </button>
         </header>
+        <div className="no-scrollbar min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         <div className="border-b border-[#EBE2D8] bg-[#F5EFEB] px-4 py-3">
           <h2 className="font-ethiopic text-[20px] font-bold leading-snug text-[#1C1410]">{t("governance.title")}</h2>
           <p className="mt-1 text-[18px] leading-[1.65] text-[#3A2C22]">{t("governance.intro")}</p>
         </div>
 
         <GovernanceCopilot locale={locale} />
+        </div>
+        <BottomNav activeTab="none" locale={locale} />
     </AppFrame>
   );
 }

@@ -24,6 +24,8 @@ import {
 } from "@/lib/ledger/paymentChannel";
 import { translate, type MessageKey } from "@/lib/i18n";
 import { isContentHashingAvailable } from "@/lib/offline/hash";
+import { useAppLocale } from "@/lib/appLocale";
+import { SimpleOfflineScreen, type SimpleOfflineItem, type SimpleOfflineStatus } from "./offline-simple";
 import { offlineCopy, type OfflineLocale } from "@/lib/offline/copy";
 import {
   isTerminalOfflineSyncState,
@@ -239,6 +241,8 @@ export interface OfflineConsoleProps {
   readonly initialLocale?: OfflineLocale;
   /** Test seam. Production resolves the device's real IndexedDB. */
   readonly database?: SenedDatabase;
+  /** The plain view for members and treasurers. The default (and the `?debug=1` page) is the full desk. */
+  readonly simple?: boolean;
 }
 
 function stateLabelKey(state: OfflineSyncState): string {
@@ -283,7 +287,8 @@ function isStateCopyKey(value: string): value is Parameters<typeof offlineCopy>[
 }
 
 export function OfflineConsole(props: OfflineConsoleProps) {
-  const [locale, setLocale] = useState<OfflineLocale>(props.initialLocale ?? "en");
+  // Follows the app-wide language choice (the assistant or another screen), else the given default.
+  const [locale, setLocale] = useAppLocale(props.initialLocale ?? "en");
   const [connectivity, setConnectivity] = useState<Connectivity>("unknown");
   const [db, setDb] = useState<SenedDatabase | null>(null);
   const [storageAvailable, setStorageAvailable] = useState(true);
@@ -795,6 +800,60 @@ export function OfflineConsole(props: OfflineConsoleProps) {
       }
       return t("offline.drafts.saved");
     });
+  }
+
+  if (props.simple) {
+    const stateFor = (state: OfflineSyncState | undefined): SimpleOfflineStatus => {
+      switch (state) {
+        case "synced":
+          return "sent";
+        case "queued":
+          return "waiting";
+        case "retry-scheduled":
+        case "in-flight":
+          return "retry";
+        case "rejected":
+        case "blocked":
+          return "problem";
+        default:
+          return "saved";
+      }
+    };
+    // Amharic readers see "5,000.00 ብር", not a Latin "Br" prefix.
+    const money = (amount: string): string =>
+      locale === "am" ? `${formatEtbDisplay(amount).replace(/^Brs*/, "")} ${translate("am", "voice.currencyEtb")}` : formatEtbDisplay(amount);
+    const outboxState = new Map(desk.outbox.map((row) => [row.id, row.state]));
+    const items: SimpleOfflineItem[] = [
+      ...desk.notes.map((note) => ({
+        id: `note-${note.id}`,
+        kind: "note" as const,
+        text: note.transcript,
+        amount: note.amountEtb ? money(note.amountEtb) : null,
+        status: stateFor(note.outboxId ? outboxState.get(note.outboxId) : undefined)
+      })),
+      ...desk.drafts.map(({ draft, outbox }) => ({
+        id: `draft-${draft.id}`,
+        kind: "entry" as const,
+        text: "",
+        amount: money(draft.request.postings.find((posting) => posting.direction === "debit")?.amount ?? "0.00"),
+        status: stateFor(outbox?.state)
+      }))
+    ];
+    const waiting = (desk.queue.byState.queued ?? 0) + (desk.queue.byState["retry-scheduled"] ?? 0);
+    return (
+      <SimpleOfflineScreen
+        locale={locale}
+        t={t}
+        onToggleLocale={() => setLocale(locale === "en" ? "am" : "en")}
+        items={items}
+        online={connectivity === "unknown" ? null : connectivity === "online"}
+        busy={busy}
+        canSend={waiting > 0}
+        onSend={() => void drain()}
+        message={status}
+        problem={error}
+      />
+    );
   }
 
   if (!storageAvailable) {

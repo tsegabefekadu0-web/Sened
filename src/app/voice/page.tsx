@@ -1,22 +1,23 @@
 import type { Metadata } from "next";
 import "./voice-workbench.css";
+import { VoiceScreen } from "@/components/voice/VoiceScreen";
 import { VoiceWorkbench } from "@/components/voice/VoiceWorkbench";
 
 export const metadata: Metadata = {
-  title: "Sened | Voice pipeline",
-  description:
-    "Amharic and Afaan Oromoo contribution extraction, real microphone capture, and a fail-closed speech provider."
+  title: "Sened | Record by voice",
+  description: "Record a contribution by voice or by typing. A bank check makes it final."
 };
 
 /**
- * `GET /voice` — AGENT-2's own route (AGENTWORK.md §2: "Each agent gets their
- * own route so they can prove their work in a browser without touching anyone
- * else's mount point").
+ * `GET /voice` is the plain screen for members and treasurers.
  *
- * `src/app/page.tsx` belongs to AGENT-1, so this page is self-contained: it
- * links nothing outside my lane, and AGENT-1 links *to* it at integration
- * (`docs/requests/agent-2.md` R-3).
+ * The developer workbench (entity extraction lab, microphone capture, provider
+ * status, hand-off body) is kept, unchanged, at `GET /voice?debug=1`.
  */
-export default function VoicePage() {
-  return <VoiceWorkbench />;
+export default function VoicePage({
+  searchParams
+}: {
+  readonly searchParams?: Record<string, string | string[] | undefined>;
+}) {
+  return searchParams?.debug === "1" ? <VoiceWorkbench /> : <VoiceScreen />;
 }

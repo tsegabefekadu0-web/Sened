@@ -317,6 +317,14 @@ export function ContributionFeed({
                 key={c.id}
                 role="button"
                 tabIndex={0}
+                aria-label={t("feed.row.aria", {
+                  name: c.name,
+                  status: verified
+                    ? `${channelLabel(c)} ${t("shell.feed.verifiedWord")}`
+                    : c.source === "ledger"
+                      ? t("shell.feed.recorded")
+                      : t("shell.feed.pending")
+                })}
                 onClick={() => openReceipt(c)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {

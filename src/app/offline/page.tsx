@@ -12,11 +12,17 @@ import { OfflineConsole } from "./offline-console";
  * reach the hash chain without the server's rules accepting it.
  */
 export const metadata: Metadata = {
-  title: "Sened · የመስመር መዝገብ ጠረጴዛ — Offline ledger desk",
+  title: "Sened · Offline ledger desk",
   description:
     "Record contributions, spoken notes and draft ledger entries with no connection. Nothing is committed until it syncs."
 };
 
-export default function OfflinePage() {
-  return <OfflineConsole />;
+/** `/offline` is the plain "Saved while offline" list; the full desk is at `/offline?debug=1`. */
+export default function OfflinePage({
+  searchParams
+}: {
+  readonly searchParams?: Record<string, string | string[] | undefined>;
+}) {
+  // The phone opens in Amharic; the desk has always opened in English.
+  return searchParams?.debug === "1" ? <OfflineConsole /> : <OfflineConsole simple initialLocale="am" />;
 }

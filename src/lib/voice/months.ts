@@ -166,3 +166,31 @@ export function monthFormsFor(month: EthiopianMonthId): readonly string[] {
 
 export { ETHIOPIAN_MONTH_IDS, ETHIOPIAN_MONTH_LABELS, ETHIOPIAN_MONTH_NUMBERS };
 export type { EthiopianMonthId };
+
+/**
+ * The month names as an Amharic reader writes them. Display only: the parser
+ * still reports the English id and label, and nothing is parsed from these.
+ */
+const MONTH_LABELS_AM: Readonly<Record<EthiopianMonthId, string>> = {
+  meskerem: "መስከረም", // መስከረም
+  tikimt: "ጥቅምት", // ጥቅምት
+  hidar: "ኅዳር", // ኅዳር
+  tahsas: "ታኅሣሥ", // ታኅሣሥ
+  tir: "ጥር", // ጥር
+  yekatit: "የካቲት", // የካቲት
+  megabit: "መጋቢት", // መጋቢት
+  miyazya: "ሚያዝያ", // ሚያዝያ
+  ginbot: "ግንቦት", // ግንቦት
+  sene: "ሰኔ", // ሰኔ
+  hamle: "ሐምሌ", // ሐምሌ
+  nehase: "ነሐሰ", // ነሐሴ
+  pagumen: "ጳጉሜን" // ጳጉሜን
+};
+
+/** The month for display in the reader's language; `null` when none was said. */
+export function monthLabelForLocale(month: EthiopianMonthId | null, locale: "am" | "en"): string | null {
+  if (month === null) {
+    return null;
+  }
+  return locale === "am" ? MONTH_LABELS_AM[month] : monthLabel(month);
+}

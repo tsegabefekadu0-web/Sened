@@ -26,41 +26,8 @@ import { attributePayer, supersedePayer } from "@/lib/ledger/clientAttribution";
 import type { HomeLedgerResult } from "@/lib/ledger/clientHome";
 import { useHomeLedger } from "@/lib/ledger/useHomeLedger";
 import { requestBankVerification } from "@/lib/voice/clientVerify";
-import { getSenedDatabase, isOfflineStorageAvailable } from "@/lib/db";
-import { saveSpokenNote } from "@/lib/db/notes";
-import type { PaymentChannel, SpokenNoteLocale } from "@/lib/db/types";
+import { saveProvisionalVoiceNote } from "@/lib/voice/recordLocal";
 import type { ProvisionalContribution } from "@/lib/voice/types";
-
-/**
- * The group this shell is looking at.
- *
- * A single treasury is signed in on one device at a time in this build, and the
- * roster arrives from the sync mirror. Until there is a session there is no
- * group to read, so the shell names one — and says so, rather than inventing
- * rows that would look like a synced roster.
- */
-const LOCAL_GROUP_ID = "local-unprovisioned-group";
-
-/** The parser's provider names map onto the offline store's rails one-for-one. */
-const CHANNEL_FOR_PROVIDER: Readonly<Record<string, PaymentChannel>> = {
-  telebirr: "telebirr",
-  cbe: "cbe-birr",
-  awash: "bank-transfer"
-};
-
-/**
- * The parser reports a *detection*, which can be "mixed" or "unknown". The store
- * wants one concrete locale, so an ambiguous detection is recorded as `am` —
- * this is a Ge'ez-primary product and the honest default is the language the
- * note is expected to be in, not a guess at what was said.
- */
-const SPOKEN_NOTE_LOCALE_FOR: Readonly<Record<string, SpokenNoteLocale>> = {
-  am: "am",
-  om: "om",
-  en: "en",
-  mixed: "am",
-  unknown: "am"
-};
 
 /**
  * Every row here is PROVISIONAL.
@@ -134,6 +101,16 @@ export default function SenedHome() {
   const signedIn = session.status === "signed-in";
   const [activeTab, setActiveTab] = useState<"home" | "profile">("home");
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
+  // The Profile tab on other screens links here (/?panel=profile).
+  useEffect(() => {
+    try {
+      if (new URLSearchParams(window.location.search).get("panel") === "profile") {
+        setActiveTab("profile");
+      }
+    } catch {
+      // No location (tests): stay on Home.
+    }
+  }, []);
   const [isDigestModalOpen, setIsDigestModalOpen] = useState(false);
   // Text the voice assistant handed over for review in the existing draft modal.
   const [assistantDraft, setAssistantDraft] = useState<string | undefined>(undefined);
@@ -303,20 +280,7 @@ export default function SenedHome() {
       draft: ProvisionalContribution,
       origin: { readonly transcriptSource: "human-typed" | "asr" }
     ) => {
-      if (!isOfflineStorageAvailable()) {
-        throw new Error("offline-storage-unavailable");
-      }
-      const note = await saveSpokenNote(getSenedDatabase(), {
-        groupId: LOCAL_GROUP_ID,
-        locale: SPOKEN_NOTE_LOCALE_FOR[draft.language] ?? "am",
-        transcript: draft.utterance,
-        // Stated by the caller, never inferred. A note labelled `asr` that was
-        // actually typed is a false claim about how a treasurer worked.
-        transcriptSource: origin.transcriptSource,
-        amountEtb: draft.amountWire,
-        channel: draft.provider ? CHANNEL_FOR_PROVIDER[draft.provider] ?? null : null,
-        occurredAt: new Date().toISOString()
-      });
+      const note = await saveProvisionalVoiceNote(draft, origin);
 
       setLocalNotes((previous) => [
         {

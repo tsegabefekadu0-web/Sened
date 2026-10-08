@@ -6,6 +6,7 @@ import { DrawBoard } from "@/components/draw/DrawBoard";
 import { HapticsToggle } from "@/components/draw/HapticsToggle";
 import { LiveDraw } from "@/components/draw/LiveDraw";
 import { AppFrame } from "@/components/shell/AppFrame";
+import { BottomNav } from "@/components/navigation/BottomNav";
 import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
 import { MeskelCross } from "@/components/cultural/CulturalIcons";
 import { useSession } from "@/lib/auth/useSession";
@@ -18,7 +19,7 @@ export default function DrawPage() {
 
   return (
     <AppFrame>
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[#322722] bg-[#1C1410] px-4 py-3 select-none">
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#322722] bg-[#1C1410] px-4 py-3 select-none">
           <div className="flex items-center gap-3">
             <MeskelCross className="h-9 w-9 drop-shadow-sm" />
             <div>
@@ -42,6 +43,7 @@ export default function DrawPage() {
           <GroupSwitcher locale={locale} tone="dark" className="basis-full" />
         </header>
 
+        <div className="no-scrollbar min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         <HapticsToggle locale={locale} />
 
         {session.status === "signed-in" ? (
@@ -61,6 +63,8 @@ export default function DrawPage() {
             )}
           />
         )}
+        </div>
+        <BottomNav activeTab="draw" locale={locale} />
     </AppFrame>
   );
 }

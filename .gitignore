@@ -25,3 +25,7 @@ Thumbs.db
 .next/
 coverage/
 *.tsbuildinfo
+
+# Locally installed agent skills
+.agents/
+skills-lock.json

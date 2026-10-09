@@ -8,15 +8,16 @@ import { useT } from "@/lib/ui/useT";
 import { openVoiceSheet } from "@/lib/ui/voiceSheet";
 import { Icon, type IconName } from "./Icon";
 import { VoiceSheet } from "./VoiceSheet";
+import { TibebRibbon } from "./Weave";
 
 type Tab = "home" | "ledger" | "chat" | "account";
 
 const TAB_ICON: Record<Tab, IconName> = { home: "home", ledger: "book", chat: "chat", account: "account" };
-const TAB_HREF: Record<Tab, string> = { home: "/", ledger: "/ledger", chat: "/chat", account: "/account" };
+const TAB_HREF: Record<Tab, string> = { home: "/home", ledger: "/ledger", chat: "/chat", account: "/account" };
 
 /** Which tab a path belongs to (the draw and members screens hang off Home). */
 export function tabForPath(path: string): Tab | null {
-  if (path === "/" || path.startsWith("/draw") || path.startsWith("/members") || path.startsWith("/voice")) return "home";
+  if (path === "/" || path.startsWith("/home") || path.startsWith("/draw") || path.startsWith("/members") || path.startsWith("/voice")) return "home";
   if (path.startsWith("/ledger")) return "ledger";
   if (path.startsWith("/chat")) return "chat";
   if (path.startsWith("/account")) return "account";
@@ -28,7 +29,7 @@ export function tabForPath(path: string): Tab | null {
  * ring around a dark button that opens the voice sheet. The cotton bar has a
  * round cut-out for the dock; a tibeb strip slides under the current tab.
  */
-export function BottomNav({ active }: { readonly active?: Tab | null }) {
+export function BottomNav({ active, railOnly = false }: { readonly active?: Tab | null; readonly railOnly?: boolean }) {
   const pathname = usePathname() ?? "/";
   const { t } = useT();
   const current = active === undefined ? tabForPath(pathname) : active;
@@ -95,7 +96,9 @@ export function BottomNav({ active }: { readonly active?: Tab | null }) {
 
   return (
     <>
-      <nav ref={navRef} aria-label={t("ui.nav.main")} className="sticky bottom-0 z-[5] mt-auto grid grid-cols-5" style={{ padding: "6px 4px 10px" }}>
+      <SideRail current={current} />
+      {railOnly ? null : (
+      <nav ref={navRef} aria-label={t("ui.nav.main")} className="sticky bottom-0 z-[5] mt-auto grid grid-cols-5 lg:hidden" style={{ padding: "6px 4px 10px" }}>
         <span
           aria-hidden="true"
           className="absolute left-0 top-0 h-full w-full"
@@ -155,7 +158,92 @@ export function BottomNav({ active }: { readonly active?: Tab | null }) {
           </span>
         </button>
       </nav>
+      )}
       <VoiceSheet />
     </>
+  );
+}
+
+/**
+ * Desktop (1024px and up): the same four places as a left rail, with the voice
+ * dock at its foot and a tibeb ribbon down its edge. Hidden on phones, where the
+ * bottom bar above is the navigation. The Screen shifts right to make room for it
+ * (see `.snd-rail` in globals.css).
+ */
+function SideRail({ current }: { readonly current: Tab | null }) {
+  const { t } = useT();
+  const items: ReadonlyArray<readonly [Tab, string]> = [
+    ["home", t("ui.nav.home")],
+    ["ledger", t("ui.nav.ledger")],
+    ["chat", t("ui.nav.chat")],
+    ["account", t("ui.nav.account")]
+  ];
+  return (
+    <nav
+      aria-label={t("ui.nav.main")}
+      className="snd-rail fixed bottom-0 left-0 top-0 z-[5] hidden flex-col border-r border-hair bg-card lg:flex"
+      style={{ width: "var(--snd-rail)", boxSizing: "border-box", padding: "26px 18px 22px 16px" }}
+    >
+      <TibebRibbon vertical animate={false} style={{ left: "auto", right: 0, width: 12, boxShadow: "-3px 0 6px -3px rgba(0,0,0,0.35)" }} />
+      <Link href="/home" aria-label="ሰነድ" className="mb-8 flex items-center gap-3 px-2">
+        <span lang="am" className="flex h-11 w-11 items-center justify-center rounded-[14px] font-serif text-[24px] font-bold text-white" style={{ background: "var(--shop)" }}>
+          ሰ
+        </span>
+        <span className="flex flex-col leading-[1.15]">
+          <span lang="am" className="font-serif text-[22px] font-bold">
+            ሰነድ
+          </span>
+          <span className="font-display text-[13px] font-semibold text-muted">Sened</span>
+        </span>
+      </Link>
+      <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+        {items.map(([key, label]) => {
+          const on = current === key;
+          return (
+            <li key={key} className="relative">
+              <Link
+                href={TAB_HREF[key]}
+                aria-current={on ? "page" : undefined}
+                className="snd-tab relative flex min-h-[54px] items-center gap-3.5 rounded-[18px] pl-3.5 pr-3 text-[17px] font-bold"
+                style={{ color: on ? "var(--ink)" : "var(--muted)", background: on ? "var(--tint)" : undefined }}
+              >
+                <span className="flex items-center justify-center" style={{ color: on ? "var(--shop)" : undefined }}>
+                  <Icon name={TAB_ICON[key]} size={26} variant="tab" />
+                </span>
+                <span lang="am">{label}</span>
+              </Link>
+              {on ? (
+                <span
+                  aria-hidden="true"
+                  className="snd-weave-tex absolute"
+                  style={{ left: -16, top: 11, width: 7, height: 32, boxSizing: "border-box", borderRight: "2px solid var(--rred)", borderRadius: "0 3px 3px 0", backgroundSize: "6px 6px", boxShadow: "2px 0 3px -1px rgba(0,0,0,0.4)" }}
+                />
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+      <button
+        type="button"
+        className="mt-auto flex w-full cursor-pointer items-center gap-3 rounded-[22px] border border-hair bg-card p-2.5 text-left"
+        aria-label={t("ui.voice.dockLabel")}
+        onClick={openVoiceSheet}
+        style={{ boxShadow: "var(--lift)" }}
+      >
+        <span className="snd-dock snd-conic relative flex h-14 w-14 shrink-0 items-center justify-center rounded-full" style={{ padding: 3, boxSizing: "border-box", boxShadow: "0 8px 14px -8px rgba(28,26,23,0.65)" }}>
+          <span className="flex h-full w-full items-center justify-center" style={{ borderRadius: "50%", backgroundImage: "radial-gradient(circle at 36% 26%, #3B362F, #1C1A17 72%)", color: "#F3EEE4", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.16)" }}>
+            <Icon name="mic" size={24} />
+          </span>
+        </span>
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span lang="am" className="font-serif text-[16px] font-bold leading-[1.25]">
+            {t("ui.home.recordByVoice")}
+          </span>
+          <span lang="en" className="font-display text-[12px] font-extrabold tracking-wide text-muted">
+            EN · አማ
+          </span>
+        </span>
+      </button>
+    </nav>
   );
 }

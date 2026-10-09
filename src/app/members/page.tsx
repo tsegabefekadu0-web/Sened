@@ -43,7 +43,9 @@ export default function MembersPage() {
       </AppHeader>
       <CommunityNotice mode={c.mode} />
 
-      <Card className="snd-rise flex items-center justify-between gap-3 p-5" style={{ margin: "-34px 16px 0" }} aria-label={t("ui.members.total")}>
+      {/* Phones: one column (the wrapper vanishes). Desktop: totals and the proverb left, the members right. */}
+      <div className="contents lg:mx-auto lg:grid lg:w-full lg:max-w-[1200px] lg:grid-cols-2 lg:items-start lg:gap-x-8">
+      <Card className="snd-rise flex items-center justify-between gap-3 p-5 lg:col-start-1 lg:row-start-1" style={{ margin: "-34px 16px 0" }} aria-label={t("ui.members.total")}>
         <div className="flex min-w-0 flex-col gap-1.5">
           <span lang="am" className="text-base font-semibold text-soft">
             {t("ui.members.roundTotal")}
@@ -67,7 +69,7 @@ export default function MembersPage() {
         </div>
       </Card>
 
-      <figure className="snd-rise m-0 flex flex-col gap-2 p-0" style={{ margin: "26px 24px 0", ["--i" as string]: 4 } as React.CSSProperties}>
+      <figure className="snd-rise m-0 flex flex-col gap-2 p-0 lg:col-start-1 lg:row-start-2" style={{ margin: "26px 24px 0", ["--i" as string]: 4 } as React.CSSProperties}>
         <WeaveSwatch className="!w-14" />
         <blockquote lang="am" className="m-0 font-serif text-[22px] font-bold leading-[1.45]">
           «{t("ui.proverb")}»
@@ -75,7 +77,7 @@ export default function MembersPage() {
         <figcaption className="font-display text-sm font-medium text-muted">{t("ui.proverbGloss")}</figcaption>
       </figure>
 
-      <Card className="overflow-hidden p-0" style={{ margin: "22px 16px 0", boxShadow: "none" }}>
+      <Card className="overflow-hidden p-0 lg:col-start-2 lg:row-span-3 lg:row-start-1 lg:!mt-[26px]" style={{ margin: "22px 16px 0", boxShadow: "none" }}>
         <ul className="m-0 list-none p-0">
           {c.members.length === 0 ? (
             <li className="flex justify-center px-4 py-[30px] text-base text-muted">
@@ -107,7 +109,7 @@ export default function MembersPage() {
       </Card>
 
       {canInvite ? (
-        <Card className="flex flex-col gap-3 p-5" style={{ margin: "22px 16px 0" }}>
+        <Card className="flex flex-col gap-3 p-5 lg:col-start-1 lg:row-start-3" style={{ margin: "22px 16px 0" }}>
           <span lang="am" className="font-serif text-lg font-bold">
             {t("ui.members.invite")}
           </span>
@@ -129,6 +131,7 @@ export default function MembersPage() {
           </Button>
         </Card>
       ) : null}
+      </div>
       <div style={{ height: 28 }} />
       <BottomNav active="home" />
     </Screen>

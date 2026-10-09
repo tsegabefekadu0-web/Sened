@@ -70,7 +70,7 @@ export default function SpeakPage() {
   return (
     <Screen>
       <header className="relative flex items-center gap-2 overflow-hidden text-white" style={{ background: "var(--shop)", padding: "10px 14px 52px 8px", borderRadius: "0 0 28px 28px" }}>
-        <Link href="/" aria-label={t("ui.back.home")} onClick={() => cancel()} className="flex h-11 w-11 items-center justify-center rounded-full text-white">
+        <Link href="/home" aria-label={t("ui.back.home")} onClick={() => cancel()} className="flex h-11 w-11 items-center justify-center rounded-full text-white">
           <Icon name="back" size={22} />
         </Link>
         <div className="flex min-w-0 grow flex-col">
@@ -165,7 +165,7 @@ export default function SpeakPage() {
           <Icon name="check" size={22} />
           {t("ui.voice.done")}
         </button>
-        <Link href="/" onClick={() => cancel()} className="flex min-h-12 items-center justify-center text-base font-bold text-soft">
+        <Link href="/home" onClick={() => cancel()} className="flex min-h-12 items-center justify-center text-base font-bold text-soft">
           {t("ui.cancel")}
         </Link>
       </div>

@@ -34,13 +34,16 @@ export default function DrawPage() {
 
   return (
     <Screen loading={loading}>
-      <header className="relative flex flex-col overflow-hidden text-white" style={{ background: "var(--shop)", padding: "18px 20px 70px", borderRadius: "0 0 28px 28px" }}>
-        <div className="flex items-center gap-2" style={{ marginLeft: -12 }}>
-          <Link href="/" aria-label={t("ui.back.home")} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-white">
+      <header
+        className="relative flex flex-col overflow-hidden text-white lg:!grid lg:grid-cols-[minmax(0,1fr)_minmax(0,560px)] lg:items-center lg:gap-x-10 lg:!pl-[max(20px,calc((100%-1200px)/2+20px))] lg:!pr-[max(20px,calc((100%-1200px)/2+20px))]"
+        style={{ background: "var(--shop)", padding: "18px 20px 70px", borderRadius: "0 0 28px 28px" }}
+      >
+        <div className="flex items-center gap-2 lg:col-start-1 lg:row-start-1" style={{ marginLeft: -12 }}>
+          <Link href="/home" aria-label={t("ui.back.home")} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-white">
             <BackIcon />
           </Link>
           <div className="flex min-w-0 grow flex-col gap-0.5">
-            <h1 lang="am" className="m-0 font-serif text-[30px] font-bold leading-[1.2]">
+            <h1 lang="am" className="m-0 font-serif text-[30px] font-bold leading-[1.2] lg:text-[40px]">
               {t("ui.nav.draw")}
             </h1>
             <span lang="am" className="font-serif text-[15px] font-medium opacity-90">
@@ -58,20 +61,23 @@ export default function DrawPage() {
             replayLabel={t("ui.draw.replay")}
             canvasLabel={t("ui.draw.canvas")}
             onProgress={(step, won) => setProgress({ step, won })}
+            className="lg:col-start-2 lg:row-start-1 lg:!mx-0 lg:!mt-0"
           />
         ) : (
-          <div style={{ height: 120 }} />
+          <div className="lg:col-start-2 lg:row-start-1" style={{ height: 120 }} />
         )}
         <TibebRibbon style={{ bottom: 50 }} />
       </header>
 
       <CommunityNotice mode={c.mode} />
 
+      {/* Phones: one column (the wrapper vanishes). Desktop: winner and verification left, the coffee steps right. */}
+      <div className="contents lg:mx-auto lg:grid lg:w-full lg:max-w-[1200px] lg:grid-cols-2 lg:items-start lg:gap-x-8">
       {ready ? (
         <section
           id="snd-win"
           aria-label={t("ui.draw.winner")}
-          className={`snd-cotton snd-fade relative flex items-center gap-3.5 rounded-[22px] border border-hair bg-card ${progress.won ? "snd-won" : ""}`}
+          className={`snd-cotton snd-fade relative flex items-center gap-3.5 rounded-[22px] border border-hair bg-card lg:col-start-1 lg:row-start-1 ${progress.won ? "snd-won" : ""}`}
           style={{ margin: "-46px 16px 0", padding: "18px 20px", boxShadow: "var(--lift)", transition: "box-shadow 700ms cubic-bezier(0.32,0.72,0,1), border-color 700ms cubic-bezier(0.32,0.72,0,1), transform 700ms cubic-bezier(0.32,0.72,0,1)" }}
         >
           <span aria-hidden="true" className="snd-pls" />
@@ -98,17 +104,17 @@ export default function DrawPage() {
           </span>
         </section>
       ) : view.status === "none" || view.status === "error" ? (
-        <p lang="am" role="status" className="snd-cotton mx-4 rounded-[22px] border border-hair bg-card p-5 text-base leading-[1.5] text-soft" style={{ marginTop: -46 }}>
+        <p lang="am" role="status" className="snd-cotton mx-4 rounded-[22px] border border-hair bg-card p-5 text-base leading-[1.5] text-soft lg:col-start-1 lg:row-start-1" style={{ marginTop: -46 }}>
           {view.status === "none" ? t("ui.draw.none") : t("ui.notice.error")}
         </p>
       ) : null}
 
-      <div style={{ margin: "26px 16px 0" }} className="snd-rise">
+      <div style={{ margin: "26px 16px 0" }} className="snd-rise lg:col-start-2 lg:row-span-3 lg:row-start-1">
         <CoffeeSteps steps={steps} filled={checked ? 3 : progress.step} label={t("ui.draw.coffee")} />
       </div>
 
       {ready ? (
-        <div className="flex flex-col gap-3" style={{ margin: "22px 16px 0" }}>
+        <div className="flex flex-col gap-3 lg:col-start-1 lg:row-start-2" style={{ margin: "22px 16px 0" }}>
           <Button
             onPress={async () => {
               const ok = await verify();
@@ -134,10 +140,11 @@ export default function DrawPage() {
         </div>
       ) : null}
       {c.mode === "live" && c.role !== null ? (
-        <Link href="/draw/manage" data-testid="manage-link" className="flex h-[54px] items-center justify-center rounded-[27px] border-[1.5px] border-prim bg-card text-[17px] font-bold text-ink" style={{ margin: "12px 16px 0" }}>
+        <Link href="/draw/manage" data-testid="manage-link" className="flex h-[54px] lg:col-start-1 lg:row-start-3 items-center justify-center rounded-[27px] border-[1.5px] border-prim bg-card text-[17px] font-bold text-ink" style={{ margin: "12px 16px 0" }}>
           <span lang="am">{c.role === "owner" || c.role === "treasurer" ? t("ui.manage.link") : t("ui.manage.memberLink")}</span>
         </Link>
       ) : null}
+      </div>
       <div style={{ height: 28 }} />
       <BottomNav active="home" />
     </Screen>

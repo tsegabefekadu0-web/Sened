@@ -15,6 +15,8 @@ export interface CeremonyProps {
   readonly onProgress: (step: number, won: boolean) => void;
   /** Bumped by the parent to restart the ceremony. */
   readonly replayKey?: number;
+  /** Extra classes for the stage (the draw screen places it in a grid cell on desktop). */
+  readonly className?: string;
 }
 
 const stepFor = (t: number) => (t > 5.0 ? 3 : t > 3.4 ? 2 : t > 1.9 ? 1 : 0);
@@ -146,7 +148,7 @@ export function DrawCeremony(props: CeremonyProps) {
   );
 
   return (
-    <div className="relative z-[1]" style={{ height: 330, margin: "-6px -20px 0" }}>
+    <div className={`relative z-[1] ${props.className ?? ""}`} style={{ height: 330, margin: "-6px -20px 0" }}>
       <div ref={fbRef} id="snd-fb" aria-hidden="true" data-testid="draw-fallback" style={gl ? { display: "none" } : { position: "absolute", left: "50%", marginLeft: -125, bottom: 0, width: 250, height: 232 }}>
         <Fallback winnerName={winnerName} />
       </div>

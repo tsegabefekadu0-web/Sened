@@ -238,7 +238,7 @@ export function Screen({
   readonly className?: string;
 }) {
   return (
-    <div className={`mx-auto flex min-h-[100dvh] w-full max-w-[480px] flex-col bg-bg text-ink ${loading ? "snd-loading" : ""} ${className}`} aria-busy={loading || undefined}>
+    <div className={`snd-screen mx-auto flex min-h-[100dvh] w-full max-w-[480px] flex-col bg-bg text-ink ${loading ? "snd-loading" : ""} ${className}`} aria-busy={loading || undefined}>
       {children}
     </div>
   );

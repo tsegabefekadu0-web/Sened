@@ -36,7 +36,7 @@ export default function OfflinePage() {
   const birr = (a: string) => (locale === "am" ? `${a} ${t("voice.currencyEtb")}` : `${a} ETB`);
 
   return (
-    <Screen loading={q.loading}>
+    <Screen loading={q.loading} className="snd-narrow">
       <main className="flex grow flex-col">
         <AppHeader title={t("offline.simple.title")} subtitle="Saved offline" bottom={72} ribbon={32} right={<LanguageSwitch />} />
         <Card className="snd-rise flex flex-col gap-4 p-5" style={{ margin: "-34px 16px 0" }}>

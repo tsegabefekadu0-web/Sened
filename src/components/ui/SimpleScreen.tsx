@@ -28,7 +28,7 @@ export function SimpleScreen({
           {children}
         </Card>
         {homeLink ? (
-          <Link href="/" className="mx-auto mt-4 flex min-h-12 items-center px-4 text-base font-bold text-soft">
+          <Link href="/home" className="mx-auto mt-4 flex min-h-12 items-center px-4 text-base font-bold text-soft">
             {t("ui.back.home")}
           </Link>
         ) : null}

@@ -78,7 +78,9 @@ export default function AccountPage() {
           </div>
         </AppHeader>
 
-        <Card className="snd-rise overflow-hidden p-0" style={{ margin: "-32px 16px 0" }} aria-label={t("ui.nav.account")}>
+        {/* Phones: one column (the wrapper vanishes). Desktop: profile and settings left, communities right. */}
+        <div className="contents lg:mx-auto lg:grid lg:w-full lg:max-w-[1200px] lg:grid-cols-2 lg:items-start lg:gap-x-8">
+        <Card className="snd-rise overflow-hidden p-0 lg:col-start-1 lg:row-start-1" style={{ margin: "-32px 16px 0" }} aria-label={t("ui.nav.account")}>
           <ul className="m-0 list-none p-0">
             {rows.map(([k, v], i) => (
               <li key={k} style={{ borderTop: i ? "1px solid var(--hair2)" : undefined }}>
@@ -100,7 +102,7 @@ export default function AccountPage() {
           </ul>
         </Card>
 
-        <section className="snd-rise flex flex-col gap-3.5" style={{ margin: "30px 16px 0", ["--i" as string]: 2 } as React.CSSProperties}>
+        <section className="snd-rise flex flex-col gap-3.5 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:!mt-[26px]" style={{ margin: "30px 16px 0", ["--i" as string]: 2 } as React.CSSProperties}>
           <h2 lang="am" className="mx-1 my-0 font-serif text-[25px] font-bold">
             {t("ui.account.communities")}
           </h2>
@@ -165,7 +167,7 @@ export default function AccountPage() {
           )}
         </section>
 
-        <section className="snd-rise" style={{ margin: "30px 16px 0", ["--i" as string]: 4 } as React.CSSProperties}>
+        <section className="snd-rise lg:col-start-1 lg:row-start-2" style={{ margin: "30px 16px 0", ["--i" as string]: 4 } as React.CSSProperties}>
           <h2 lang="am" className="mx-1 mb-3.5 mt-0 font-serif text-[25px] font-bold">
             {t("ui.account.settings")}
           </h2>
@@ -202,7 +204,7 @@ export default function AccountPage() {
           </div>
         </section>
 
-        <div className="flex justify-center" style={{ margin: "22px 0 28px" }}>
+        <div className="flex justify-center lg:col-span-2" style={{ margin: "22px 0 28px" }}>
           {signedIn ? (
             <button type="button" lang="am" onClick={() => void signOut()} className="h-12 rounded-3xl border-none bg-transparent px-6 text-base font-bold" style={{ color: "var(--dng)" }}>
               {t("ui.account.signOut")}
@@ -212,6 +214,7 @@ export default function AccountPage() {
               {t("ui.signIn.cta")}
             </Link>
           )}
+        </div>
         </div>
       </main>
       <BottomNav />

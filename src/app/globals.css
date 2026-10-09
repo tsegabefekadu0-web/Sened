@@ -170,3 +170,25 @@ button:disabled:active, button[aria-disabled=true]:active { transform: none; fil
 .sened-draw-shell { background: var(--card); color: var(--ink); }
 .sened-hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5; letter-spacing: 0.02em; word-break: break-all; user-select: text; }
 .sened-ticket-glow { box-shadow: 0 0 0 2px var(--rgold); }
+
+/* ---------- Desktop (1024px and up): rail, wide screens, centred voice dialog. Phones never match. ---------- */
+:root { --snd-rail: 232px; }
+@media (min-width: 1024px) {
+  /* A screen that has the rail is as wide as the window, shifted right of the rail. */
+  .snd-screen:has(.snd-rail) { max-width: none; padding-left: var(--snd-rail); }
+  /* Long-form screens (bylaws, offline queue) keep a readable column beside the rail. */
+  .snd-screen.snd-narrow:has(.snd-rail) { padding-left: max(var(--snd-rail), calc(50vw - 380px)); padding-right: max(0px, calc(50vw - 380px)); }
+  .snd-chrow[aria-current="true"] { background: var(--tint); }
+  .snd-row { cursor: pointer; }
+  .snd-row[data-sel="1"] { background: var(--tint); }
+  .snd-rail .snd-tab[aria-current] svg { animation: snd-iconpop 360ms var(--snd-spring) 120ms both; }
+  /* The voice sheet becomes a dialog in the middle of the window. */
+  #snd-vs-sheet {
+    top: 50% !important; bottom: auto !important; left: 50% !important; right: auto !important;
+    width: min(520px, calc(100vw - 48px)); max-width: none !important; margin: 0 !important;
+    border-radius: 28px !important; box-shadow: 0 30px 60px -24px rgba(0,0,0,0.6) !important;
+    opacity: 0; transform: translate(-50%, -46%) scale(0.97) !important;
+    transition: transform 320ms var(--snd-emph), opacity 240ms var(--snd-ease), visibility 0s linear 320ms !important;
+  }
+  #snd-vs-sheet[data-open="1"] { opacity: 1; transform: translate(-50%, -50%) !important; transition: transform 320ms var(--snd-emph), opacity 240ms var(--snd-ease), visibility 0s linear 0s !important; }
+}

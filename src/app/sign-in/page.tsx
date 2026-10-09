@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import React, { useEffect, useState, type FormEvent } from "react";
 
 import { FIELD_CLASS, SimpleScreen } from "@/components/ui/SimpleScreen";
@@ -17,14 +18,18 @@ type Phase = "idle" | "sent" | "failed" | "invalid";
 export default function SignInPage() {
   const { t } = useT();
   const session = useSession();
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [signOutFailed, setSignOutFailed] = useState(false);
 
   // Signed in with an invite waiting (the person came here from /join): go back.
   useEffect(() => {
-    if (session.status === "signed-in" && peekPendingInvite()) window.location.replace("/join");
-  }, [session.status]);
+    if (session.status !== "signed-in") return;
+    // An invite is waiting: finish joining. Otherwise a member who has signed in goes into the app.
+    if (peekPendingInvite()) window.location.replace("/join");
+    else router.replace("/");
+  }, [session.status, router]);
 
   const sendLink = async (): Promise<boolean> => {
     const address = email.trim();
@@ -73,7 +78,7 @@ export default function SignInPage() {
           <p lang="am" className="m-0 text-base leading-[1.5] text-soft">
             {t("auth.notConfiguredBody")}
           </p>
-          <Link href="/" className="flex h-[54px] items-center justify-center rounded-[27px] bg-prim text-[17px] font-bold text-primt">
+          <Link href="/home" className="flex h-[54px] items-center justify-center rounded-[27px] bg-prim text-[17px] font-bold text-primt">
             {t("auth.notConfiguredAction")}
           </Link>
         </div>

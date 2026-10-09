@@ -100,7 +100,7 @@ export default function JoinPage() {
           <p role="alert" lang="am" className="m-0 text-base leading-[1.5]" data-testid="join-outcome">
             {t("join.notConfigured")}
           </p>
-          <Link href="/" className={PRIMARY}>
+          <Link href="/home" className={PRIMARY}>
             {t("auth.notConfiguredAction")}
           </Link>
         </>

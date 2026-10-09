@@ -28,6 +28,9 @@ export default function LedgerPage() {
   const months = useMemo(() => [-2, -1, 0, 1].map((d) => (cur + d + 12) % 12), [cur]);
   const [picked, setPicked] = useState(cur);
   useEffect(() => setPicked(cur), [cur]);
+  // Desktop only: the line shown in the detail panel beside the list.
+  const [sel, setSel] = useState<string | null>(null);
+  useEffect(() => setSel(null), [picked]);
   const names = locale === "am" ? ETHIOPIC_MONTHS : ETHIOPIC_MONTHS_EN;
 
   const rows = c.rows.filter((r) => r.month === picked);
@@ -35,6 +38,8 @@ export default function LedgerPage() {
   const hasVoid = rows.some((r) => r.kind === "void");
   const note = rows.length === 0 ? t("ui.ledger.notStarted") : hasVoid ? t("ui.ledger.correctionNote") : picked < cur ? t("ui.ledger.allConfirmed") : "";
   const pillLabel = (k: LedgerRowView["kind"]) => t(`ui.status.${k}` as MessageKey);
+  const selected = rows.find((r) => r.id === sel) ?? null;
+  const counts = (["paid", "saved", "fixed", "draft", "due", "void"] as const).map((k) => [k, rows.filter((r) => r.kind === k).length] as const).filter(([, n]) => n > 0);
 
   return (
     <Screen loading={loading}>
@@ -43,6 +48,9 @@ export default function LedgerPage() {
       </AppHeader>
       <CommunityNotice mode={c.mode} />
 
+      {/* Phones: one column (the wrapper vanishes). Desktop: months and lines on the left, detail or summary on the right. */}
+      <div className="contents lg:mx-auto lg:grid lg:w-full lg:max-w-[1200px] lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)] lg:items-start lg:gap-x-8">
+      <div className="contents lg:col-start-1 lg:flex lg:flex-col">
       <div role="group" aria-label={t("ui.ledger.months")} className="grid grid-cols-4 gap-2" style={{ padding: "18px 16px 6px" }}>
         {months.map((m) => {
           const on = picked === m;
@@ -100,7 +108,17 @@ export default function LedgerPage() {
               return (
                 <li
                   key={r.id}
-                  className="box-border flex min-h-[72px] items-center gap-3 px-4 py-3"
+                  className="snd-row box-border flex min-h-[72px] items-center gap-3 px-4 py-3"
+                  data-sel={sel === r.id ? "1" : undefined}
+                  tabIndex={0}
+                  aria-current={sel === r.id ? "true" : undefined}
+                  onClick={() => setSel(r.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setSel(r.id);
+                    }
+                  }}
                   style={{ borderBottom: i === rows.length - 1 ? undefined : "1px solid var(--hair2)", animation: "snd-rise 420ms var(--snd-emph) both", animationDelay: `${i * 40 + 140}ms` }}
                 >
                   <WovenAvatar initial={r.initial} size={48} dim={voided} fontSize={18} />
@@ -131,6 +149,88 @@ export default function LedgerPage() {
           {note}
         </p>
       ) : null}
+      </div>
+      <aside aria-label={selected ? t("ui.ledger.detail") : t("ui.ledger.summary")} className="hidden lg:col-start-2 lg:mr-4 lg:block lg:sticky lg:top-6" style={{ marginTop: 18 }}>
+        <Card className="snd-rise flex flex-col gap-4 p-5">
+          {selected ? (
+            <>
+              <div className="flex items-center gap-3.5">
+                <WovenAvatar initial={selected.initial} size={64} dim={selected.kind === "void"} fontSize={24} />
+                <span className="flex min-w-0 grow flex-col gap-0.5">
+                  <span lang="am" className="text-sm text-muted">
+                    {t("ui.ledger.detail")}
+                  </span>
+                  <span lang="am" className="font-serif text-xl font-bold leading-[1.3]">
+                    {selected.name}
+                  </span>
+                </span>
+              </div>
+              <span className="flex items-baseline gap-1.5">
+                <span className="font-display text-[32px] font-extrabold leading-[1.1]" style={{ letterSpacing: "-0.02em" }}>
+                  {formatBirr(selected.amount)}
+                </span>
+                <span lang="am" className="font-serif text-xl font-bold">
+                  {t("ui.birr")}
+                </span>
+              </span>
+              <StatusPill kind={selected.kind} label={pillLabel(selected.kind)} />
+              <dl className="m-0 flex flex-col">
+                {(
+                  [
+                    [names[selected.month], t("ui.ledger.months")],
+                    [selected.channel ? t(CHANNEL_KEY[selected.channel]) : null, t("ui.ledger.channel")],
+                    [selected.ref, t("ui.ledger.ref")],
+                    [selected.correction ? t("ui.ledger.correction") : null, t("ui.ledger.correction")],
+                    [String(selected.sequence), t("ui.ledger.entryNo")]
+                  ] as const
+                )
+                  .filter(([v]) => v)
+                  .map(([v, k]) => (
+                    <div key={k} className="flex items-baseline justify-between gap-3 py-2.5" style={{ borderTop: "1px solid var(--hair2)" }}>
+                      <dt lang="am" className="text-sm text-muted">
+                        {k}
+                      </dt>
+                      <dd lang="am" className="m-0 text-right text-base font-bold [overflow-wrap:anywhere]">
+                        {v}
+                      </dd>
+                    </div>
+                  ))}
+              </dl>
+            </>
+          ) : (
+            <>
+              <h2 lang="am" className="m-0 font-serif text-[25px] font-bold">
+                {t("ui.ledger.summary")}
+              </h2>
+              <span className="flex items-baseline gap-1.5">
+                <span className="font-display text-[32px] font-extrabold leading-[1.1]" style={{ letterSpacing: "-0.02em" }}>
+                  {formatBirr(total)}
+                </span>
+                <span lang="am" className="font-serif text-xl font-bold">
+                  {t("ui.birr")}
+                </span>
+              </span>
+              <span lang="am" className="text-sm text-muted">
+                {names[picked]} · {t("ui.ledger.entries")} {rows.length}
+              </span>
+              {counts.length > 0 ? (
+                <ul className="m-0 flex list-none flex-wrap gap-2 p-0">
+                  {counts.map(([k, n]) => (
+                    <li key={k} className="flex items-center gap-2">
+                      <StatusPill kind={k} label={pillLabel(k)} />
+                      <span className="font-display text-[17px] font-extrabold">{n}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              <p lang="am" className="m-0 text-sm leading-[1.5] text-muted">
+                {rows.length > 0 ? t("ui.ledger.pickEntry") : note}
+              </p>
+            </>
+          )}
+        </Card>
+      </aside>
+      </div>
       <div style={{ height: 28 }} />
       <BottomNav />
     </Screen>

@@ -120,6 +120,7 @@ export function VoiceSheet() {
       />
       <section
         id="snd-vs-sheet"
+        data-open={open ? "1" : "0"}
         ref={sheetRef}
         role="dialog"
         aria-modal="true"

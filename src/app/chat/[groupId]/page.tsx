@@ -5,11 +5,14 @@ import { useParams } from "next/navigation";
 import React, { useEffect, useRef, useState } from "react";
 
 import { Icon, type IconName } from "@/components/ui/Icon";
+import { BottomNav } from "@/components/ui/BottomNav";
+import { ChannelList } from "@/components/ui/ChannelList";
 import { Screen } from "@/components/ui/primitives";
 import { WovenRing } from "@/components/ui/Weave";
 import { useActiveGroup } from "@/lib/groups/useActiveGroup";
 import { SAMPLE_CHANNEL_ID, useChannel, type ChatItem } from "@/lib/ui/chatStore";
 import { useCommunity } from "@/lib/ui/useCommunity";
+import { useDesktop } from "@/lib/ui/useDesktop";
 import { useT } from "@/lib/ui/useT";
 import { VoiceRecorder, isRecordingSupported } from "@/lib/voice/recorder";
 
@@ -21,6 +24,7 @@ export default function ChannelPage() {
   const { t } = useT();
   const group = useActiveGroup();
   const c = useCommunity();
+  const desktop = useDesktop();
   const ch = useChannel(channelId, c);
   const [draft, setDraft] = useState("");
   const [rec, setRec] = useState(false);
@@ -96,6 +100,7 @@ export default function ChannelPage() {
     <Screen loading={c.mode === "loading" && !ch.sample}>
       <main className="flex grow flex-col">
         <header className="relative flex items-center gap-0.5 overflow-hidden text-white" style={{ background: "var(--shop)", padding: "8px 8px 72px 6px", borderRadius: "0 0 28px 28px" }}>
+          <div className="flex w-full items-center gap-0.5 lg:mx-auto lg:max-w-[1200px]">
           <Link href="/chat" aria-label={t("ui.chat.back")} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-white">
             <Icon name="back" size={22} />
           </Link>
@@ -120,11 +125,20 @@ export default function ChannelPage() {
           <Link href="/ledger" aria-label={t("ui.nav.ledger")} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-white">
             <Icon name="more" size={22} />
           </Link>
+          </div>
           <span aria-hidden="true" className="snd-weave absolute left-0 right-0 flex flex-col overflow-hidden" style={{ bottom: 40, height: 22, boxShadow: "0 5px 8px -3px rgba(0,0,0,0.5)" }}>
             <RibbonBody />
           </span>
         </header>
 
+        {/* Phones: one column (the wrappers vanish). Desktop: the chat list on the left, this conversation on the right. */}
+        <div className="contents lg:mx-auto lg:grid lg:w-full lg:max-w-[1200px] lg:grow lg:grid-cols-[380px_minmax(0,1fr)] lg:items-stretch lg:gap-x-8">
+        {desktop ? (
+          <div className="lg:self-start">
+            <ChannelList activeId={channelId} />
+          </div>
+        ) : null}
+        <div className="contents lg:flex lg:min-w-0 lg:flex-col">
         <p lang="am" role="note" data-testid="chat-note" className="snd-rise relative m-0 flex items-center gap-3 rounded-[22px] border border-hair bg-card text-sm leading-[1.5] text-soft" style={{ margin: "-26px 16px 0", padding: "12px 14px", boxShadow: "var(--lift)" }}>
           <span aria-hidden="true" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full" style={{ background: "var(--tint)", color: "var(--shop)" }}>
             <Icon name="pin" size={20} />
@@ -177,7 +191,10 @@ export default function ChannelPage() {
             </>
           )}
         </form>
+        </div>
+        </div>
       </main>
+      <BottomNav railOnly active="chat" />
     </Screen>
   );
 }

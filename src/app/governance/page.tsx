@@ -85,7 +85,7 @@ export default function GovernancePage() {
   );
 
   return (
-    <Screen>
+    <Screen className="snd-narrow">
       <main className="flex grow flex-col">
         <AppHeader title={t("governance.eyebrow")} subtitle="Bylaws" bottom={72} ribbon={32} right={<LanguageSwitch />} />
         <Card className="snd-rise flex flex-col gap-4 p-5" style={{ margin: "-34px 16px 0" }}>

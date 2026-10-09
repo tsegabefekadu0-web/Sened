@@ -54,8 +54,10 @@ export function AppHeader({
   return (
     <header
       className="relative flex flex-col overflow-hidden text-white"
-      style={{ background: "var(--shop)", padding: `${back ? 10 : 18}px ${back ? 14 : 20}px ${bottom}px ${back ? 8 : 20}px`, gap: children ? 22 : 0, borderRadius: "0 0 28px 28px" }}
+      style={{ background: "var(--shop)", padding: `${back ? 10 : 18}px ${back ? 14 : 20}px ${bottom}px ${back ? 8 : 20}px`, borderRadius: "0 0 28px 28px" }}
     >
+      {/* On desktop the green runs edge to edge while its content keeps the 1200px column. */}
+      <div className="flex flex-col lg:mx-auto lg:w-full lg:max-w-[1200px]" style={{ gap: children ? 22 : 0 }}>
       {title ? (
         <div className="flex items-center gap-2">
           {back ? (
@@ -77,6 +79,7 @@ export function AppHeader({
         </div>
       ) : null}
       {children}
+      </div>
       <TibebRibbon style={{ bottom: ribbon }} />
     </header>
   );

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CollateralPanel, type CollateralOutcome, type CollateralState } from "@/components/draw/CollateralPanel";
+import { CollateralPanel, type CollateralOutcome, type CollateralState } from "@/components/draw-console/CollateralPanel";
 import { parseCycleCollateral } from "@/lib/draw/collateral";
 import type { GuaranteeCommand } from "@/lib/draw/clientDraw";
 import { dictionaries, translate, type Locale, type MessageKey } from "@/lib/i18n";

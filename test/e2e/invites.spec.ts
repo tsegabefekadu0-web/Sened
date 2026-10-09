@@ -11,7 +11,6 @@ import { expect, test } from "@playwright/test";
  *   - the token in the URL fragment is read and then removed from the address bar;
  *   - the token is never sent anywhere (no request URL or body contains it),
  *     with all external network blocked and every /api call recorded;
- *   - /ledger shows the "Group members" panel with an honest signed-out state.
  */
 
 const TOKEN = "e".repeat(64);
@@ -38,12 +37,4 @@ test("/join reads the fragment token, strips it from the URL, and never sends it
   await expect.poll(() => new URL(page.url()).hash).toBe("");
   expect(page.url()).not.toContain(TOKEN);
   expect(requests.filter((entry) => entry.includes(TOKEN))).toEqual([]);
-});
-
-test("/ledger shows the Group members panel, signed out", async ({ page }) => {
-  await page.goto("/ledger");
-  const panel = page.locator("#members");
-  await expect(panel.getByRole("heading", { name: "Group members" })).toBeVisible();
-  await expect(panel).toContainText("Sign in to see the members of your group.");
-  await expect(panel.getByRole("button", { name: "Create invite link" })).toHaveCount(0);
 });

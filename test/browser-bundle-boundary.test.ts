@@ -34,13 +34,12 @@ const BROWSER_REACHABLE = [
   "src/lib/offline",
   "src/lib/db",
   "src/lib/governance",
-  "src/components/governance",
+  "src/components",
   "src/app/governance",
-  "src/components/draw",
-  "src/components/voice",
   "src/app/draw",
   "src/app/voice",
-  "src/app/offline"
+  "src/app/offline",
+  "src/app/welcome"
 ];
 
 const NODE_BUILTIN = /from\s+["']node:/;

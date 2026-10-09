@@ -1,43 +1,31 @@
 import type { Metadata, Viewport } from "next";
-import { Noto_Sans_Ethiopic, Plus_Jakarta_Sans } from "next/font/google";
+import {
+  Abyssinica_SIL,
+  Atkinson_Hyperlegible,
+  Bricolage_Grotesque,
+  Noto_Sans_Ethiopic,
+  Noto_Serif_Ethiopic
+} from "next/font/google";
+
 import "./globals.css";
+import { PressFeedback } from "@/components/ui/PressFeedback";
 import { ServiceWorkerRegistration } from "@/components/pwa/ServiceWorkerRegistration";
-import { VoxideAssistantLazy } from "@/components/voice/VoxideAssistantLazy";
+import { VoxideAssistantLazy } from "@/components/assistant/VoxideAssistantLazy";
 import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
+import { THEME_INIT_SCRIPT } from "@/lib/ui/theme";
 
 // Self-hosted at build time by next/font, so no runtime request goes to Google.
-// The CSS variables are consumed first in the font stacks in globals.css and
-// tailwind.config.js; the original family names stay behind them as fallbacks.
-const notoSansEthiopic = Noto_Sans_Ethiopic({
-  subsets: ["ethiopic", "latin"],
-  weight: ["400", "500", "600", "700", "800"],
-  display: "swap",
-  variable: "--font-noto-sans-ethiopic"
-});
-
-const plusJakartaSans = Plus_Jakarta_Sans({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
-  display: "swap",
-  variable: "--font-plus-jakarta-sans"
-});
+const notoSans = Noto_Sans_Ethiopic({ subsets: ["ethiopic", "latin"], weight: ["400", "600", "700"], display: "swap", variable: "--font-noto-sans-ethiopic" });
+const notoSerif = Noto_Serif_Ethiopic({ subsets: ["ethiopic", "latin"], weight: ["500", "700"], display: "swap", variable: "--font-noto-serif-ethiopic" });
+const bricolage = Bricolage_Grotesque({ subsets: ["latin"], weight: ["500", "600", "700", "800"], display: "swap", variable: "--font-bricolage" });
+const atkinson = Atkinson_Hyperlegible({ subsets: ["latin"], weight: ["400", "700"], display: "swap", variable: "--font-atkinson" });
+const abyssinica = Abyssinica_SIL({ subsets: ["ethiopic"], weight: "400", display: "swap", variable: "--font-abyssinica" });
 
 export const metadata: Metadata = {
-  title: "Sened (ሰነድ) — የህብረተሰብ እቁብ እና ዕድር አስተዳዳሪ",
-  description: "Voice-Audited Community Treasury & Dispute-Free Trust Engine for Ethiopian Equbs and Iddirs.",
-  // A manifest is not discoverable until the document references it, so this is
-  // the single line that makes the offline console installable. The manifest
-  // itself and the service worker are AGENT-4's (`public/manifest.json`,
-  // `public/sw.js`); `src/app/layout.tsx` is A1's, which is why the link lived
-  // as a filed request rather than an edit. See docs/requests/agent-4.md R2.
+  title: "ሰነድ · Sened",
+  description: "A shared ledger for your equb: say what was paid, the bank confirms it, everyone can see.",
   manifest: "/manifest.json",
-  appleWebApp: {
-    capable: true,
-    title: "Sened",
-    statusBarStyle: "black-translucent"
-  },
-  // Chrome deprecated apple-mobile-web-app-capable (emitted above for iOS) in
-  // favour of this standard tag; both are kept so neither platform loses it.
+  appleWebApp: { capable: true, title: "Sened", statusBarStyle: "black-translucent" },
   other: { "mobile-web-app-capable": "yes" },
   icons: {
     icon: [
@@ -51,23 +39,25 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: "#140F0D"
+  themeColor: "#1F6B4A"
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const fonts = [notoSans, notoSerif, bricolage, atkinson, abyssinica].map((f) => f.variable).join(" ");
   return (
-    <html lang="am" className={`${notoSansEthiopic.variable} ${plusJakartaSans.variable}`}>
-      <body className="min-h-screen bg-[#F4EEE5] font-ethiopic antialiased selection:bg-terracotta-500 selection:text-white">
+    <html lang="am" className={fonts} suppressHydrationWarning>
+      <head>
+        {/* Sets data-theme before first paint: saved choice, else the device preference. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
+      <body className="min-h-screen font-body antialiased">
         <ServiceWorkerRegistration />
-        {/* One active group for the whole app: a client provider inside this server layout. */}
+        <PressFeedback />
+        {/* One active group for the whole app. */}
         <ActiveGroupProvider>
           {children}
-          {/* Once, here, so the voice widget survives navigation. Renders nothing without NEXT_PUBLIC_VOXIDE_KEY. */}
-          <VoxideAssistantLazy />
+          {/* Headless: the English voice sheet drives it. Renders nothing without NEXT_PUBLIC_VOXIDE_KEY. */}
+          <VoxideAssistantLazy headless />
         </ActiveGroupProvider>
       </body>
     </html>

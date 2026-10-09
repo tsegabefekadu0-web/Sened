@@ -42,7 +42,7 @@ vi.mock("@voxide/react", () => {
   return { VoxideClient, VoxideWidget: () => <div data-testid="voxide-widget" /> };
 });
 
-import { VoxideAssistant, toVoxideAction } from "@/components/voice/VoxideAssistant";
+import { VoxideAssistant, toVoxideAction } from "@/components/assistant/VoxideAssistant";
 import { createCapabilities } from "@/lib/voice/capabilities";
 
 beforeEach(() => {

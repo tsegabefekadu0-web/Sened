@@ -32,3 +32,4 @@ skills-lock.json
 
 # Claude Code worktrees
 .claude/worktrees/
+brag-output/

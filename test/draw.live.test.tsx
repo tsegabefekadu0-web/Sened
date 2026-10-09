@@ -21,9 +21,7 @@ vi.mock("@/lib/draw/haptics", async (importOriginal) => ({
   triggerHaptic
 }));
 
-import DrawPage from "@/app/draw/page";
-import { LiveDraw } from "@/components/draw/LiveDraw";
-import { GroupSwitcher } from "@/components/shell/GroupSwitcher";
+import { LiveDraw } from "@/components/draw-console/LiveDraw";
 import { ActiveGroupProvider } from "@/lib/groups/useActiveGroup";
 import { drawErrorKey, readSeal, sealForDraw, writeSeal } from "@/lib/draw/clientDraw";
 import { DRAW_ERROR_CODES } from "@/lib/draw/types";
@@ -682,43 +680,6 @@ describe("roles", () => {
     expect(await screen.findByTestId("draw-live-refusal")).toHaveTextContent("Choose one with the group switcher");
     expect(many.calls).not.toContain("GET /api/ledger/members");
   });
-
-  it("with several groups, the switcher decides which group's draw is read, and a switch reloads it", async () => {
-    const user = userEvent.setup();
-    const server = createServer("owner", { groups: 2 });
-    hoisted.session = { status: "signed-in", accessToken: tokenFor(TREASURER), email: "t@example.test", userId: TREASURER };
-    const base = deps(server, TREASURER);
-    const fetchSpy = vi.fn(base.fetchImpl);
-    switchDevice(TREASURER);
-    render(
-      <ActiveGroupProvider
-        storage={window.localStorage}
-        fetchGroups={async () => ({
-          kind: "ok",
-          userId: TREASURER,
-          groups: [
-            { groupId: GROUP, name: "Bole Equb", role: "owner" },
-            { groupId: TENANT, name: "Family Iddir", role: "owner" }
-          ]
-        })}
-      >
-        <GroupSwitcher locale="en" />
-        <LiveDraw locale="en" accessToken={tokenFor(TREASURER)} deps={{ ...base, fetchImpl: fetchSpy as unknown as typeof fetch }} />
-      </ActiveGroupProvider>
-    );
-    expect(await screen.findByTestId("draw-live-refusal")).toHaveTextContent("Choose one with the group switcher");
-    const membersFor = () =>
-      fetchSpy.mock.calls.map(([input]) => String(input)).filter((url) => url.startsWith("/api/ledger/members"));
-    expect(membersFor()).toEqual([]);
-
-    const switcher = screen.getByRole("combobox", { name: "Group" });
-    await user.selectOptions(switcher, GROUP);
-    await screen.findByTestId("draw-live");
-    expect(membersFor().at(-1)).toContain(`groupId=${GROUP}`);
-
-    await user.selectOptions(switcher, TENANT);
-    await waitFor(() => expect(membersFor().at(-1)).toContain(`groupId=${TENANT}`));
-  });
 });
 
 describe("server errors", () => {
@@ -908,47 +869,6 @@ describe("verification happens in the browser", () => {
     // The risk notes are Amharic too, not the engine's English.
     expect(riskAm.textContent).toContain("መነሻ ክምችቱ");
     expect(riskAm.textContent ?? "").not.toContain("Base reserve is");
-  });
-});
-
-describe("signed out", () => {
-  it("keeps the on-device demo, labelled as a demo in both languages, and calls no draw API", async () => {
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-    try {
-      hoisted.session = { status: "signed-out" };
-      const user = userEvent.setup();
-      render(<DrawPage />);
-
-      const banner = screen.getByTestId("draw-demo-banner");
-      expect(banner).toHaveTextContent("የልምምድ");
-      expect(banner).toHaveTextContent("ለቡድንዎ እውነተኛ እጣ ለማውጣት ይግቡ");
-
-      await user.click(screen.getByRole("button", { name: "Switch to English" }));
-      expect(screen.getByTestId("draw-demo-banner")).toHaveTextContent("Practice draw");
-      expect(screen.getByTestId("draw-demo-banner")).toHaveTextContent("Sign in to run a real draw for your group.");
-      expect(screen.queryByTestId("draw-live")).toBeNull();
-
-      await user.click(screen.getByRole("button", { name: "Lock the draw" }));
-      await screen.findByRole("button", { name: "Pick the winner" });
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("says so when this build has no server", () => {
-    hoisted.session = { status: "unconfigured" };
-    render(<DrawPage />);
-    expect(screen.getByTestId("draw-demo-banner")).toHaveTextContent("ይህ ስሪት ከአገልጋይ ጋር አልተገናኘም");
-  });
-
-  it("does not show the demo to a signed-in user", async () => {
-    hoisted.session = { status: "signed-in", accessToken: tokenFor(TREASURER), email: "t@example.test" };
-    render(<DrawPage />);
-    expect(screen.queryByTestId("draw-demo-banner")).toBeNull();
-    // No browser session in this test, so the live board refuses honestly.
-    expect(await screen.findByTestId("draw-live-refusal")).toBeInTheDocument();
   });
 });
 

@@ -14,7 +14,7 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: vi.fn(() => ({ auth: { getUser: async () => ({ data: { user: { id: hoisted.userId } }, error: null }) } }))
 }));
 
-import { LiveDraw } from "@/components/draw/LiveDraw";
+import { LiveDraw } from "@/components/draw-console/LiveDraw";
 import type { DrawContributionGate } from "@/lib/draw/types";
 import { dictionaries, translate, type Locale, type MessageKey } from "@/lib/i18n";
 

@@ -2,220 +2,171 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ---------- Theme tokens (light default, dark via [data-theme=dark]) ---------- */
 :root {
-  --font-ethiopic: var(--font-noto-sans-ethiopic), 'Noto Sans Ethiopic', 'Nyala', 'Abyssinica SIL', 'Segoe UI', sans-serif;
-  --font-sans: var(--font-plus-jakarta-sans), 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --snd-d1: 120ms; --snd-d2: 200ms; --snd-d3: 320ms; --snd-d4: 600ms;
+  --snd-ease: cubic-bezier(.2,.8,.2,1);
+  --snd-emph: cubic-bezier(.32,.72,0,1);
+  --snd-spring: cubic-bezier(.34,1.56,.64,1);
+  --shop: #1F6B4A;
+  --bg:#F6F5F2; --card:#FFFFFF; --ink:#1C1A17; --muted:#615A50; --soft:#4A443C; --hair:#E2DED6; --hair2:#EDEAE3;
+  --field:#FFFFFF; --prim:#1C1A17; --primt:#FFFFFF; --chipb:#D6D1C7; --bubble:#FFFFFF; --segon:#FFFFFF; --dng:#8F3A2E;
+  --sk:#ECE7DD; --skhi:rgba(255,252,246,0.65); --grain:rgba(60,40,20,0.013); --grain2:rgba(60,40,20,0.010);
+  --lift:0 12px 28px -14px rgba(28,26,23,0.45);
+  --rcream:#F7F0DE; --rred:#A92B22; --rgreen:#23703F; --rgold:#E3B23C; --sheen:0.30; --ringf:none;
+  --tint: rgba(31,107,74,0.14);
+  --chipcol: #7A5200; --chipcol-bg: #F8EBCB;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --shop: #2C7455;
+  --bg:#16130F; --card:#201B16; --ink:#F3EEE4; --muted:#B9AFA0; --soft:#D6CEC0; --hair:#2E2721; --hair2:#2A241E;
+  --field:#1A1612; --prim:#F3EEE4; --primt:#16130F; --chipb:#3B332B; --bubble:#2A241E; --segon:#3B332B; --dng:#F4A59C;
+  --sk:#2A241E; --skhi:rgba(255,235,210,0.09); --grain:rgba(255,235,210,0.022); --grain2:rgba(255,235,210,0.012);
+  --lift:0 14px 30px -14px rgba(0,0,0,0.75);
+  --rcream:#B6AB8E; --rred:#8C261E; --rgreen:#1A5A34; --rgold:#BE9531; --sheen:0.12; --ringf:brightness(0.84) saturate(0.9);
+  --tint: rgba(44,116,85,0.18);
+  --chipcol: #F2C86E; --chipcol-bg: rgba(242,200,110,0.16);
+  color-scheme: dark;
 }
 
+/* ---------- Reset ---------- */
+html { -webkit-text-size-adjust: 100%; }
 body {
-  background-color: #120D0A;
-  color: #1C140F;
-  font-family: var(--font-ethiopic), var(--font-sans);
-  -webkit-tap-highlight-color: transparent;
-  overflow-x: hidden;
-  user-select: text;
+  margin: 0; background-color: var(--bg); color: var(--ink);
+  font-family: var(--font-atkinson), var(--font-noto-sans-ethiopic), system-ui, sans-serif;
+  background-image: repeating-linear-gradient(0deg, var(--grain) 0 1px, transparent 1px 3px), repeating-linear-gradient(90deg, var(--grain) 0 1px, transparent 1px 3px);
+  transition: background-color 320ms var(--snd-ease), color 320ms var(--snd-ease);
+}
+a { color: inherit; text-decoration: none; }
+button { font-family: inherit; color: inherit; }
+input, textarea, select { font-family: inherit; }
+.no-scrollbar::-webkit-scrollbar, .chips::-webkit-scrollbar { display: none; }
+.no-scrollbar, .chips { scrollbar-width: none; }
+
+/* ---------- Keyframes ---------- */
+@keyframes snd-rise { from { opacity:0; transform:translateY(12px) } to { opacity:1; transform:translateY(0) } }
+@keyframes snd-fade { from { opacity:0 } to { opacity:1 } }
+@keyframes snd-weave { from { clip-path: inset(-24px 100% -24px 0) } to { clip-path: inset(-24px -24px -24px 0) } }
+@keyframes snd-pop { 0%{opacity:0;transform:scale(.8)} 60%{opacity:1;transform:scale(1.06)} 100%{opacity:1;transform:scale(1)} }
+@keyframes snd-seg { from{opacity:0;transform:scale(.94)} to{opacity:1;transform:scale(1)} }
+@keyframes snd-spin { from{opacity:0;transform:rotate(-160deg) scale(.88)} to{opacity:1;transform:none} }
+@keyframes snd-breathe { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.045);opacity:.78} }
+@keyframes snd-bar { 0%,100%{transform:scaleY(.4)} 50%{transform:scaleY(1)} }
+@keyframes snd-check { from{stroke-dashoffset:24} to{stroke-dashoffset:0} }
+@keyframes snd-strike { from{transform:scaleX(0)} to{transform:scaleX(1)} }
+@keyframes snd-shimmer { from{transform:translateX(-130%)} to{transform:translateX(130%)} }
+@keyframes snd-pulse { 0%{opacity:.9;transform:scale(1)} 100%{opacity:0;transform:scale(1.07)} }
+@keyframes snd-fillin { from{opacity:0} to{opacity:1} }
+@keyframes snd-slide-r { from{opacity:0;transform:translateX(28px)} to{opacity:1;transform:none} }
+@keyframes snd-slide-l { from{opacity:0;transform:translateX(-28px)} to{opacity:1;transform:none} }
+@keyframes snd-msg { from{opacity:0;transform:translateY(14px) scale(.98)} to{opacity:1;transform:none} }
+@keyframes snd-rec { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.4);opacity:.45} }
+@keyframes snd-glow { 0%,100%{transform:scale(1);opacity:.30} 50%{transform:scale(1.34);opacity:0} }
+@keyframes snd-iconpop { 0%{transform:scale(1)} 45%{transform:scale(1.14)} 100%{transform:scale(1)} }
+@keyframes snd-spin360 { to{transform:rotate(360deg)} }
+@keyframes snd-shake { 0%,100%{transform:translateX(0)} 16%{transform:translateX(-6px)} 33%{transform:translateX(6px)} 50%{transform:translateX(-6px)} 66%{transform:translateX(6px)} 83%{transform:translateX(-3px)} }
+@keyframes snd-sk { from{background-position:130% 0,0 0} to{background-position:-30% 0,0 0} }
+@keyframes snd-word { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
+
+.snd-rise { animation: snd-rise var(--snd-d4) var(--snd-emph) both; animation-delay: calc(var(--i,0)*40ms + 120ms); }
+.snd-fade { animation: snd-fade var(--snd-d3) var(--snd-ease) both; animation-delay: calc(var(--i,0)*40ms + 200ms); }
+.snd-weave { animation: snd-weave var(--snd-d4) var(--snd-ease) both; }
+.snd-stagger > * { animation: snd-fade var(--snd-d3) var(--snd-ease) both; animation-delay: calc(var(--n,0)*40ms + 260ms); }
+.snd-stagger > *:nth-child(2){--n:1} .snd-stagger > *:nth-child(3){--n:2} .snd-stagger > *:nth-child(4){--n:3}
+.snd-msg { animation: snd-msg 320ms var(--snd-spring) both; }
+
+/* ---------- Press feedback ---------- */
+button, a[href] {
+  transition: transform 280ms var(--snd-spring), filter 160ms var(--snd-ease), box-shadow var(--snd-d2) var(--snd-ease),
+    background-color 320ms var(--snd-ease), color 320ms var(--snd-ease), border-color 320ms var(--snd-ease);
+}
+button:active, a[href]:active {
+  transform: scale(var(--snd-s,.96)); filter: brightness(var(--snd-f,.94));
+  transition: transform 40ms ease-out, filter 40ms ease-out, box-shadow 40ms ease-out;
+}
+button.snd-dock:active { transform: scale(.93,.9); }
+button[role=switch]:active { transform: none !important; filter: none !important; }
+button:disabled:active, button[aria-disabled=true]:active { transform: none; filter: none; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+
+/* ---------- Bottom nav tab states ---------- */
+.snd-tab .snd-fillg, .snd-tab .snd-accg { opacity: 0; }
+.snd-tab[aria-current] .snd-fillg { opacity: 1; animation: snd-fillin var(--snd-d3) var(--snd-ease) 120ms both; }
+.snd-tab[aria-current] .snd-accg { opacity: 1; animation: snd-fillin var(--snd-d3) var(--snd-ease) 220ms both; }
+.snd-tab[aria-current] svg { animation: snd-iconpop 360ms var(--snd-spring) 120ms both; }
+
+/* ---------- Tibeb ribbon & woven pieces ---------- */
+.snd-weave-tex { background-color: var(--rcream);
+  background-image: radial-gradient(circle at 50% 50%, var(--rgold) 0 1.5px, transparent 2px),
+    radial-gradient(circle at 0 0, var(--rgreen) 0 1.6px, transparent 2.1px), radial-gradient(circle at 100% 0, var(--rgreen) 0 1.6px, transparent 2.1px),
+    radial-gradient(circle at 0 100%, var(--rgreen) 0 1.6px, transparent 2.1px), radial-gradient(circle at 100% 100%, var(--rgreen) 0 1.6px, transparent 2.1px),
+    linear-gradient(45deg, transparent calc(50% - 1px), var(--rred) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
+    linear-gradient(135deg, transparent calc(50% - 1px), var(--rred) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)); }
+.snd-yarn { background-image: repeating-linear-gradient(90deg, rgba(0,0,0,0.14) 0 1px, transparent 1px 2px), repeating-linear-gradient(0deg, rgba(255,255,255,0.16) 0 1px, transparent 1px 3px); }
+.snd-cotton { background-image: repeating-linear-gradient(0deg, var(--grain2) 0 1px, transparent 1px 3px), repeating-linear-gradient(90deg, var(--grain2) 0 1px, transparent 1px 3px); }
+.snd-conic { background-image: repeating-linear-gradient(90deg, rgba(0,0,0,0.14) 0 1px, transparent 1px 2px), repeating-linear-gradient(0deg, rgba(255,255,255,0.16) 0 1px, transparent 1px 3px),
+  repeating-conic-gradient(#A92B22 0 15deg, #E3B23C 15deg 30deg, #23703F 30deg 45deg, #F7F0DE 45deg 60deg, #A92B22 60deg 75deg, #23703F 75deg 90deg); }
+
+/* ---------- Skeleton (applied with .snd-loading on a screen root) ---------- */
+.snd-loading :where(span,p,h1,h2,h3,dd,dt,label,a,button,li,input,blockquote,figcaption):not(:has(> :not(svg,path,g,circle,rect,line,polyline,span:empty))):not(nav *):not([data-no-sk] *) {
+  color: transparent !important; background-color: var(--sk) !important;
+  background-image: linear-gradient(100deg, transparent 30%, var(--skhi) 50%, transparent 70%), repeating-linear-gradient(90deg, rgba(60,40,20,.035) 0 1px, transparent 1px 3px) !important;
+  background-size: 220% 100%, auto !important; background-repeat: no-repeat, repeat !important;
+  animation: snd-sk 1.4s linear infinite !important; border-color: transparent !important; text-shadow: none !important; box-shadow: none !important;
+}
+.snd-loading header { --sk: rgba(255,255,255,.22); --skhi: rgba(255,255,255,.40); }
+.snd-loading svg[viewBox="0 0 24 24"]:not(nav *):not([data-no-sk] *) { opacity: 0; }
+.snd-loading svg[viewBox="0 0 176 176"]:not(nav *) { opacity: .2; filter: grayscale(1); }
+.snd-loading p:not(nav *):not([data-no-sk] *) { -webkit-mask-image: repeating-linear-gradient(to bottom,#000 0 calc(1lh - 7px),transparent calc(1lh - 7px) 1lh); mask-image: repeating-linear-gradient(to bottom,#000 0 calc(1lh - 7px),transparent calc(1lh - 7px) 1lh); }
+.snd-loading ::placeholder { color: transparent; }
+.snd-bone { background-color: var(--sk); background-image: linear-gradient(100deg, transparent 30%, var(--skhi) 50%, transparent 70%); background-size: 220% 100%; background-repeat: no-repeat; animation: snd-sk 1.4s linear infinite; border-radius: 10px; }
+
+/* ---------- Slide switch tokens ---------- */
+:root {
+  --swoff: #E7E2D8; --swon: color-mix(in srgb, var(--shop) 50%, #fff);
+  --swwell: inset 0 2px 5px rgba(60,40,20,0.30), inset 0 -1px 1px rgba(255,255,255,0.7);
+  --swface: #FBF8F2 40%, #DDD6C8 100%;
+}
+:root[data-theme="dark"] {
+  --swoff: #2B251F; --swon: color-mix(in srgb, var(--shop) 84%, #fff);
+  --swwell: inset 0 2px 6px rgba(0,0,0,0.65), inset 0 -1px 0 rgba(255,255,255,0.07);
+  --swface: #F3EEE4 40%, #CFC7B8 100%;
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 4px;
-}
+/* ---------- Status pills ---------- */
+.snd-pill { color: var(--pc); background: var(--pb); }
+.snd-pill-dot { background: var(--pc); }
+:root[data-theme="dark"] .snd-pill { color: var(--pcd); background: var(--pbd); }
+:root[data-theme="dark"] .snd-pill-dot { background: var(--pcd); }
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(198, 83, 43, 0.3);
-  border-radius: 9999px;
-}
-
+/* ---------- Reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {
-
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
-  }
+  *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; scroll-behavior: auto !important; }
+  .snd-bar { animation: none !important; }
+  button:active, a[href]:active { transform: none !important; }
+  .snd-bone, .snd-loading * { animation: none !important; }
 }
 
-/*
- * Offline-first PWA — AGENT-4 (M6.1).
- *
- * `globals.css` is AGENT-4's per AGENTWORK §4.2; A2 and A3 own their own CSS
- * files. Everything below is additive and scoped to the offline desk.
- */
+/* ---------- Draw ceremony: CSS fallback + winner card ---------- */
+.fb-lid{transform:translate(-8px,-52px) rotate(-14deg);transform-origin:200px 105px;animation:fb-lid 1.7s var(--snd-emph) 500ms both}
+@keyframes fb-lid{from{transform:none}38%{transform:translate(0,-34px) rotate(-3deg)}}
+.fb-slip{position:absolute;left:59px;bottom:146px;width:132px;height:86px;transform:translateY(-80px);animation:fb-rise 1.2s var(--snd-emph) 3400ms both}
+@keyframes fb-rise{from{opacity:0;transform:translateY(6px)}18%{opacity:1}}
+.fb-paper{position:absolute;inset:0;border-radius:6px;background:#FBF6E8;border:1px solid #E3D8BD;box-shadow:0 10px 18px -8px rgba(0,0,0,.55);transform-origin:50% 100%;animation:fb-unfold 1.2s var(--snd-emph) 4400ms both;display:flex;align-items:center;justify-content:center}
+@keyframes fb-unfold{from{transform:scale(.3,.3) rotate(-6deg)}60%{transform:scale(.92,1.05) rotate(1deg)}}
+.fb-ink{font-family:var(--font-noto-serif-ethiopic),serif;font-weight:700;font-size:20px;color:#1C1A17;animation:fb-ink 600ms var(--snd-ease) 5300ms both}
+@keyframes fb-ink{from{opacity:0}}
+.fb-sw{position:absolute;left:112px;bottom:140px;width:26px;height:18px;border-radius:3px;background:#FBF6E8;border:1px solid #E3D8BD;opacity:0;animation:fb-swirl 2.1s ease-in-out both}
+@keyframes fb-swirl{0%{opacity:0;transform:translate(0,0) rotate(0)}15%{opacity:1;transform:translate(-34px,-58px) rotate(-22deg)}40%{opacity:1;transform:translate(36px,-86px) rotate(26deg)}65%{opacity:1;transform:translate(-28px,-70px) rotate(-14deg)}85%{opacity:1;transform:translate(10px,-30px) rotate(10deg)}100%{opacity:0;transform:translate(0,-6px) rotate(0)}}
+.snd-pls{display:none}
+.snd-won{border-color:#E3B23C !important;box-shadow:0 0 0 4px rgba(227,178,60,.32),0 18px 32px -14px rgba(28,26,23,.5) !important;transform:translateY(-3px) !important}
+.snd-won>.snd-pls{display:block !important;position:absolute;left:-3px;top:-3px;right:-3px;bottom:-3px;border-radius:25px;border:3px solid #E3B23C;pointer-events:none;animation:snd-pulse 900ms var(--snd-ease) both}
+@media (prefers-reduced-motion: reduce){.fb-sw{display:none}}
+@keyframes snd-weavey { from { clip-path: inset(0 -24px 100% -24px) } to { clip-path: inset(0 -24px 0 -24px) } }
+.snd-weavey { animation: snd-weavey var(--snd-d4) var(--snd-ease) both; animation-delay: 80ms; }
 
-/*
- * A pending badge must be unmistakable even for a treasurer who cannot read the
- * colour, so the state is carried by a border *and* a background *and* an
- * animated dot, not by hue alone.
- */
-.offline-state-pending {
-  border-color: rgba(184, 134, 47, 0.55);
-  background-color: rgba(184, 134, 47, 0.12);
-  color: #f0d9a8;
-}
-
-.offline-state-synced {
-  border-color: rgba(16, 185, 129, 0.45);
-  background-color: rgba(16, 185, 129, 0.1);
-  color: #a7f3d0;
-}
-
-.offline-state-rejected {
-  border-color: rgba(198, 83, 43, 0.55);
-  background-color: rgba(198, 83, 43, 0.14);
-  color: #f4c3ae;
-}
-
-.offline-state-blocked {
-  border-color: rgba(134, 50, 20, 0.7);
-  background-color: rgba(134, 50, 20, 0.3);
-  color: #f0b49a;
-}
-
-/* A draft that has never been queued. Quieter than pending on purpose. */
-.offline-state-draft {
-  border-color: rgba(139, 124, 116, 0.5);
-  background-color: rgba(139, 124, 116, 0.1);
-  color: #ded3cb;
-}
-
-.offline-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 9999px;
-  background-color: currentColor;
-  flex: none;
-}
-
-.offline-dot-pending {
-  animation: offlineDot 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-
-@keyframes offlineDot {
-
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-
-  50% {
-    opacity: 0.45;
-    transform: scale(0.82);
-  }
-}
-
-/* A recorded hash is the strongest local evidence there is, so it is monospaced
-   and never truncated without an accessible full value beside it. */
-.offline-hash {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  font-size: 0.6875rem;
-  letter-spacing: 0.02em;
-  word-break: break-all;
-}
-
-/* The fork banner is the one place offline mode shouts. */
-.offline-fork-banner {
-  border: 1px solid rgba(198, 83, 43, 0.6);
-  background:
-    repeating-linear-gradient(135deg,
-      rgba(198, 83, 43, 0.16) 0 10px,
-      rgba(198, 83, 43, 0.06) 10px 20px);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .offline-dot-pending {
-    animation: none;
-  }
-
-  .debter-enter,
-  .section-enter {
-    animation: none !important;
-  }
-}
-
-/* ─── Entrance & micro-interaction animations ─────────────────────────── */
-
-@keyframes debterEnter {
-  from {
-    opacity: 0;
-    transform: translateY(12px) scale(0.98);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes sectionEnter {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes fadeUpStagger {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* Stagger utility for feed items */
-.feed-item-enter {
-  animation: fadeUpStagger 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-/* Tibeb-inspired section divider */
-.tibeb-divider {
-  width: 100%;
-  height: 6px;
-  background: repeating-linear-gradient(90deg,
-      #C6532B 0px,
-      #C6532B 4px,
-      transparent 4px,
-      transparent 6px,
-      #D4A244 6px,
-      #D4A244 10px,
-      transparent 10px,
-      transparent 12px);
-  opacity: 0.3;
-  border-radius: 2px;
-  margin: 0 auto;
-}
-
-/*
- * The Voxide launcher is fixed 24px from the bottom by the widget itself and the
- * widget has no offset prop, so it would sit on top of the bottom navigation bar.
- * Lift it clear of the bar (about 4.5rem tall plus the phone safe area).
- */
-.vx-enter[style*="2147483647"] {
-  bottom: calc(6rem + env(safe-area-inset-bottom)) !important;
-}
-
-
-/*
- * The Voxide launcher is fixed 24px from the bottom by the widget itself and the
- * widget has no offset prop, so it would sit on top of the bottom navigation bar.
- * Lift it clear of the bar (about 4.5rem tall plus the phone safe area).
- */
-.vx-enter[style*="2147483647"] {
-  bottom: calc(6rem + env(safe-area-inset-bottom)) !important;
-}
+/* ---------- Draw console (treasurer tools) ---------- */
+.sened-draw-shell { background: var(--card); color: var(--ink); }
+.sened-hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5; letter-spacing: 0.02em; word-break: break-all; user-select: text; }
+.sened-ticket-glow { box-shadow: 0 0 0 2px var(--rgold); }

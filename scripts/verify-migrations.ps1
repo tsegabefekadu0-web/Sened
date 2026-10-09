@@ -181,5 +181,12 @@ if ($check.Out -notmatch 'ALL DRAW INTEGRITY CHECKS PASSED') {
     throw 'VERIFICATION DID NOT REACH THE DRAW INTEGRITY SUCCESS MARKER'
 }
 
+$chat = Invoke-Db -SqlFile (Join-Path $repoRoot 'scripts\verify-chat.sql')
+Write-Host $chat.Out
+if ($chat.Code -ne 0 -or $chat.Out -notmatch 'ALL CHAT BACKEND CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'CHAT BACKEND VERIFICATION FAILED'
+}
+
 docker rm -f $container 2>&1 | Out-Null
 Write-Host 'Migrations applied and verified.' -ForegroundColor Green

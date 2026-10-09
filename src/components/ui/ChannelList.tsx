@@ -7,7 +7,7 @@ import { Icon } from "@/components/ui/Icon";
 import { WovenRing } from "@/components/ui/Weave";
 import { useSession } from "@/lib/auth/useSession";
 import { useActiveGroup } from "@/lib/groups/useActiveGroup";
-import { SAMPLE_CHANNEL_ID, previewFor } from "@/lib/ui/chatStore";
+import { SAMPLE_CHANNEL_ID, previewFor, useChatPreviews } from "@/lib/ui/chatStore";
 import { useCommunity } from "@/lib/ui/useCommunity";
 import { useT } from "@/lib/ui/useT";
 
@@ -37,6 +37,7 @@ export function ChannelList({ activeId }: { readonly activeId?: string }) {
   const c = useCommunity();
   const [q, setQ] = useState("");
   const signedIn = session.status === "signed-in";
+  useChatPreviews(group.groups.map((g) => g.groupId), signedIn);
 
   const rows: Row[] = useMemo(() => {
     if (!signedIn) return [...SAMPLE_ROWS];

@@ -43,6 +43,10 @@ export default function ChannelPage() {
     endRef.current?.scrollIntoView?.({ block: "end" });
   }, [ch.items.length]);
 
+  useEffect(() => {
+    if (ch.sendFailed) setNotice(t("ui.chat.sendFailed"));
+  }, [ch.sendFailed, t]);
+
   useEffect(
     () => () => {
       if (timer.current) clearInterval(timer.current);
@@ -97,7 +101,7 @@ export default function ChannelPage() {
   };
 
   return (
-    <Screen loading={c.mode === "loading" && !ch.sample}>
+    <Screen loading={(c.mode === "loading" || !ch.loaded) && !ch.sample}>
       <main className="flex grow flex-col">
         <header className="relative flex items-center gap-0.5 overflow-hidden text-white" style={{ background: "var(--shop)", padding: "8px 8px 72px 6px", borderRadius: "0 0 28px 28px" }}>
           <div className="flex w-full items-center gap-0.5 lg:mx-auto lg:max-w-[1200px]">
@@ -143,7 +147,7 @@ export default function ChannelPage() {
           <span aria-hidden="true" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full" style={{ background: "var(--tint)", color: "var(--shop)" }}>
             <Icon name="pin" size={20} />
           </span>
-          <span>{ch.sample ? t("ui.chat.sampleNote") : t("ui.chat.localNote")}</span>
+          <span>{ch.sample ? t("ui.chat.sampleNote") : t("ui.chat.liveNote")}</span>
         </p>
 
         <ul aria-label={t("ui.chat.messages")} className="m-0 flex grow list-none flex-col gap-2.5 p-0" style={{ padding: "18px 16px 24px" }}>

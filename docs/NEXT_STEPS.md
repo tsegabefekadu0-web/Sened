@@ -22,7 +22,7 @@ git switch main && git merge --ff-only design/r9-rebuild && git push origin main
 ```
 
 ## Step 0.5: landing at root and a desktop layout (do first, since judges see this)
-**Status 2026-10-09: DONE, uncommitted, awaiting owner commit.** `/` shows the landing page when signed out (client `useSession`), the app Home when signed in; the app Home also lives at `/home` (sample/demo mode, nav Home tab). Desktop (>=1024px) has a left rail and two-column Home, Ledger, Chat, Account, Draw, Members. Phone pixels unchanged (diffed). Lint, tsc, build, vitest 1879, e2e 73 pass. Reviewed in Playwright MCP at 1440 and 390.
+**Status 2026-10-09: DONE, committed and pushed (177c990).** `/` shows the landing page when signed out (client `useSession`), the app Home when signed in; the app Home also lives at `/home` (sample/demo mode, nav Home tab). Desktop (>=1024px) has a left rail and two-column Home, Ledger, Chat, Account, Draw, Members. Phone pixels unchanged (diffed). Lint, tsc, build, vitest 1879, e2e 73 pass. Reviewed in Playwright MCP at 1440 and 390.
 Follow-ups: 8 new Amharic keys (`ui.chat.pick`, `ui.ledger.*`) need native review; `/members` avatars squash (pre-existing; wrap span around `WovenAvatar` needs `flex shrink-0`); sign-in, join, voice, community/new and account/edit stay a 480px column on desktop; signed-in `/` only tested with a fake session.
 
 The live site is https://sened.ethiodeploy.com (deployed from main `c3c1db2`, the rebuild is committed). Two problems the owner reported:
@@ -40,6 +40,10 @@ The live site is https://sened.ethiodeploy.com (deployed from main `c3c1db2`, th
    - Verify with Playwright MCP at 1440×900, 1280×800, 1024×768 and 390×844, light and dark, Amharic and English. Look for no horizontal scroll and no overlap. Update the e2e tests (root shows landing when signed out; the desktop nav rail works).
 
 ## Step 1: chat backend (biggest gap)
+**Status 2026-10-09: DONE (code + migration), committed and pushed.** Migration `supabase/migrations/20261016100000_chat_backend.sql` (chat_messages append-only, chat_reactions, chat_rsvps, membership-gated RLS, 30 msgs/min throttle trigger, ledger/draw system-line triggers, realtime publication, private `chat-voice` bucket). Client talks to Supabase directly under RLS via `src/lib/chat/*`; own outbox in `src/lib/chat/outbox.ts`. Sample chat stays in memory. Verified: verify-migrations.ps1 on Docker Postgres (all chat checks pass), vitest 1910, e2e 73, lint/tsc/build clean; sample chat sends in Playwright MCP.
+**Owner action:** apply the migration to the production Supabase project (`supabase db push`), it is NOT applied yet.
+Follow-ups: real Realtime/Storage/signed-in flow untested; draw_reveals trigger untested at runtime; undelivered voice notes are lost on reload; no "add first reaction" button; RSVP not wired to live events; chat-list previews lack sender names; `ui.chat.sampleNote` copy stale, `ui.chat.localNote` unused; 6 new `ui.chat.*` Amharic keys need review.
+
 Today chat is in-memory (`src/lib/ui/chatStore`), so messages vanish on reload.
 - New Supabase migration (use the `supabase-migration` skill and the repo conventions): `chat_messages` (id, group_id, author_id, kind text|voice|system|ledger_ref|invite, body, voice_path, reply_to, created_at, append-only), `chat_reactions` and `chat_rsvps`. RLS: only members of `group_id` (via `ledger_group_memberships`) can read and insert, and authors can only insert as themselves.
 - Supabase Realtime subscription per channel. Use Supabase Storage for voice notes, with a per-group bucket policy.

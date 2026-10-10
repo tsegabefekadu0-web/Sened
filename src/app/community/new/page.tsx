@@ -4,6 +4,7 @@ import Link from "next/link";
 import React, { useState } from "react";
 
 import { AppHeader } from "@/components/ui/AppHeader";
+import { BottomNav } from "@/components/ui/BottomNav";
 import { Icon } from "@/components/ui/Icon";
 import { Button, Card, Screen } from "@/components/ui/primitives";
 import { SlideSwitch } from "@/components/ui/SlideSwitch";
@@ -128,7 +129,7 @@ export default function CreateCommunityPage() {
   };
 
   return (
-    <Screen>
+    <Screen className="snd-narrow">
       <main className="flex grow flex-col">
         <AppHeader
           back="/account"
@@ -351,6 +352,7 @@ export default function CreateCommunityPage() {
         </div>
         <div style={{ height: 24 }} />
       </main>
+      <BottomNav railOnly active="account" />
     </Screen>
   );
 }

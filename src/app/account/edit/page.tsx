@@ -4,6 +4,7 @@ import Link from "next/link";
 import React, { useEffect, useRef, useState } from "react";
 
 import { AppHeader } from "@/components/ui/AppHeader";
+import { BottomNav } from "@/components/ui/BottomNav";
 import { Icon } from "@/components/ui/Icon";
 import { ProfileAvatar } from "@/components/ui/ProfileAvatar";
 import { Button, Card, Screen } from "@/components/ui/primitives";
@@ -38,7 +39,7 @@ export default function EditProfilePage() {
   const initial = Array.from((name || email || "?").trim())[0]?.toLocaleUpperCase() ?? "?";
 
   return (
-    <Screen>
+    <Screen className="snd-narrow">
       <main className="flex grow flex-col">
         <AppHeader back="/account" backLabel={t("ui.back")} title={t("ui.edit.title")} subtitle="Edit profile" bottom={96} ribbon={52} />
         <Card className="snd-rise flex flex-col gap-[18px]" style={{ margin: "-44px 16px 0", padding: "22px 18px" }}>
@@ -123,6 +124,7 @@ export default function EditProfilePage() {
             : t("ui.edit.localNote")}
         </p>
       </main>
+      <BottomNav railOnly active="account" />
     </Screen>
   );
 }

@@ -85,7 +85,7 @@ export function LandingPage() {
             </figure>
             <div className="flex flex-col gap-3 sm:flex-row" style={{ animation: "snd-rise 600ms var(--snd-emph) 240ms both" }}>
               <Link
-                href="/sign-in"
+                href="/sign-up"
                 className="flex h-[58px] items-center justify-center rounded-[29px] bg-white px-8 text-lg font-bold text-[#1C1A17]"
                 style={{ boxShadow: "0 12px 20px -12px rgba(0,0,0,0.6)" }}
               >
@@ -292,7 +292,7 @@ export function LandingPage() {
               <h2 lang={locale} className="m-0 max-w-[22ch] font-serif text-[30px] font-bold leading-[1.25] md:text-[40px]">
                 {t("ui.landing.closing")}
               </h2>
-              <Link href="/sign-in" className="mt-6 inline-flex h-[58px] items-center rounded-[29px] bg-white px-8 text-lg font-bold text-[#1C1A17]">
+              <Link href="/sign-up" className="mt-6 inline-flex h-[58px] items-center rounded-[29px] bg-white px-8 text-lg font-bold text-[#1C1A17]">
                 <span lang="am">{t("ui.landing.cta")}</span>
               </Link>
               <TibebRibbon style={{ bottom: 0 }} />

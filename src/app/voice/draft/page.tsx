@@ -3,6 +3,7 @@
 import Link from "next/link";
 import React, { useEffect, useMemo, useState } from "react";
 
+import { BottomNav } from "@/components/ui/BottomNav";
 import { Icon } from "@/components/ui/Icon";
 import { Button, CountUp, Screen, StatusPill } from "@/components/ui/primitives";
 import { TibebRibbon } from "@/components/ui/Weave";
@@ -70,7 +71,8 @@ export default function DraftPage() {
           : t("voice.channelNone");
 
   return (
-    <Screen>
+    <Screen className="snd-narrow">
+      <main className="flex grow flex-col">
       <header className="relative flex items-center gap-2 overflow-hidden text-white" style={{ background: "var(--shop)", padding: "10px 14px 96px 8px", borderRadius: "0 0 28px 28px" }}>
         <Link href="/voice" aria-label={t("ui.back")} className="flex h-11 w-11 items-center justify-center rounded-full text-white">
           <Icon name="back" size={22} />
@@ -161,6 +163,8 @@ export default function DraftPage() {
         )}
       </div>
       <div style={{ height: 36 }} />
+      </main>
+      <BottomNav railOnly active="home" />
     </Screen>
   );
 }

@@ -25,7 +25,7 @@ export default async function robots(): Promise<MetadataRoute.Robots> {
     rules: [
       {
         userAgent: "*",
-        allow: ["/", "/welcome", "/sign-in", "/icons/", "/manifest.json", "/sw.js"],
+        allow: ["/", "/welcome", "/sign-in", "/sign-up", "/icons/", "/manifest.json", "/sw.js"],
         disallow: ["/home", "/ledger", "/members", "/chat", "/draw", "/voice", "/governance", "/offline", "/account", "/join", "/community", "/api/"]
       }
     ],

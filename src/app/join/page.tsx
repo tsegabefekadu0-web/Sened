@@ -90,7 +90,7 @@ export default function JoinPage() {
   const signedOut = session.status === "signed-out" && phase.kind === "joining";
 
   return (
-    <SimpleScreen title={t("join.title")} subtitle="Join">
+    <SimpleScreen title={t("join.title")} subtitle="Join" rail={session.status === "signed-in"}>
       {session.status === "loading" || phase.kind === "reading" ? (
         <p role="status" lang="am" className="m-0 text-base text-soft">
           {t("join.loading")}

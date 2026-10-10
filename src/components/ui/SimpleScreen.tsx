@@ -5,6 +5,7 @@ import React from "react";
 
 import { useT } from "@/lib/ui/useT";
 import { AppHeader, LanguageSwitch } from "./AppHeader";
+import { BottomNav } from "./BottomNav";
 import { Card, Screen } from "./primitives";
 
 /** A plain single-card screen: brand header with the language switch, one card, a way home. */
@@ -12,16 +13,19 @@ export function SimpleScreen({
   title,
   subtitle,
   children,
-  homeLink = true
+  homeLink = true,
+  rail = false
 }: {
   readonly title: string;
   readonly subtitle?: string;
   readonly children: React.ReactNode;
   readonly homeLink?: boolean;
+  /** Show the desktop side rail (signed-in screens). Phones are unchanged. */
+  readonly rail?: boolean;
 }) {
   const { t } = useT();
   return (
-    <Screen>
+    <Screen className="snd-narrow">
       <main className="flex grow flex-col">
         <AppHeader title={title} subtitle={subtitle} bottom={72} ribbon={32} right={<LanguageSwitch />} />
         <Card className="snd-rise flex flex-col gap-4 p-5" style={{ margin: "-34px 16px 0" }}>
@@ -34,6 +38,7 @@ export function SimpleScreen({
         ) : null}
         <div style={{ height: 28 }} />
       </main>
+      {rail ? <BottomNav railOnly active={null} /> : null}
     </Screen>
   );
 }

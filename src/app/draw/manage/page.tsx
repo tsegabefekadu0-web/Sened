@@ -27,7 +27,7 @@ export default function ManageDrawPage() {
   const loading = session.status === "loading" || (signedIn && c.mode === "loading");
 
   return (
-    <Screen loading={loading}>
+    <Screen loading={loading} className="snd-narrow">
       <main className="flex grow flex-col">
         <AppHeader back="/draw" backLabel={t("ui.back")} title={treasurer ? t("ui.manage.title") : t("ui.manage.memberTitle")} subtitle="Draw" bottom={72} ribbon={32} />
         <div className="flex flex-col gap-4" style={{ margin: "-34px 16px 0" }}>

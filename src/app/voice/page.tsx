@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import React, { useEffect, useRef } from "react";
 
+import { BottomNav } from "@/components/ui/BottomNav";
 import { Icon } from "@/components/ui/Icon";
 import { Screen } from "@/components/ui/primitives";
 import { TibebRibbon } from "@/components/ui/Weave";
@@ -68,7 +69,8 @@ export default function SpeakPage() {
   const status = cap.recording ? t("ui.voice.listening") : cap.busy ? t("ui.voice.working") : t("ui.voice.ready");
 
   return (
-    <Screen>
+    <Screen className="snd-narrow">
+      <main className="flex grow flex-col">
       <header className="relative flex items-center gap-2 overflow-hidden text-white" style={{ background: "var(--shop)", padding: "10px 14px 52px 8px", borderRadius: "0 0 28px 28px" }}>
         <Link href="/home" aria-label={t("ui.back.home")} onClick={() => cancel()} className="flex h-11 w-11 items-center justify-center rounded-full text-white">
           <Icon name="back" size={22} />
@@ -169,6 +171,8 @@ export default function SpeakPage() {
           {t("ui.cancel")}
         </Link>
       </div>
+      </main>
+      <BottomNav railOnly active="home" />
     </Screen>
   );
 }

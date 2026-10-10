@@ -9,3 +9,11 @@ export function isEmailRateLimitError(error: unknown): boolean {
   if (e.code === "over_email_send_rate_limit" || e.code === "over_request_rate_limit") return true;
   return typeof e.message === "string" && /rate limit/i.test(e.message);
 }
+
+/** True when Supabase refused because no account exists and `shouldCreateUser` was false. */
+export function isNoAccountError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const e = error as { code?: unknown; message?: unknown };
+  if (e.code === "otp_disabled" || e.code === "signup_disabled" || e.code === "user_not_found") return true;
+  return typeof e.message === "string" && /signups? not allowed|user not found|otp_disabled/i.test(e.message);
+}

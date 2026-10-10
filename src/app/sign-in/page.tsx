@@ -8,11 +8,12 @@ import { FIELD_CLASS, SimpleScreen } from "@/components/ui/SimpleScreen";
 import { Button } from "@/components/ui/primitives";
 import { getBrowserSupabase } from "@/lib/auth/browserClient";
 import { useSession } from "@/lib/auth/useSession";
+import { isEmailRateLimitError, RESEND_COOLDOWN_SECONDS } from "@/lib/auth/rateLimit";
 import { peekPendingInvite } from "@/lib/ledger/clientInvites";
 import { useT } from "@/lib/ui/useT";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-type Phase = "idle" | "sent" | "failed" | "invalid";
+type Phase = "idle" | "sent" | "failed" | "invalid" | "limited";
 
 /** `/sign-in`: email magic link, with sign-out. Phone sign-in needs an SMS provider this project does not have. */
 export default function SignInPage() {
@@ -21,6 +22,7 @@ export default function SignInPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
+  const [cooldown, setCooldown] = useState(0);
   const [signOutFailed, setSignOutFailed] = useState(false);
 
   // Signed in with an invite waiting (the person came here from /join): go back.
@@ -30,6 +32,13 @@ export default function SignInPage() {
     if (peekPendingInvite()) window.location.replace("/join");
     else router.replace("/");
   }, [session.status, router]);
+
+  // Count the lock down once a second.
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const id = window.setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => window.clearTimeout(id);
+  }, [cooldown]);
 
   const sendLink = async (): Promise<boolean> => {
     const address = email.trim();
@@ -44,8 +53,15 @@ export default function SignInPage() {
     }
     try {
       const { error } = await client.auth.signInWithOtp({ email: address, options: { emailRedirectTo: `${window.location.origin}/sign-in` } });
-      setPhase(error ? "failed" : "sent");
-      return !error;
+      if (error) {
+        const limited = isEmailRateLimitError(error);
+        setPhase(limited ? "limited" : "failed");
+        if (limited) setCooldown(RESEND_COOLDOWN_SECONDS);
+        return false;
+      }
+      setPhase("sent");
+      setCooldown(RESEND_COOLDOWN_SECONDS);
+      return true;
     } catch {
       setPhase("failed");
       return false;
@@ -130,8 +146,8 @@ export default function SignInPage() {
               className={FIELD_CLASS}
             />
           </label>
-          <Button onPress={sendLink} successLabel={t("ui.signIn.sent")} errorLabel={t("ui.tryAgain")} icon="send">
-            {t("auth.sendLink")}
+          <Button onPress={sendLink} disabled={cooldown > 0} successLabel={t("ui.signIn.sent")} errorLabel={t("ui.tryAgain")} icon="send">
+            {cooldown > 0 ? t("auth.resendIn", { seconds: cooldown }) : t("auth.sendLink")}
           </Button>
           {phase === "sent" ? (
             <p role="status" lang="am" className="m-0 text-base font-bold leading-[1.5]">
@@ -141,6 +157,11 @@ export default function SignInPage() {
           {phase === "failed" ? (
             <p role="alert" lang="am" className="m-0 text-base font-bold leading-[1.5]" style={{ color: "var(--dng)" }}>
               {t("auth.sendFailed")}
+            </p>
+          ) : null}
+          {phase === "limited" ? (
+            <p role="alert" lang="am" className="m-0 text-base font-bold leading-[1.5]" style={{ color: "var(--dng)" }}>
+              {t("auth.rateLimited")}
             </p>
           ) : null}
           {phase === "invalid" ? (

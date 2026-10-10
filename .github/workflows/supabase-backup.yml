@@ -1,0 +1,55 @@
+# Weekly encrypted logical backup. Free plan has no backups of its own.
+# The repo may be public: the dump is encrypted before it is uploaded.
+name: supabase-backup
+on:
+  schedule:
+    - cron: "43 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install PostgreSQL 17 client
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          /usr/lib/postgresql/17/bin/pg_dump --version
+
+      - name: Dump and encrypt
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_DB_URL}" ] || [ -z "${BACKUP_PASSPHRASE}" ]; then
+            echo "Secrets SUPABASE_DB_URL and BACKUP_PASSPHRASE are required." >&2
+            exit 1
+          fi
+          PG=/usr/lib/postgresql/17/bin
+          stamp=$(date -u +%Y%m%dT%H%M%SZ)
+          mkdir -p out
+          # public schema (structure + data) and auth data (users, identities).
+          # Storage objects (avatars) are not included; they are re-creatable.
+          "$PG/pg_dump" "${SUPABASE_DB_URL}" --format=custom --no-owner --no-privileges \
+            --schema=public --schema=auth --file="out/sened-${stamp}.dump"
+          gpg --symmetric --batch --yes --cipher-algo AES256 \
+            --passphrase "${BACKUP_PASSPHRASE}" \
+            --output "out/sened-${stamp}.dump.gpg" "out/sened-${stamp}.dump"
+          rm "out/sened-${stamp}.dump"
+          ls -l out | sed 's/^/  /'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sened-db-backup
+          path: out/*.gpg
+          retention-days: 30
+          if-no-files-found: error

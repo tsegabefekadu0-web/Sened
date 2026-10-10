@@ -50,6 +50,14 @@ export function writeProfile(profile: Profile): boolean {
   }
 }
 
+export const AVATAR_MAX_PX = 256;
+export const AVATAR_QUALITY = 0.8;
+
+/** Storage path for one member's avatar: one file per member, overwritten in place. */
+export function avatarPath(uid: string, mime: string): string {
+  return `${uid}/avatar.${mime === "image/webp" ? "webp" : "jpg"}`;
+}
+
 async function uploadAvatarIfDataUrl(photo: string | null): Promise<string | null> {
   if (!photo || !photo.startsWith("data:image/")) return photo;
   const client = getBrowserSupabase();
@@ -59,16 +67,22 @@ async function uploadAvatarIfDataUrl(photo: string | null): Promise<string | nul
     const { data: userData } = await client.auth.getUser();
     if (!userData?.user) return photo;
 
-    // Convert data URL to Blob
     const res = await fetch(photo);
     const blob = await res.blob();
-    const fileName = `${userData.user.id}/avatar.jpg`;
+    const mime = blob.type === "image/webp" ? "image/webp" : "image/jpeg";
+    const uid = userData.user.id;
+    const fileName = avatarPath(uid, mime);
 
     const { error } = await client.storage.from("avatars").upload(fileName, blob, {
-      contentType: "image/jpeg",
-      upsert: true
+      contentType: mime,
+      upsert: true,
+      cacheControl: "31536000"
     });
     if (error) return photo;
+
+    // Keep a single file per member: drop the other format if one was left behind.
+    const other = avatarPath(uid, mime === "image/webp" ? "image/jpeg" : "image/webp");
+    void client.storage.from("avatars").remove([other]).catch(() => {});
 
     const { data: pubData } = client.storage.from("avatars").getPublicUrl(fileName);
     return pubData?.publicUrl ? `${pubData.publicUrl}?t=${Date.now()}` : photo;
@@ -147,20 +161,22 @@ export function useProfile(): readonly [Profile, (next: Profile) => Promise<bool
   return [profile, save] as const;
 }
 
-/** Downscale a chosen image to a 256px square JPEG data URL. */
+/** Downscale a chosen image to a square of at most 256px, as a WebP (or JPEG fallback) data URL. */
 export async function photoToDataUrl(file: File): Promise<string | null> {
   if (!/^image\/(jpeg|png|webp)$/.test(file.type) || file.size > 8_000_000) return null;
   try {
     const bitmap = await createImageBitmap(file);
-    const size = 256;
+    const side = Math.min(bitmap.width, bitmap.height);
+    const size = Math.min(AVATAR_MAX_PX, side);
     const canvas = document.createElement("canvas");
     canvas.width = size;
     canvas.height = size;
     const g = canvas.getContext("2d");
     if (!g) return null;
-    const side = Math.min(bitmap.width, bitmap.height);
     g.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size);
-    return canvas.toDataURL("image/jpeg", 0.82);
+    bitmap.close?.();
+    const webp = canvas.toDataURL("image/webp", AVATAR_QUALITY);
+    return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/jpeg", AVATAR_QUALITY);
   } catch {
     return null;
   }

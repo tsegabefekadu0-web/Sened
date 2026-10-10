@@ -1,0 +1,34 @@
+# Free projects pause after ~7 days without activity. One tiny database call
+# every 2 days keeps the project awake.
+name: supabase-keepalive
+on:
+  schedule:
+    - cron: "17 5 */2 * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call the keep-alive RPC
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_URL}" ] || [ -z "${SUPABASE_ANON_KEY}" ]; then
+            echo "Secrets SUPABASE_URL and SUPABASE_ANON_KEY are required." >&2
+            exit 1
+          fi
+          # sened_keepalive() is a no-op `select 1` (migration 20261018100000);
+          # it reads no table, so RLS and data are untouched.
+          curl --silent --show-error --fail --max-time 30 --retry 3 \
+            -X POST "${SUPABASE_URL%/}/rest/v1/rpc/sened_keepalive" \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{}' --output /dev/null
+          echo "Supabase responded OK."

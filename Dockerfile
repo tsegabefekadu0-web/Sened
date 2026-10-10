@@ -28,8 +28,14 @@ COPY . .
 # they are read at runtime and must never be baked into an image layer.
 ARG NEXT_PUBLIC_SUPABASE_URL=""
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY=""
+# NEXT_PUBLIC_VOXIDE_KEY is a publishable key (vox_pub_...), also inlined at
+# build time; NEXT_PUBLIC_SITE_URL is the public origin used for social cards.
+ARG NEXT_PUBLIC_VOXIDE_KEY=""
+ARG NEXT_PUBLIC_SITE_URL=""
 ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
-    NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+    NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY \
+    NEXT_PUBLIC_VOXIDE_KEY=$NEXT_PUBLIC_VOXIDE_KEY \
+    NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
 
 # `output: "standalone"` in next.config.mjs produces `.next/standalone`, a
 # self-contained server plus only the modules it actually imports.

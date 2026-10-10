@@ -110,6 +110,7 @@ Follow-ups: real device camera test for avatar upload; invite link share dialog 
 
 
 ## Step 5: hackathon (STARK)
-- Deploy (EthioDeploy counts in your favour) and whitelist the domain in Voxide.
-- ScholarXIV: document the ideation (`src/lib/governance/scholarxiv.ts` exists). Using their MCP or Papers API earns extra points.
-- Update the README and screenshots, and refresh the launch video from the live app with the brag skill if time allows.
+**Status 2026-10-10: the parts that need no credentials are DONE (uncommitted); the rest needs the owner.**
+- Done: README rewritten from the code (features, stack, env names, migrations via the IPv4 pooler, tests, deploy, screenshots); public-page screenshots in `docs/screenshots/` (landing, sign-in, join at 390x844 and 1440x900); `docs/hackathon/scholarxiv-ideation.md`; `docs/hackathon/deploy-checklist.md`; Dockerfile now takes `NEXT_PUBLIC_VOXIDE_KEY` and `NEXT_PUBLIC_SITE_URL` as build args (it only had the two Supabase ones, so a container build never got the Voxide key).
+- Owner: deploy `main` on EthioDeploy with the build variables (incl. `NEXT_PUBLIC_VOXIDE_KEY`), whitelist the live domain in the Voxide dashboard, mint the ScholarXIV key and set `SCHOLARXIV_API_URL`/`SCHOLARXIV_API_KEY` (the Papers request/response shape is unverified against a live key), then refresh the launch video with `/brag-slim` against the live URL. Exact steps: `docs/hackathon/deploy-checklist.md`.
+- Follow-ups: `docs/IDEATION.md` states the papers' findings more strongly than the code's catalogue and names the 2023 paper's author differently ("Michael, K." vs Sowon); reconcile. Signed-in screenshots (home, ledger, draw, chat) were not taken because they need a session.

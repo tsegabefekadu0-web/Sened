@@ -41,7 +41,7 @@ export default function NotFound() {
 
           <div className="flex flex-col gap-3">
             {/* Geez numerals, so the code is not a Latin afterthought. */}
-            <p lang="am" className="m-0 font-serif text-[64px] font-bold leading-none" style={{ color: "var(--shop)" }}>
+            <p lang="am" data-testid="notfound-code" className="m-0 font-serif text-[64px] font-bold leading-none" style={{ color: "var(--shop)" }}>
               ፬፻፬
             </p>
             <h1 lang={locale} className="m-0 font-serif text-[28px] font-bold leading-[1.25]">

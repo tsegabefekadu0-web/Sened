@@ -2,8 +2,9 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 
+import { LandingChrome } from "@/components/landing/LandingChrome";
 import { PhoneMockup } from "@/components/landing/PhoneMockup";
 import { Reveal, WhenVisible } from "@/components/landing/Reveal";
 import { LanguageSwitch } from "@/components/ui/AppHeader";
@@ -32,6 +33,8 @@ export function LandingPage() {
   const { t, locale } = useT();
   const [theme, setTheme] = useTheme();
   const [step, setStep] = useState(0);
+  // The condensed nav and the scroll hairline measure this to decide when to appear.
+  const heroRef = useRef<HTMLElement>(null);
 
   const steps = [
     { name: t("ui.draw.abol"), text: t("ui.landing.how1") },
@@ -45,8 +48,10 @@ export function LandingPage() {
         {t("shell.skipToContent")}
       </a>
 
+      <LandingChrome heroRef={heroRef} />
+
       {/* ---------- Hero ---------- */}
-      <header className="relative overflow-hidden text-white" style={{ background: "var(--shop)", borderRadius: "0 0 36px 36px" }}>
+      <header ref={heroRef} className="relative overflow-hidden text-white" style={{ background: "var(--shop)", borderRadius: "0 0 36px 36px" }}>
         <div className={`${WRAP} flex items-center justify-between py-4`}>
           <Link href="/welcome" className="flex items-center gap-3" aria-label="ሰነድ">
             <span lang="am" aria-hidden="true" className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-white font-serif text-2xl font-bold" style={{ color: "var(--shop)" }}>
@@ -136,13 +141,15 @@ export function LandingPage() {
                     onClick={() => setStep(i)}
                     lang="am"
                     className="h-11 rounded-3xl px-5 text-[15px] font-bold"
-                    style={step === i ? { background: "var(--prim)", color: "var(--primt)", border: "none" } : { background: "var(--card)", color: "var(--ink)", border: "1.5px solid var(--chipb)" }}
+                    style={step === i ? { background: "var(--prim)", color: "var(--primt)", border: "none", animation: "snd-pop 280ms var(--snd-spring) both" } : { background: "var(--card)", color: "var(--ink)", border: "1.5px solid var(--chipb)" }}
                   >
                     {s.name}
                   </button>
                 ))}
               </div>
-              <p lang={locale} className="m-0 text-xl leading-[1.6]" role="tabpanel">
+              {/* key={step} remounts the body so it re-runs its entrance on every switch;
+                  without it the copy would teleport with no bridge between states. */}
+              <p key={step} lang={locale} className="snd-panel m-0 text-xl leading-[1.6]" role="tabpanel">
                 {[t("ui.landing.how1Long"), t("ui.landing.how2Long"), t("ui.landing.how3Long")][step]}
               </p>
             </Reveal>
@@ -213,13 +220,15 @@ export function LandingPage() {
                 {t("ui.landing.chatBody")}
               </p>
             </Reveal>
-            <Reveal delay={100} className="flex flex-col gap-3" >
+            {/* Each bubble scrolls in on its own beat. `aria-hidden` sits on the
+                wrapper so it still covers every child Reveal. */}
+            <div className="flex flex-col gap-3" aria-hidden="true">
               {[
                 { who: "ፋ", name: "ወ/ሮ ፋጡማ አ", text: "እንኳን ደስ አለሽ ጽጌ! በሰላም ይግባሽ።", mine: false },
                 { who: "ጽ", name: "ወ/ሮ ጽጌ ከ", text: "አመሰግናለሁ ጎረቤቶቼ! ቡናው ለእኔ ነው።", mine: false },
                 { who: "", name: "", text: "ተረድቻለሁ፣ ዛሬ ማታ በቴሌብር አስገባለሁ።", mine: true }
               ].map((m, i) => (
-                <div key={i} className="flex items-end gap-2.5" style={{ justifyContent: m.mine ? "flex-end" : "flex-start" }} aria-hidden="true">
+                <Reveal key={i} delay={i * 90} className={`flex items-end gap-2.5 ${m.mine ? "justify-end" : "justify-start"}`}>
                   {!m.mine ? (
                     <WovenRing size={40}>
                       <span lang="am" className="flex h-full w-full items-center justify-center rounded-full bg-card font-serif text-base font-bold">
@@ -240,9 +249,9 @@ export function LandingPage() {
                       {m.text}
                     </span>
                   </div>
-                </div>
+                </Reveal>
               ))}
-            </Reveal>
+            </div>
           </div>
         </section>
 
@@ -262,9 +271,15 @@ export function LandingPage() {
                     <Icon name="plus" size={22} />
                   </span>
                 </summary>
-                <p lang={locale} className="mb-4 mt-0 text-base leading-[1.65] text-soft">
-                  {t(`ui.landing.a${n}` as "ui.landing.a1")}
-                </p>
+                {/* The answer is wrapped so its height can be interpolated; the inner
+                    box carries the clipping and the bottom gap that used to be a margin. */}
+                <div className="snd-faq">
+                  <div>
+                    <p lang={locale} className="m-0 pb-4 text-base leading-[1.65] text-soft">
+                      {t(`ui.landing.a${n}` as "ui.landing.a1")}
+                    </p>
+                  </div>
+                </div>
               </details>
             ))}
           </div>

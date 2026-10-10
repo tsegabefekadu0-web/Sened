@@ -1573,6 +1573,12 @@ export const en = {
   "ui.manage.noCommunity": "Choose or create a community first.",
   "ui.manage.memberNote": "Treasurer and owner tools are hidden for members. You can seal your name here.",
   "ui.manage.treasurerNote": "Open a round, seal, commit, reveal and pay out.",
+  "ui.notFound.title": "That page is not here",
+  "ui.notFound.body": "The link may be old, or the page may have moved. Your ledger is where you left it.",
+  "ui.notFound.back": "Go home",
+  "ui.error.title": "Something went wrong",
+  "ui.error.body": "The screen could not be shown. Your saved work is safe on this phone.",
+  "ui.error.retry": "Try again",
   // --- ui:end
 } as const;
 
@@ -3137,6 +3143,12 @@ const am: Record<MessageKey, string> = {
   "ui.manage.noCommunity": "መጀመሪያ ማህበረሰብ ይምረጡ ወይም ይፍጠሩ።",
   "ui.manage.memberNote": "የገንዘብ ያዥና የባለቤት መሣሪያዎች ለአባላት ተደብቀዋል። እዚህ ስምዎን ማሸግ ይችላሉ።",
   "ui.manage.treasurerNote": "ዙር ክፈት፣ አሽግ፣ ቆልፍ፣ ግለጥ እና ክፈል።",
+  "ui.notFound.title": "ገጹ አልተገኘም",
+  "ui.notFound.body": "ማገናኘቱ አሮጌ ሊሆን ይችላል፣ ወይም ገጹ ተዛውሯል። መዝገቡ እንደተዉት ነው።",
+  "ui.notFound.back": "ወደ መነሻ ተመለስ",
+  "ui.error.title": "ችግር ተፈጥሯል",
+  "ui.error.body": "ገጹ ሊታይ አልቻለም። የተቀመጠ ሥራዎ በዚህ ስልክ ላይ ደህንነቱ ታስቦ ነው።",
+  "ui.error.retry": "እንደገና ሞክር",
   // --- ui:end
 };
 

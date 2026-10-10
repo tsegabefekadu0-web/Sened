@@ -14,6 +14,9 @@
   --sk:#ECE7DD; --skhi:rgba(255,252,246,0.65); --grain:rgba(60,40,20,0.013); --grain2:rgba(60,40,20,0.010);
   --lift:0 12px 28px -14px rgba(28,26,23,0.45);
   --rcream:#F7F0DE; --rred:#A92B22; --rgreen:#23703F; --rgold:#E3B23C; --sheen:0.30; --ringf:none;
+  /* Member state, shared by the round-progress legend and anything else that
+     needs to name a payment state rather than a colour. */
+  --paid:#2A6B47; --draft:#E7AE3A; --due:#D8BC88;
   --tint: rgba(31,107,74,0.14);
   --chipcol: #7A5200; --chipcol-bg: #F8EBCB;
   color-scheme: light;
@@ -25,6 +28,7 @@
   --sk:#2A241E; --skhi:rgba(255,235,210,0.09); --grain:rgba(255,235,210,0.022); --grain2:rgba(255,235,210,0.012);
   --lift:0 14px 30px -14px rgba(0,0,0,0.75);
   --rcream:#B6AB8E; --rred:#8C261E; --rgreen:#1A5A34; --rgold:#BE9531; --sheen:0.12; --ringf:brightness(0.84) saturate(0.9);
+  --paid:#58A178; --draft:#E3B23C; --due:#C6AC7E;
   --tint: rgba(44,116,85,0.18);
   --chipcol: #F2C86E; --chipcol-bg: rgba(242,200,110,0.16);
   color-scheme: dark;
@@ -75,6 +79,57 @@ input, textarea, select { font-family: inherit; }
 .snd-stagger > * { animation: snd-fade var(--snd-d3) var(--snd-ease) both; animation-delay: calc(var(--n,0)*40ms + 260ms); }
 .snd-stagger > *:nth-child(2){--n:1} .snd-stagger > *:nth-child(3){--n:2} .snd-stagger > *:nth-child(4){--n:3}
 .snd-msg { animation: snd-msg 320ms var(--snd-spring) both; }
+
+/* ---------- Disclosure + tab-panel motion (landing) ---------- */
+/* A <details> snaps open by default. Row 0fr collapses the body to nothing; 1fr
+   restores it, and the change is interpolated. Unsupported browsers get the old
+   instant snap, so this degrades to exactly the previous behaviour. */
+.snd-faq { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--snd-d3) var(--snd-emph); }
+details[open] > .snd-faq { grid-template-rows: 1fr; }
+.snd-faq > * { min-height: 0; overflow: hidden; }
+/* The height reveal on its own hard-clips Amharic glyphs mid-stroke, which reads
+   as broken text rather than as content being uncovered. Fading the copy in just
+   after the box starts growing makes the clip read as a reveal instead. */
+.snd-faq p { opacity: 0; transition: opacity 160ms var(--snd-ease); }
+details[open] > .snd-faq p { opacity: 1; transition: opacity 240ms var(--snd-ease) 110ms; }
+
+/* How-it-works tab body. A short lift rather than a horizontal slide: the panel
+   is a paragraph, and 28px (snd-slide-l/r) reads as a layout shift at that size. */
+.snd-panel { animation: snd-panel var(--snd-d2) var(--snd-ease) both; }
+@keyframes snd-panel { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---------- Landing scroll spine ---------- */
+/* Gold hairline; fills by scaleX so scrolling costs a compositor, never layout. */
+.snd-prog {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 45; height: 2px;
+  background: var(--rgold); transform-origin: 0 50%; will-change: transform; pointer-events: none;
+}
+/* Condensed hero nav. visibility carries the delay so its links leave the tab
+   order the moment they slide out — the same convention as #snd-vs-sheet below.
+   A near-opaque tint rather than backdrop-filter: the blur costs ~1.4s of extra
+   style-recalc latency on the landing page, which is a bad trade on the phones
+   this app is built for. The bar is opaque enough that content behind it never
+   shows through anyway. */
+.snd-lbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 40; pointer-events: none;
+  background: var(--bg);
+  border-bottom: 1px solid var(--hair);
+  opacity: 0; transform: translateY(-100%);
+  transition: opacity 240ms var(--snd-ease), transform var(--snd-d3) var(--snd-emph), visibility 0s linear var(--snd-d3);
+  visibility: hidden;
+}
+.snd-lbar[data-shown="1"] {
+  opacity: 1; transform: none; visibility: visible;
+  transition: opacity 240ms var(--snd-ease), transform var(--snd-d3) var(--snd-emph), visibility 0s;
+}
+.snd-lbar a { pointer-events: auto; }
+
+/* ---------- Text wrapping ---------- */
+/* Orphaned last lines are the single most common typographic defect on a page
+   built from Amharic + Latin. `pretty` for body copy, `balance` for headings.
+   Both are CSS-level line balancing, so neither splits or re-orders Geez glyphs. */
+p, li, dd, blockquote, figcaption, h1, h2, h3, h4 { text-wrap: pretty; }
+h1, h2, h3 { text-wrap: balance; }
 
 /* ---------- Press feedback ---------- */
 button, a[href] {
@@ -142,7 +197,7 @@ button:disabled:active, button[aria-disabled=true]:active { transform: none; fil
 
 /* ---------- Reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; scroll-behavior: auto !important; }
+  *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; transition-delay: 0ms !important; scroll-behavior: auto !important; }
   .snd-bar { animation: none !important; }
   button:active, a[href]:active { transform: none !important; }
   .snd-bone, .snd-loading * { animation: none !important; }

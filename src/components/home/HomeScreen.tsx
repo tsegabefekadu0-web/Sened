@@ -118,9 +118,9 @@ export function HomeScreen() {
               <ul className="m-0 flex grow list-none flex-col gap-3.5 p-0">
                 {(
                   [
-                    ["paid", t("ui.status.paid"), counts.paid, "#2A6B47"],
-                    ["draft", t("ui.status.draft"), counts.draft, "#E7AE3A"],
-                    ["due", t("ui.status.due"), counts.due, "#D8BC88"]
+                    ["paid", t("ui.status.paid"), counts.paid, "var(--paid)"],
+                    ["draft", t("ui.status.draft"), counts.draft, "var(--draft)"],
+                    ["due", t("ui.status.due"), counts.due, "var(--due)"]
                   ] as const
                 ).map(([k, label, n, color]) => (
                   <li key={k} className="flex items-center gap-[9px] text-[15px]">

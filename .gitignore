@@ -30,6 +30,9 @@ coverage/
 .agents/
 skills-lock.json
 
+# Local agent tooling config (MCP servers, per-machine)
+opencode.json
+
 # Claude Code worktrees
 .claude/worktrees/
 brag-output/

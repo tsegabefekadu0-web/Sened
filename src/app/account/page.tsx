@@ -14,7 +14,7 @@ import { WovenRing } from "@/components/ui/Weave";
 import { getBrowserSupabase } from "@/lib/auth/browserClient";
 import { useSession } from "@/lib/auth/useSession";
 import { useActiveGroup } from "@/lib/groups/useActiveGroup";
-import { useProfile } from "@/lib/ui/profile";
+import { syncProfileToServer, useProfile } from "@/lib/ui/profile";
 import { useTheme } from "@/lib/ui/theme";
 import { useT } from "@/lib/ui/useT";
 
@@ -176,7 +176,17 @@ export default function AccountPage() {
               <span lang="am" className="text-base font-bold">
                 {t("ui.language")}
               </span>
-              <SlideSwitch checked={locale === "en"} onChange={(on) => setLocale(on ? "en" : "am")} label={t("ui.language")} left="አማርኛ" right="English" />
+              <SlideSwitch
+                checked={locale === "en"}
+                onChange={(on) => {
+                  const next = on ? "en" : "am";
+                  setLocale(next);
+                  if (signedIn) syncProfileToServer({ ...profile, preferredLocale: next });
+                }}
+                label={t("ui.language")}
+                left="አማርኛ"
+                right="English"
+              />
             </div>
             <div className="mx-[18px] h-px bg-hair2" />
             <div className="box-border flex min-h-[68px] flex-wrap items-center justify-between gap-x-2 gap-y-0" style={{ padding: "10px 12px 10px 18px" }}>
@@ -185,7 +195,11 @@ export default function AccountPage() {
               </span>
               <SlideSwitch
                 checked={theme === "dark"}
-                onChange={(on) => setTheme(on ? "dark" : "light")}
+                onChange={(on) => {
+                  const next = on ? "dark" : "light";
+                  setTheme(next);
+                  if (signedIn) syncProfileToServer({ ...profile, preferredTheme: next });
+                }}
                 label={t("ui.account.look")}
                 left={
                   <>

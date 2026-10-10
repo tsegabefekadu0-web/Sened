@@ -80,16 +80,19 @@ async function loadBaselineAm(): Promise<Record<string, string>> {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024
   });
-  const dir = mkdtempSync(join(tmpdir(), "sened-i18n-"));
+  const cacheDir = join(ROOT, "node_modules", ".cache");
+  mkdirSync(cacheDir, { recursive: true });
+  const file = join(cacheDir, `i18n-baseline-${Date.now()}.ts`);
   try {
-    const file = join(dir, "i18n-baseline.ts");
-    writeFileSync(file, source);
+    writeFileSync(file, source, "utf8");
     const mod = (await import(/* @vite-ignore */ pathToFileURL(file).href)) as {
       dictionaries: Record<string, Record<string, string>>;
     };
     return { ...mod.dictionaries.am };
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    if (existsSync(file)) {
+      rmSync(file, { force: true });
+    }
   }
 }
 

@@ -188,5 +188,19 @@ if ($chat.Code -ne 0 -or $chat.Out -notmatch 'ALL CHAT BACKEND CHECKS PASSED') {
     throw 'CHAT BACKEND VERIFICATION FAILED'
 }
 
+$prof = Invoke-Db -SqlFile (Join-Path $repoRoot 'scripts\verify-profiles-communities.sql')
+Write-Host $prof.Out
+if ($prof.Code -ne 0 -or $prof.Out -notmatch 'ALL PROFILES AND COMMUNITIES CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'PROFILES AND COMMUNITIES VERIFICATION FAILED'
+}
+
+$roles = Invoke-Db -SqlFile (Join-Path $repoRoot 'scripts\verify-draw-roles.sql')
+Write-Host $roles.Out
+if ($roles.Code -ne 0 -or $roles.Out -notmatch 'ALL DRAW ROLE AND INVITE LIFECYCLE CHECKS PASSED') {
+    docker rm -f $container 2>&1 | Out-Null
+    throw 'DRAW ROLE AND INVITE LIFECYCLE VERIFICATION FAILED'
+}
+
 docker rm -f $container 2>&1 | Out-Null
 Write-Host 'Migrations applied and verified.' -ForegroundColor Green

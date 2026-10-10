@@ -251,6 +251,12 @@ describe("isTrustedAudioUrl", () => {
     expect(isTrustedAudioUrl("https://A.B.AddisAssistant.com:443/a.mp3")).toBe(true);
   });
 
+  it("accepts extra configured storage hosts and their subdomains", () => {
+    expect(isTrustedAudioUrl("https://storage.googleapis.com/audio/1.mp3", ["storage.googleapis.com"])).toBe(true);
+    expect(isTrustedAudioUrl("https://mybucket.r2.cloudflarestorage.com/1.mp3", ["r2.cloudflarestorage.com"])).toBe(true);
+    expect(isTrustedAudioUrl("https://unrelated.com/1.mp3", ["storage.googleapis.com"])).toBe(false);
+  });
+
   it("REJECTS http, foreign hosts, userinfo tricks, lookalikes and junk", () => {
     for (const bad of [
       "http://cdn.addisassistant.com/a.mp3",

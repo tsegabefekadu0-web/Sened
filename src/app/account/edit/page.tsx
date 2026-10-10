@@ -107,7 +107,7 @@ export default function EditProfilePage() {
         </Card>
         <div className="flex flex-col gap-2" style={{ margin: "22px 16px 0" }}>
           <Button
-            onPress={() => save({ name: name.trim(), phone: phone.trim(), photo })}
+            onPress={() => save({ name: name.trim(), phone: phone.trim(), photo, preferredLocale: locale === "en" ? "en" : "am" })}
             successLabel={t("ui.status.saved")}
             errorLabel={t("ui.tryAgain")}
           >
@@ -118,7 +118,9 @@ export default function EditProfilePage() {
           </Link>
         </div>
         <p lang="am" className="mx-6 mb-6 mt-2 text-sm leading-[1.5] text-muted">
-          {t("ui.edit.localNote")}
+          {session.status === "signed-in"
+            ? (locale === "am" ? "መረጃዎ ከመለያዎ ጋር ተመሳስሏል።" : "Your details are saved to your account.")
+            : t("ui.edit.localNote")}
         </p>
       </main>
     </Screen>

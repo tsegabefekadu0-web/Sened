@@ -108,7 +108,7 @@ export function readAddisTtsVoice(env: VoiceEnv): string | null {
  * hostname is taken from the parsed URL, so `https://addisassistant.com@evil.com`
  * (host `evil.com`) and `evil-addisassistant.com` both fail.
  */
-export function isTrustedAudioUrl(raw: unknown): raw is string {
+export function isTrustedAudioUrl(raw: unknown, extraHosts?: readonly string[]): raw is string {
   if (typeof raw !== "string") {
     return false;
   }
@@ -125,7 +125,18 @@ export function isTrustedAudioUrl(raw: unknown): raw is string {
     return false;
   }
   const host = url.hostname.toLowerCase().replace(/\.$/, "");
-  return host === "addisassistant.com" || host.endsWith(".addisassistant.com");
+  if (host === "addisassistant.com" || host.endsWith(".addisassistant.com")) {
+    return true;
+  }
+  if (extraHosts && extraHosts.length > 0) {
+    for (const rawHost of extraHosts) {
+      const allowed = rawHost.trim().toLowerCase().replace(/\.$/, "");
+      if (allowed && (host === allowed || host.endsWith(`.${allowed}`))) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function asRecord(value: unknown): Record<string, unknown> | null {

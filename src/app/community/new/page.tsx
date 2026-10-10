@@ -8,6 +8,10 @@ import { Icon } from "@/components/ui/Icon";
 import { Button, Card, Screen } from "@/components/ui/primitives";
 import { SlideSwitch } from "@/components/ui/SlideSwitch";
 import { WovenAvatar } from "@/components/ui/Weave";
+import { authedFetch } from "@/lib/auth/authedFetch";
+import { useSession } from "@/lib/auth/useSession";
+import { useActiveGroup } from "@/lib/groups/useActiveGroup";
+import type { CreatedCommunity } from "@/lib/community/types";
 import { geez } from "@/lib/ui/geez";
 import { useT } from "@/lib/ui/useT";
 
@@ -17,12 +21,15 @@ const AMOUNTS = [500, 1000, 2000, 5000];
 const DRAFT_KEY = "sened.communityDraft.v1";
 
 /**
- * Create a community, in three steps. TODO(backend): there is no client route to
- * create a group yet (provisioning is a service-side function), so the last step
- * keeps the plan as a draft on this device and says so.
+ * Create a community in three steps: details, contribution settings, review & invite link.
+ * When signed in, creates the group on the server with owner permissions, chart of
+ * accounts, and an invite link. Offline or unconfigured, preserves the plan locally.
  */
 export default function CreateCommunityPage() {
   const { t, locale } = useT();
+  const session = useSession();
+  const activeGroup = useActiveGroup();
+
   const [step, setStep] = useState(1);
   const [dir, setDir] = useState(1);
   const [name, setName] = useState("");
@@ -31,21 +38,67 @@ export default function CreateCommunityPage() {
   const [weekly, setWeekly] = useState(false);
   const [members, setMembers] = useState(8);
   const [done, setDone] = useState(false);
+  const [created, setCreated] = useState<CreatedCommunity | null>(null);
+  const [copied, setCopied] = useState(false);
+
   const label = locale === "am" ? `${geez(step)} ከ ፫` : `${step} / 3`;
 
   const go = (n: number) => {
     setDir(n > step ? 1 : -1);
     setStep(n);
   };
+
   const create = async (): Promise<boolean> => {
+    if (session.status === "signed-in") {
+      try {
+        const res = await authedFetch("/api/community", {
+          method: "POST",
+          body: JSON.stringify({
+            name: name.trim(),
+            kind,
+            amount,
+            frequency: weekly ? "weekly" : "monthly",
+            members
+          })
+        });
+        if (res.ok) {
+          const body = (await res.json().catch(() => null)) as { community?: CreatedCommunity } | null;
+          if (body?.community) {
+            setCreated(body.community);
+            activeGroup.reload(body.community.groupId);
+            setDone(true);
+            return true;
+          }
+        }
+      } catch {
+        // Fall back to draft
+      }
+    }
+
     try {
-      window.localStorage.setItem(DRAFT_KEY, JSON.stringify({ name: name.trim(), kind, amount, weekly, members, at: new Date().toISOString() }));
+      window.localStorage.setItem(
+        DRAFT_KEY,
+        JSON.stringify({ name: name.trim(), kind, amount, weekly, members, at: new Date().toISOString() })
+      );
     } catch {
       return false;
     }
     setDone(true);
     return true;
   };
+
+  const copyInvite = async () => {
+    const url = created?.invite?.joinUrl;
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2400);
+    } catch {
+      // ignore clipboard error
+    }
+  };
+
   const stepAnim = { animation: `${dir > 0 ? "snd-slide-r" : "snd-slide-l"} 320ms var(--snd-emph) both` };
   const display = name.trim() || t("ui.create.namePlaceholder");
 
@@ -59,7 +112,11 @@ export default function CreateCommunityPage() {
         aria-pressed={on}
         onClick={() => setKind(k)}
         className="flex cursor-pointer flex-col items-start gap-2 rounded-[18px] text-left text-ink"
-        style={{ padding: on ? 13 : 14, background: on ? "color-mix(in srgb, var(--shop) 12%, transparent)" : "var(--card)", border: on ? "2px solid var(--shop)" : "1.5px solid var(--chipb)" }}
+        style={{
+          padding: on ? 13 : 14,
+          background: on ? "color-mix(in srgb, var(--shop) 12%, transparent)" : "var(--card)",
+          border: on ? "2px solid var(--shop)" : "1.5px solid var(--chipb)"
+        }}
       >
         <span aria-hidden="true" className="flex h-[52px] w-[52px] items-center justify-center rounded-full bg-hair2" style={{ color: "var(--shop)" }}>
           <Icon name={k === "equb" ? "draw" : "users"} size={28} />
@@ -73,11 +130,23 @@ export default function CreateCommunityPage() {
   return (
     <Screen>
       <main className="flex grow flex-col">
-        <AppHeader back="/account" backLabel={t("ui.back")} title={t("ui.create.title")} subtitle="Create community" bottom={96} ribbon={52} right={<span lang="am" className="font-serif text-[17px] font-bold">{label}</span>} />
+        <AppHeader
+          back="/account"
+          backLabel={t("ui.back")}
+          title={t("ui.create.title")}
+          subtitle="Create community"
+          bottom={96}
+          ribbon={52}
+          right={<span lang="am" className="font-serif text-[17px] font-bold">{label}</span>}
+        />
         <Card className="snd-rise flex flex-col gap-5" style={{ margin: "-44px 16px 0", padding: "20px 18px 22px" }}>
           <div role="img" aria-label={label} className="flex gap-2">
             {[1, 2, 3].map((i) => (
-              <span key={i} className={`h-2.5 flex-1 rounded-[5px] ${step >= i ? "snd-weave-tex" : "bg-hair2"}`} style={step >= i ? { backgroundSize: "6px 6px", boxShadow: "0 2px 3px -1px rgba(0,0,0,0.35)" } : undefined} />
+              <span
+                key={i}
+                className={`h-2.5 flex-1 rounded-[5px] ${step >= i ? "snd-weave-tex" : "bg-hair2"}`}
+                style={step >= i ? { backgroundSize: "6px 6px", boxShadow: "0 2px 3px -1px rgba(0,0,0,0.35)" } : undefined}
+              />
             ))}
           </div>
 
@@ -87,7 +156,14 @@ export default function CreateCommunityPage() {
                 <span lang="am" className="text-sm font-bold text-soft">
                   {t("ui.create.name")}
                 </span>
-                <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder={t("ui.create.namePlaceholder")} className={FIELD} maxLength={60} />
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder={t("ui.create.namePlaceholder")}
+                  className={FIELD}
+                  maxLength={60}
+                />
               </label>
               <div className="flex flex-col gap-2">
                 <span lang="am" className="text-sm font-bold text-soft">
@@ -123,7 +199,11 @@ export default function CreateCommunityPage() {
                       aria-pressed={amount === v}
                       onClick={() => setAmount(v)}
                       className="h-11 cursor-pointer rounded-[22px] px-[18px] font-display text-base font-extrabold"
-                      style={amount === v ? { border: "none", background: "var(--prim)", color: "var(--primt)", animation: "snd-pop 280ms var(--snd-spring) both" } : { border: "1.5px solid var(--chipb)", background: "var(--card)", color: "var(--ink)" }}
+                      style={
+                        amount === v
+                          ? { border: "none", background: "var(--prim)", color: "var(--primt)", animation: "snd-pop 280ms var(--snd-spring) both" }
+                          : { border: "1.5px solid var(--chipb)", background: "var(--card)", color: "var(--ink)" }
+                      }
                     >
                       {v.toLocaleString("en-US")}
                     </button>
@@ -135,7 +215,13 @@ export default function CreateCommunityPage() {
                   {t("ui.create.frequency")}
                 </span>
                 <div className="flex justify-center">
-                  <SlideSwitch checked={weekly} onChange={setWeekly} label={t("ui.create.frequency")} left={t("ui.create.monthly")} right={t("ui.create.weekly")} />
+                  <SlideSwitch
+                    checked={weekly}
+                    onChange={setWeekly}
+                    label={t("ui.create.frequency")}
+                    left={t("ui.create.monthly")}
+                    right={t("ui.create.weekly")}
+                  />
                 </div>
               </div>
               <div className="flex flex-col gap-2">
@@ -143,13 +229,23 @@ export default function CreateCommunityPage() {
                   {t("ui.create.members")}
                 </span>
                 <div className="flex items-center justify-between gap-3">
-                  <button type="button" aria-label={t("ui.fewer")} onClick={() => setMembers((m) => Math.max(2, m - 1))} className="h-[52px] w-[52px] cursor-pointer rounded-full border-[1.5px] border-[var(--chipb)] bg-card p-0 text-2xl font-bold text-ink">
+                  <button
+                    type="button"
+                    aria-label={t("ui.fewer")}
+                    onClick={() => setMembers((m) => Math.max(2, m - 1))}
+                    className="h-[52px] w-[52px] cursor-pointer rounded-full border-[1.5px] border-[var(--chipb)] bg-card p-0 text-2xl font-bold text-ink"
+                  >
                     −
                   </button>
                   <span className="font-display text-[32px] font-extrabold" style={{ letterSpacing: "-0.02em" }}>
                     {members}
                   </span>
-                  <button type="button" aria-label={t("ui.more")} onClick={() => setMembers((m) => Math.min(30, m + 1))} className="h-[52px] w-[52px] cursor-pointer rounded-full border-[1.5px] border-[var(--chipb)] bg-card p-0 text-2xl font-bold text-ink">
+                  <button
+                    type="button"
+                    aria-label={t("ui.more")}
+                    onClick={() => setMembers((m) => Math.min(30, m + 1))}
+                    className="h-[52px] w-[52px] cursor-pointer rounded-full border-[1.5px] border-[var(--chipb)] bg-card p-0 text-2xl font-bold text-ink"
+                  >
                     +
                   </button>
                 </div>
@@ -189,8 +285,45 @@ export default function CreateCommunityPage() {
                   {t("ui.role.owner")}
                 </span>
               </div>
+
+              {created?.invite?.joinUrl ? (
+                <div className="flex flex-col gap-2 rounded-2xl border border-[var(--chipb)] bg-hair2 p-3.5">
+                  <span lang="am" className="text-xs font-bold text-soft">
+                    {locale === "am" ? "የመጋበዣ ሊንክ" : "Invite link"}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={created.invite.joinUrl}
+                      aria-label="Invite link"
+                      className="h-10 min-w-0 grow rounded-xl border border-[var(--hair2)] bg-card px-3 font-mono text-xs text-ink"
+                    />
+                    <button
+                      type="button"
+                      onClick={copyInvite}
+                      className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl bg-prim px-3.5 text-xs font-bold text-primt"
+                    >
+                      {copied ? (
+                        <Icon name="check" size={14} />
+                      ) : (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                        </svg>
+                      )}
+                      <span>{copied ? (locale === "am" ? "ተቀድቷል" : "Copied!") : (locale === "am" ? "ቅዳ" : "Copy")}</span>
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               <p lang="am" className="m-0 text-sm leading-[1.5] text-muted" data-testid="create-note">
-                {done ? t("ui.create.localDone") : t("ui.create.localNote")}
+                {done
+                  ? created
+                    ? (locale === "am" ? "ማህበረሰብዎ ተፈጥሯል! የመጋበዣ ሊንኩን ለአባላት ያጋሩ።" : "Your community is created! Share the invite link with members.")
+                    : t("ui.create.localDone")
+                  : t("ui.create.localNote")}
               </p>
             </div>
           ) : null}
@@ -198,8 +331,8 @@ export default function CreateCommunityPage() {
 
         <div className="flex flex-col gap-2" style={{ margin: "22px 16px 0" }}>
           {done ? (
-            <Link href="/account" className="flex h-[54px] items-center justify-center rounded-[27px] bg-prim text-[17px] font-bold text-primt">
-              {t("ui.nav.account")}
+            <Link href="/home" className="flex h-[54px] items-center justify-center rounded-[27px] bg-prim text-[17px] font-bold text-primt">
+              {locale === "am" ? "ወደ ማህበረሰብ ሂድ" : "Go to community"}
             </Link>
           ) : step < 3 ? (
             <Button onPress={() => go(step + 1)} disabled={step === 1 && name.trim() === ""}>

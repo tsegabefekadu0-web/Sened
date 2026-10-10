@@ -70,7 +70,10 @@ export const RATE_LIMITED = new Set([
   "/api/governance/citations",
   // Cron-only (shared-secret) and spends the bank provider's quota, so it is
   // metered as a write even though a legitimate scheduler calls it once a minute.
-  "/api/reconciliation/drain"
+  "/api/reconciliation/drain",
+  // Step 2: Profile (GET read, PUT write) and Community creation (POST write)
+  "/api/profile",
+  "/api/community"
 ]);
 
 const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
@@ -111,6 +114,12 @@ export function isRateLimitedPath(pathname: string): boolean {
 }
 
 export function resolveRateLimit(pathname: string, method = "POST"): RateLimitRule {
+  if (pathname === "/api/profile") {
+    return method === "GET" ? READ_RULE : WRITE_RULE;
+  }
+  if (pathname === "/api/community") {
+    return WRITE_RULE;
+  }
   if (pathname === "/api/ledger/invites") {
     return method === "GET" ? READ_RULE : WRITE_RULE;
   }

@@ -56,6 +56,8 @@ export default function JoinPage() {
   const { reload: reloadGroups } = useActiveGroup();
 
   useEffect(() => {
+    // Strict mode re-runs this effect after the fragment is already cleared.
+    if (tokenRef.current) return;
     const fromHash = parseTokenFromHash(window.location.hash);
     if (fromHash) window.history.replaceState(null, "", window.location.pathname);
     const token = fromHash ?? peekPendingInvite();

@@ -17,12 +17,40 @@ describe("Ge'ez numerals and the Ethiopian calendar", () => {
     expect(geez(100)).toBe("100");
   });
 
-  it("converts a Gregorian date to the Ethiopian one", () => {
+  it("converts a Gregorian date to the Ethiopian one across common years, leap years, and milestones", () => {
     // 2026-09-11 is 1 Meskerem 2019 (the Ethiopian new year), 2026-10-09 is 29 Meskerem.
     expect(toEthiopic(new Date(2026, 8, 11))).toEqual({ year: 2019, month: 0, day: 1 });
     const d = toEthiopic(new Date(2026, 9, 9));
     expect(ETHIOPIC_MONTHS[d.month]).toBe("መስከረም");
     expect(d.day).toBe(29);
+
+    // Leap year 2015 E.C. (2015 % 4 = 3): Pagume has 6 days, Meskerem 1 2016 falls on Sept 12
+    expect(toEthiopic(new Date(2023, 8, 10))).toEqual({ year: 2015, month: 12, day: 5 });
+    expect(toEthiopic(new Date(2023, 8, 11))).toEqual({ year: 2015, month: 12, day: 6 });
+    expect(toEthiopic(new Date(2023, 8, 12))).toEqual({ year: 2016, month: 0, day: 1 });
+
+    // Regular years 2016, 2017, 2018 E.C.
+    expect(toEthiopic(new Date(2024, 8, 10))).toEqual({ year: 2016, month: 12, day: 5 });
+    expect(toEthiopic(new Date(2024, 8, 11))).toEqual({ year: 2017, month: 0, day: 1 });
+    expect(toEthiopic(new Date(2025, 8, 10))).toEqual({ year: 2017, month: 12, day: 5 });
+    expect(toEthiopic(new Date(2025, 8, 11))).toEqual({ year: 2018, month: 0, day: 1 });
+    expect(toEthiopic(new Date(2026, 8, 10))).toEqual({ year: 2018, month: 12, day: 5 });
+    expect(toEthiopic(new Date(2026, 8, 11))).toEqual({ year: 2019, month: 0, day: 1 });
+
+    // Leap year 2019 E.C.: Pagume 6 is Sept 11 2027, Meskerem 1 2020 is Sept 12 2027
+    expect(toEthiopic(new Date(2027, 8, 11))).toEqual({ year: 2019, month: 12, day: 6 });
+    expect(toEthiopic(new Date(2027, 8, 12))).toEqual({ year: 2020, month: 0, day: 1 });
+
+    // Meskerem 1 2021 E.C. is Sept 11 2028
+    expect(toEthiopic(new Date(2028, 8, 11))).toEqual({ year: 2021, month: 0, day: 1 });
+
+    // Historical & cultural milestones:
+    // Battle of Adwa: March 1, 1896 -> Yekatit 23, 1888
+    expect(toEthiopic(new Date(1896, 2, 1))).toEqual({ year: 1888, month: 5, day: 23 });
+    // Ginbot 20: May 28, 1991 -> Ginbot 20, 1983
+    expect(toEthiopic(new Date(1991, 4, 28))).toEqual({ year: 1983, month: 8, day: 20 });
+    // Ethiopian Millennium: September 12, 2007 -> Meskerem 1, 2000
+    expect(toEthiopic(new Date(2007, 8, 12))).toEqual({ year: 2000, month: 0, day: 1 });
   });
 });
 

@@ -105,6 +105,7 @@ export class AddisAiTextToSpeechProvider implements TextToSpeechProvider {
   constructor(config: {
     readonly apiKey: string;
     readonly voice: string;
+    readonly audioHosts?: readonly string[];
     readonly timeoutMs?: number;
     readonly fetchImpl?: typeof fetch;
   }) {
@@ -113,9 +114,12 @@ export class AddisAiTextToSpeechProvider implements TextToSpeechProvider {
     }
     this.apiKey = config.apiKey;
     this.voice = config.voice;
+    this.audioHosts = config.audioHosts;
     this.timeoutMs = config.timeoutMs ?? TTS_TIMEOUT_MS;
     this.fetchImpl = config.fetchImpl ?? globalThis.fetch;
   }
+
+  readonly audioHosts?: readonly string[];
 
   /** Build from the environment, or `null` when it is not (validly) configured. */
   static fromEnv(env: VoiceEnv = process.env, fetchImpl?: typeof fetch): AddisAiTextToSpeechProvider | null {
@@ -127,7 +131,9 @@ export class AddisAiTextToSpeechProvider implements TextToSpeechProvider {
     if (apiKey === null || voice === null) {
       return null;
     }
-    return new AddisAiTextToSpeechProvider({ apiKey, voice, fetchImpl });
+    const rawHosts = env.ADDIS_AI_AUDIO_HOSTS;
+    const audioHosts = rawHosts ? rawHosts.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+    return new AddisAiTextToSpeechProvider({ apiKey, voice, audioHosts, fetchImpl });
   }
 
   async synthesize(
@@ -176,7 +182,7 @@ export class AddisAiTextToSpeechProvider implements TextToSpeechProvider {
       throw new VoiceProviderError("PROVIDER_REJECTED", this.name, "The speech provider returned a malformed body.");
     }
     const audioUrl = readAudioUrl(payload);
-    if (!isTrustedAudioUrl(audioUrl)) {
+    if (!isTrustedAudioUrl(audioUrl, this.audioHosts)) {
       throw new VoiceProviderError("PROVIDER_REJECTED", this.name, "The speech provider returned no usable audio.");
     }
 

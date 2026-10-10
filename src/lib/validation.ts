@@ -504,3 +504,28 @@ export const drawCancelRequestSchema = z
     reason: gateReasonSchema
   })
   .strict();
+
+export const profileUpdateRequestSchema = z
+  .object({
+    name: z.string().trim().max(120).default(""),
+    phone: z.string().trim().max(30).default(""),
+    photo: z.string().trim().max(2000).nullable().optional(),
+    preferredLocale: z.enum(["am", "en", "om"]).optional(),
+    preferredTheme: z.enum(["system", "light", "dark"]).optional()
+  })
+  .strict();
+
+export type ProfileUpdateRequest = z.infer<typeof profileUpdateRequestSchema>;
+
+export const communityCreateRequestSchema = z
+  .object({
+    name: z.string().trim().min(1, "Name is required").max(120),
+    kind: z.enum(["equb", "iddir"]).default("equb"),
+    amount: z.number().positive().max(10_000_000).default(5000),
+    frequency: z.enum(["monthly", "weekly"]).default("monthly"),
+    members: z.number().int().min(2).max(50).default(8)
+  })
+  .strict();
+
+export type CommunityCreateRequest = z.infer<typeof communityCreateRequestSchema>;
+

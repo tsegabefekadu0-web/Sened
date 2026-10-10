@@ -1,52 +1,52 @@
 ﻿file,line,text
+src/app/account/edit/page.tsx,105,"<SlideSwitch checked={locale === ""en""} onChange={(on) => setLocale(on ? ""en"" : ""am"")} label={t(""ui.language"")} left=""አማርኛ"" right=""English"" />"
+src/app/account/edit/page.tsx,122,"? (locale === ""am"" ? ""መረጃዎ ከመለያዎ ጋር ተመሳስሏል።"" : ""Your details are saved to your account."")"
+src/app/account/page.tsx,119,"{[[""የቦሌ ሰፈር እቁብ"", false], [""የቦሌ ቀበሌ ፲፬ እድር"", false], [""የቤተሰብ እቁብ"", true]].map(([n, col]) => ("
+src/app/account/page.tsx,147,"{Array.from(g.name || ""ሰ"")[0]}"
+src/app/account/page.tsx,187,"left=""አማርኛ"""
 src/app/api/voice/speak/route.ts,8,* `POST /api/voice/speak` — text to speech for the `አድምጥ` digest.
-src/app/draw/page.tsx,27,እጣ
-src/app/draw/page.tsx,41,"{locale === ""am"" ? ""EN"" : ""አማ""}"
-src/app/layout.tsx,7,"title: ""Sened (ሰነድ) — የህብረተሰብ እቁብ እና ዕድር አስተዳዳሪ"","
-src/app/offline/offline-console.tsx,762,"{locale === ""en"" ? ""አማርኛ"" : ""English""}"
-src/app/offline/page.tsx,15,"title: ""Sened · የመስመር መዝገብ ጠረጴዛ — Offline ledger desk"","
-src/app/page.tsx,274,* *verified* contributions; adding a spoken one to it would make the ደብተር
-src/app/page.tsx,300,"name: ""የተናገረ ልይል"","
-src/components/contributions/ContributionFeed.tsx,457,"? `${selected.amount.toLocaleString(locale === ""am"" ? ""am-ET"" : ""en-US"")} ብር`"
-src/components/cultural/CulturalIcons.tsx,4,* Authentic Ethiopian Meskel Cross Icon (የመስቀል ጥልፍ)
-src/components/cultural/CulturalIcons.tsx,47,* Authentic Center Diamond Embroidery Medallion (የጥልፍ አልማዝ ማዕከል)
-src/components/cultural/CulturalIcons.tsx,99,* Vertical Woven Tibeb Embroidery Border (የጥበብ ዳርቻ ጥልፍ)
-src/components/cultural/CulturalIcons.tsx,129,* Traditional Ethiopian Scalloped Arch Plaque (የብራና ጽላት ሰሌዳ)
-src/components/cultural/CulturalIcons.tsx,132,"title = ""አድምጥ"","
-src/components/cultural/CulturalIcons.tsx,147,"aria-label=""የቦሌ መድኃኔዓለም እቁብ ሪፖርት አድምጥ"""
-src/components/cultural/CulturalIcons.tsx,217,* 3D Woven Mesob Basket Component (ባህላዊ መሶብ)
-src/components/cultural/CulturalIcons.tsx,244,{/* Crown Knob (ጉልላት) */}
-src/components/cultural/CulturalIcons.tsx,248,{/* Conical Lid (ክዳን) */}
-src/components/cultural/CulturalIcons.tsx,261,{/* Lid Lip / Rim (የክዳን ከንፈር) */}
-src/components/cultural/CulturalIcons.tsx,273,{/* Mesob Waist Drum (መካከለኛ አካል) */}
-src/components/cultural/CulturalIcons.tsx,286,{/* Flared Pedestal Base (እግር / መቀመጫ) */}
-src/components/cultural/MemberAvatar.tsx,8,"* A member's portrait inside a Tibeb (ጥበብ) embroidered border, optionally"
-src/components/cultural/MesobIcon.tsx,4,* Traditional Ethiopian Mesob (መሶብ) Woven Basket Icon
-src/components/draw/DrawBoard.tsx,37,"{ memberId: ""00014444-4444-8444-844444444444"", displayName: ""አባላት አለት"", status: ""active"", contributionAmount: CONTRIBUTION },"
-src/components/draw/DrawBoard.tsx,38,"{ memberId: ""00024444-4444-8444-844444444444"", displayName: ""አባላት ሁለት"", status: ""active"", contributionAmount: CONTRIBUTION },"
-src/components/draw/DrawBoard.tsx,39,"{ memberId: ""00034444-4444-8444-844444444444"", displayName: ""አባላት ሦስት"", status: ""active"", contributionAmount: CONTRIBUTION },"
-src/components/draw/DrawBoard.tsx,40,"{ memberId: ""00044444-4444-8444-844444444444"", displayName: ""አባላት አራት"", status: ""active"", contributionAmount: CONTRIBUTION },"
-src/components/draw/DrawBoard.tsx,41,"{ memberId: ""00054444-4444-8444-844444444444"", displayName: ""አባላት አምስት"", status: ""active"", contributionAmount: CONTRIBUTION },"
-src/components/draw/DrawBoard.tsx,42,"{ memberId: ""00064444-4444-8444-844444444444"", displayName: ""አባላት ስድስት"", status: ""active"", contributionAmount: CONTRIBUTION },"
-src/components/draw/DrawBoard.tsx,43,"{ memberId: ""00074444-4444-8444-844444444444"", displayName: ""አባላት ሰባት"", status: ""active"", contributionAmount: CONTRIBUTION },"
-src/components/draw/DrawBoard.tsx,44,"{ memberId: ""00084444-4444-8444-844444444444"", displayName: ""አባላት ስምንት"", status: ""active"", contributionAmount: CONTRIBUTION }"
-src/components/draw/MesobCeremony.tsx,36,* The መሶብ ceremony.
-src/components/draw/MesobCeremony.tsx,65,aria-label={`የእጣ ሥርዓት — ${roundLabel}`}
-src/components/draw/MesobCeremony.tsx,100,"<span className=""font-ethiopic"">ቃል</span>"
-src/components/draw/MesobCeremony.tsx,112,"{winnerName ?? ""አሸናፊ""}"
-src/components/draw/MesobCeremony.tsx,115,እጣ ተጠናቋል
-src/components/draw/MesobCeremony.tsx,120,"{reducedMotion ? ""እጣዎች በመሶብ ውስጥ በመሆን ላይ እየተጠበቀ ነው"" : ""መሶቡ እየተጨማረ ነው…""}"
-src/components/draw/MesobCeremony.tsx,125,"? ""ቃል መዋጮው ተዘጋጅቷል፤ ዘመኑ እስኪተገልጥ አልተቻለም"""
-src/components/draw/MesobCeremony.tsx,126,": ""ሦስት ደረጃዎች — ቃል መዋጮ · መስበር · ማረጋገጥ""}"
-src/components/governance/GovernanceWorkspace.tsx,36,"{locale === ""am"" ? ""EN"" : ""አማ""}"
-src/components/shell/WorkspaceLinks.tsx,22,* The M1 bottom-nav slots are left alone: Home / ደብተር / Members / Profile are
-src/components/shell/WorkspaceLinks.tsx,33,"label: ""ድምጽ"","
-src/components/shell/WorkspaceLinks.tsx,39,"label: ""እጣ"","
-src/components/shell/WorkspaceLinks.tsx,45,"label: ""ደብተር"","
-src/components/shell/WorkspaceLinks.tsx,51,"label: ""መመሪያ"","
-src/components/shell/WorkspaceLinks.tsx,57,"label: ""ኦፍላይን"","
-src/components/voice/AudioDigestModal.tsx,36,* The `አድምጥ` spoken balance sheet (ROADMAP §3.2).
-src/components/voice/VoiceWorkbench.tsx,178,"{option === ""en"" ? ""English"" : ""አማርኛ""}"
+src/app/chat/[groupId]/page.tsx,39,"const name = ch.sample ? ""የቦሌ ሰፈር እቁብ"" : info?.name || c.groupName || t(""ui.home.noName"");"
+src/app/chat/page.tsx,31,ሰ
+src/app/community/new/page.tsx,44,"const label = locale === ""am"" ? `${geez(step)} ከ ፫` : `${step} / 3`;"
+src/app/community/new/page.tsx,272,"<WovenAvatar initial={Array.from(display)[0] ?? ""ማ""} size={60} fontSize={22} />"
+src/app/community/new/page.tsx,292,"{locale === ""am"" ? ""የመጋበዣ ሊንክ"" : ""Invite link""}"
+src/app/community/new/page.tsx,315,"<span>{copied ? (locale === ""am"" ? ""ተቀድቷል"" : ""Copied!"") : (locale === ""am"" ? ""ቅዳ"" : ""Copy"")}</span>"
+src/app/community/new/page.tsx,324,"? (locale === ""am"" ? ""ማህበረሰብዎ ተፈጥሯል! የመጋበዣ ሊንኩን ለአባላት ያጋሩ።"" : ""Your community is created! Share the invite link with members."")"
+src/app/community/new/page.tsx,335,"{locale === ""am"" ? ""ወደ ማህበረሰብ ሂድ"" : ""Go to community""}"
+src/app/layout.tsx,25,"title: ""ሰነድ · Sened"","
+src/app/ledger/page.tsx,46,"<AppHeader title={t(""ui.nav.ledger"")} subtitle={c.cycle ? `Ledger · ዙር ${geez(c.cycle.round)}` : ""Ledger""} bottom={48}>"
+src/app/members/page.tsx,41,"<AppHeader title={t(""ui.members.title"")} subtitle={c.cycle ? `Members · ዙር ${geez(c.cycle.round)}` : ""Members""} bottom={86} ribbon={44}>"
+src/components/home/HomeScreen.tsx,52,"{c.mode === ""sample"" ? ""እ"" : name.trim().charAt(0) || ""ሰ""}"
+src/components/home/HomeScreen.tsx,143,"{c.cycle ? (locale === ""am"" ? geez(c.cycle.round) : c.cycle.round) : ""፴""}"
+src/components/landing/LandingChrome.tsx,93,"<Link href=""/welcome"" className=""flex items-center gap-2.5"" aria-label=""ሰነድ"">"
+src/components/landing/LandingChrome.tsx,95,ሰ
+src/components/landing/LandingChrome.tsx,98,ሰነድ
+src/components/landing/LandingPage.tsx,56,"<Link href=""/welcome"" className=""flex items-center gap-3"" aria-label=""ሰነድ"">"
+src/components/landing/LandingPage.tsx,58,ሰ
+src/components/landing/LandingPage.tsx,61,ሰነድ
+src/components/landing/LandingPage.tsx,75,ሰነድ
+src/components/landing/LandingPage.tsx,103,"share: t(""ui.home.share"", { month: locale === ""am"" ? ""መስከረም"" : ""Meskerem"" }),"
+src/components/landing/LandingPage.tsx,199,"winnerName=""ወ/ሮ ጽጌ ከ"""
+src/components/landing/LandingPage.tsx,202,"letters={[""በ"", ""አ"", ""ጽ"", ""ታ"", ""ፋ"", ""ዮ"", ""ሙ""]}"
+src/components/landing/LandingPage.tsx,227,"{ who: ""ፋ"", name: ""ወ/ሮ ፋጡማ አ"", text: ""እንኳን ደስ አለሽ ጽጌ! በሰላም ይግባሽ።"", mine: false },"
+src/components/landing/LandingPage.tsx,228,"{ who: ""ጽ"", name: ""ወ/ሮ ጽጌ ከ"", text: ""አመሰግናለሁ ጎረቤቶቼ! ቡናው ለእኔ ነው።"", mine: false },"
+src/components/landing/LandingPage.tsx,229,"{ who: """", name: """", text: ""ተረድቻለሁ፣ ዛሬ ማታ በቴሌብር አስገባለሁ።"", mine: true }"
+src/components/landing/LandingPage.tsx,309,ሰ
+src/components/landing/LandingPage.tsx,313,ሰነድ · Sened
+src/components/landing/PhoneMockup.tsx,29,በ
+src/components/landing/PhoneMockup.tsx,46,ብር
+src/components/landing/PhoneMockup.tsx,62,"<BasketRing order={ORDER} label="""" centerTop=""25,000"" centerBottom=""ከ 40,000"" size={150} />"
+src/components/ui/AppHeader.tsx,11,/** The language switch used on the brand header: አማ | EN. App-wide. */
+src/components/ui/AppHeader.tsx,19,"left=""አማ"""
+src/components/ui/BottomNav.tsx,28,* The bottom bar: ቤት · ደብተር · [voice dock] · ውይይት · እኔ. The centre is a woven
+src/components/ui/BottomNav.tsx,188,"<Link href=""/home"" aria-label=""ሰነድ"" className=""mb-8 flex items-center gap-3 px-2"">"
+src/components/ui/BottomNav.tsx,190,ሰ
+src/components/ui/BottomNav.tsx,194,ሰነድ
+src/components/ui/BottomNav.tsx,243,EN · አማ
+src/components/ui/ChannelList.tsx,24,"{ id: SAMPLE_CHANNEL_ID, name: ""የቦሌ ሰፈር እቁብ"", preview: ""ወ/ሮ ጽጌ ከ: ቡና ጠጡ፤ የዕጣ ቀን ስብሰባ"", time: ""4:10"", unread: 3, pinned: true },"
+src/components/ui/ChannelList.tsx,25,"{ id: SAMPLE_CHANNEL_ID, name: ""የቤተሰብ እቁብ"", preview: ""ወ/ሮ ሰላም ገ: የዚህ ወር ድርሻ ተከፍሏል።"", time: """", unread: 0, pinned: false },"
+src/components/ui/ChannelList.tsx,26,"{ id: SAMPLE_CHANNEL_ID, name: ""የቦሌ ቀበሌ ፲፬ እድር"", preview: ""አቶ ገዛኸኝ ሰ: የእድር ስብሰባ እሁድ ጠዋት ይሆናል።"", time: """", unread: 1, pinned: true }"
+src/components/ui/VoiceSheet.tsx,191,"<SlideSwitch checked={english} onChange={setEnglish} label={t(""ui.voice.switchLabel"")} left=""አማርኛ"" right=""English"" />"
 src/lib/ledger/accounts.ts,17,* | `POT_CASH` | asset | the money members can see in the ደብተር |
 src/lib/ledger/accounts.ts,59,"POT_CASH: { code: ""POT_CASH"", name: ""የእቁብ ጥሬ ሂሳብ"", type: ""asset"" },"
 src/lib/ledger/accounts.ts,62,"name: ""የስጠታ ገቢ"","
@@ -54,6 +54,33 @@ src/lib/ledger/accounts.ts,67,"name: ""የእጣ ክፍያ ወጪ"","
 src/lib/ledger/accounts.ts,72,"name: ""የመክፈት ቀድሞ ሂሳብ"","
 src/lib/ledger/homeSummary.ts,13,"* account — the asset the ደብተር shows (see `accounts.ts`). It is an asset, so"
 src/lib/memberAvatarStyle.ts,10,* The four frames are Tibeb (ጥበብ) embroidery borders and are interchangeable:
+src/lib/ui/chatStore.ts,56,"{ kind: ""day"", id: ""d1"", label: ""ነሐሴ ፴"" },"
+src/lib/ui/chatStore.ts,57,"{ kind: ""sys"", id: ""s1"", icon: ""draw"", text: ""ዕጣ ወጣ: ወ/ሮ ጽጌ ከ · 40,000 ብር"", href: ""/draw"" },"
+src/lib/ui/chatStore.ts,58,"{ kind: ""msg"", id: ""m1"", mine: false, who: ""ወ/ሮ ፋጡማ አ"", initial: ""ፋ"", text: ""እንኳን ደስ አለሽ ጽጌ! በሰላም ይግባሽ።"", time: ""4:02"", react: { smile: 4 } },"
+src/lib/ui/chatStore.ts,59,"{ kind: ""msg"", id: ""m2"", mine: false, who: ""ወ/ሮ ጽጌ ከ"", initial: ""ጽ"", text: ""አመሰግናለሁ ጎረቤቶቼ! ቡናው ለእኔ ነው።"", time: ""4:05"", react: { smile: 5 } },"
+src/lib/ui/chatStore.ts,60,"{ kind: ""day"", id: ""d2"", label: ""መስከረም ፲፭"" },"
+src/lib/ui/chatStore.ts,61,"{ kind: ""msg"", id: ""m3"", mine: false, who: ""ወ/ሮ ፋጡማ አ"", initial: ""ፋ"", text: ""እንደምን አደራችሁ ጎረቤቶች!"", time: ""8:10"" },"
+src/lib/ui/chatStore.ts,62,"{ kind: ""msg"", id: ""m4"", mine: false, who: ""አቶ ዮሐንስ መ"", initial: ""ዮ"", text: ""እንደምን አደርሽ ፋጡማ፤ ደህና ነን።"", time: ""8:12"" },"
+src/lib/ui/chatStore.ts,63,"{ kind: ""sys"", id: ""s2"", icon: ""book"", text: ""ወ/ሮ አልማዝ ተ 5,000 ብር ከፍለዋል · ተረጋግጧል"", href: ""/ledger"" },"
+src/lib/ui/chatStore.ts,64,"{ kind: ""msg"", id: ""m5"", mine: false, who: ""አቶ ታደሰ ወ"", initial: ""ታ"", badge: true, text: ""የመስከረም ድርሻ ያልከፈላችሁ እባካችሁ እስከ ወሩ መጨረሻ ይክፈሉ። አመሰግናለሁ።"", time: ""9:30"", react: { ack: 3 } },"
+src/lib/ui/chatStore.ts,65,"{ kind: ""msg"", id: ""m6"", mine: false, who: ""ወ/ሮ ሙሉ በ"", initial: ""ሙ"", voice: { dur: ""0:12"", transcript: ""ዛሬ በቴሌብር አስገባለሁ።"" }, time: ""9:41"" },"
+src/lib/ui/chatStore.ts,66,"{ kind: ""msg"", id: ""m7"", mine: true, who: """", initial: """", quote: { name: ""አቶ ታደሰ ወ"", text: ""የመስከረም ድርሻ ያልከፈላችሁ እባካችሁ…"" }, text: ""ተረድቻለሁ፣ ዛሬ ማታ በቴሌብር አስገባለሁ።"", time: ""9:48"" },"
+src/lib/ui/chatStore.ts,67,"{ kind: ""msg"", id: ""m8"", mine: false, who: ""ወ/ሮ ጽጌ ከ"", initial: ""ጽ"", coffee: true, time: ""10:20"" }"
+src/lib/ui/geez.ts,1,"const ONES = ["""", ""፩"", ""፪"", ""፫"", ""፬"", ""፭"", ""፮"", ""፯"", ""፰"", ""፱""];"
+src/lib/ui/geez.ts,2,"const TENS = ["""", ""፲"", ""፳"", ""፴"", ""፵"", ""፶"", ""፷"", ""፸"", ""፹"", ""፺""];"
+src/lib/ui/geez.ts,11,"""መስከረም"", ""ጥቅምት"", ""ኅዳር"", ""ታኅሣሥ"", ""ጥር"", ""የካቲት"", ""መጋቢት"", ""ሚያዝያ"", ""ግንቦት"", ""ሰኔ"", ""ሐምሌ"", ""ነሐሴ"", ""ጳጉሜ"""
+src/lib/ui/mesobScene.ts,365,"const letters = Array.from({ length: 7 }, (_, i) => this.opts.letters[i % Math.max(this.opts.letters.length, 1)] ?? ""ሰ"");"
+src/lib/ui/mesobScene.ts,447,"Promise.all([document.fonts.load(""700 40px 'Noto Serif Ethiopic'"", winnerName), document.fonts.load(""600 30px 'Noto Sans Ethiopic'"", ""ዕጣ ዙር"")])"
+src/lib/ui/useCommunity.ts,70,"[""አቶ በቀለ ገ"", ""በ"", ""member""],"
+src/lib/ui/useCommunity.ts,71,"[""ወ/ሮ አልማዝ ተ"", ""አ"", ""treasurer""],"
+src/lib/ui/useCommunity.ts,72,"[""ወ/ሮ ጽጌ ከ"", ""ጽ"", ""member""],"
+src/lib/ui/useCommunity.ts,73,"[""አቶ ታደሰ ወ"", ""ታ"", ""owner""],"
+src/lib/ui/useCommunity.ts,74,"[""ወ/ሮ ፋጡማ አ"", ""ፋ"", ""member""],"
+src/lib/ui/useCommunity.ts,75,"[""አቶ ዮሐንስ መ"", ""ዮ"", ""member""],"
+src/lib/ui/useCommunity.ts,76,"[""ወ/ሮ ሙሉ በ"", ""ሙ"", ""member""],"
+src/lib/ui/useCommunity.ts,77,"[""አቶ ከድር ሀ"", ""ከ"", ""member""]"
+src/lib/ui/useCommunity.ts,117,"groupName: ""የቦሌ ሰፈር እቁብ"","
+src/lib/ui/useCommunity.ts,122,"cycle: { cycleId: ""sample"", name: ""የቦሌ ሰፈር እቁብ"", round: 3, totalRounds: 8, contribution: 5000, pot: 40000 }"
 src/lib/voice/lexicon.ts,17,"""\u1274\u120c\u1265\u122d"", // ቴሌብር"
 src/lib/voice/lexicon.ts,18,"""\u1274\u1208\u1265\u122d"", // ቴለብር"
 src/lib/voice/lexicon.ts,19,"""\u1274\u120c\u1268\u122d"", // ቴሌበር"
@@ -130,6 +157,19 @@ src/lib/voice/months.ts,121,"""\u1290\u1203\u1234"", // ነሃሴ"
 src/lib/voice/months.ts,122,"""\u1290\u1210\u1233"", // ነሐሳ"
 src/lib/voice/months.ts,129,"""\u1333\u1309\u121c\u1295"", // ጳጉሜን"
 src/lib/voice/months.ts,130,"""\u1333\u1309\u1218\u1295"", // ጳጉመን"
+src/lib/voice/months.ts,175,"meskerem: ""መስከረም"", // መስከረም"
+src/lib/voice/months.ts,176,"tikimt: ""ጥቅምት"", // ጥቅምት"
+src/lib/voice/months.ts,177,"hidar: ""ኅዳር"", // ኅዳር"
+src/lib/voice/months.ts,178,"tahsas: ""ታኅሣሥ"", // ታኅሣሥ"
+src/lib/voice/months.ts,179,"tir: ""ጥር"", // ጥር"
+src/lib/voice/months.ts,180,"yekatit: ""የካቲት"", // የካቲት"
+src/lib/voice/months.ts,181,"megabit: ""መጋቢት"", // መጋቢት"
+src/lib/voice/months.ts,182,"miyazya: ""ሚያዝያ"", // ሚያዝያ"
+src/lib/voice/months.ts,183,"ginbot: ""ግንቦት"", // ግንቦት"
+src/lib/voice/months.ts,184,"sene: ""ሰኔ"", // ሰኔ"
+src/lib/voice/months.ts,185,"hamle: ""ሐምሌ"", // ሐምሌ"
+src/lib/voice/months.ts,186,"nehase: ""ነሐሰ"", // ነሐሴ"
+src/lib/voice/months.ts,187,"pagumen: ""ጳጉሜን"" // ጳጉሜን"
 src/lib/voice/normalize.ts,50,"* here — they are folded to ASCII first, so a reference such as `፬፪` reaches"
 src/lib/voice/normalize.ts,54,"""\u1361"": "" "", //  ፡"
 src/lib/voice/normalize.ts,55,"""\u1362"": "" "", //  ።"
@@ -198,5 +238,5 @@ src/lib/voice/parser.ts,191,"* words. Longest-match is tried first, so `አም�
 src/lib/voice/parser.ts,348,(next !== null && /^[\u1290\u12cd]$/u.test(next.text)); // ነው / ነው።
 src/lib/voice/parser.ts,401,/** Was this run immediately introduced by a reference label? e.g. `ቁጥር 5`. */
 src/lib/voice/parser.ts,478,// `ዶላር 500` must never become a 500 birr contribution.
-src/lib/voice/tts.ts,5,"* Text-to-speech for the spoken balance sheet (`አድምጥ`, ROADMAP §3.2)."
+src/lib/voice/tts.ts,21,"* Text-to-speech for the spoken balance sheet (`አድምጥ`, ROADMAP §3.2)."
 src/lib/voice/types.ts,21,"* `ታኅሣሥ` twice (it is Tahsas, month 4, *not* Nehase, month 12);"

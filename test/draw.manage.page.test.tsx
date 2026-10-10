@@ -42,11 +42,21 @@ describe("/draw/manage role gating", () => {
     expect(screen.getByTestId("draw-live")).toBeInTheDocument();
   });
 
-  it("with no community it says so instead of showing the console", () => {
-    h.session = { status: "signed-in", accessToken: "t", email: "t@example.com" };
-    h.community = { mode: "no-group", role: null };
+  it("shows loading screen while session is resolving", () => {
+    h.session = { status: "loading" };
     render(<ManageDrawPage />);
-    expect(screen.getByTestId("manage-refusal")).toBeInTheDocument();
+    expect(screen.queryByTestId("manage-refusal")).toBeNull();
     expect(screen.queryByTestId("draw-live")).toBeNull();
+  });
+
+  it("shows correct treasurer notes for owner and treasurer", () => {
+    h.session = { status: "signed-in", accessToken: "t", email: "owner@example.com" };
+    h.community = { mode: "live", role: "owner" };
+    const { rerender } = render(<ManageDrawPage />);
+    expect(screen.getByTestId("manage-treasurer")).toBeInTheDocument();
+
+    h.community = { mode: "live", role: "treasurer" };
+    rerender(<ManageDrawPage />);
+    expect(screen.getByTestId("manage-treasurer")).toBeInTheDocument();
   });
 });

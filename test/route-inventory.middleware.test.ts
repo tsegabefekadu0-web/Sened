@@ -353,7 +353,7 @@ const concrete = (path: string) => path.replace(/\[[^\]]+\]/g, SAMPLE_UUID);
  * spend nothing and read nothing about anyone. Adding to this list is a decision,
  * and the test below makes the list itself prove it is still true.
  */
-const INTENTIONALLY_UNMETERED = new Set(["/api/voice/extract", "/api/voice/capabilities"]);
+const INTENTIONALLY_UNMETERED = new Set(["/api/voice/extract", "/api/voice/capabilities", "/api/health"]);
 
 /**
  * Routes that are deliberately open to a caller with no session. Each is pure and
@@ -362,7 +362,8 @@ const INTENTIONALLY_UNMETERED = new Set(["/api/voice/extract", "/api/voice/capab
 const INTENTIONALLY_NO_SESSION = new Set([
   "/api/voice/extract",
   "/api/voice/capabilities",
-  "/api/governance/recommendations"
+  "/api/governance/recommendations",
+  "/api/health"
 ]);
 
 /** Cron-only routes authenticate with the shared secret instead of a user token. */

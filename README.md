@@ -87,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File scripts\verify-migrations.ps1
 
 ## Deploy
 
-Hosted on **EthioDeploy** as a container: the `Dockerfile` builds the standalone Next server (port 3000, health check on `GET /`). Pass the two `NEXT_PUBLIC_SUPABASE_*` values (and `NEXT_PUBLIC_VOXIDE_KEY`) as build args, set the runtime secrets in the host configuration, and add the public URL to Supabase's allowed redirect URLs and to the Voxide dashboard's domain whitelist. Step by step: [`docs/hackathon/deploy-checklist.md`](./docs/hackathon/deploy-checklist.md) and [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
+Hosted on **EthioDeploy** as a container: the `Dockerfile` builds the standalone Next server (port 3000, health check on `GET /api/health`). Pass the two `NEXT_PUBLIC_SUPABASE_*` values (and `NEXT_PUBLIC_VOXIDE_KEY`) as build args, set the runtime secrets in the host configuration, and add the public URL to Supabase's allowed redirect URLs and to the Voxide dashboard's domain whitelist. Step by step: [`docs/hackathon/deploy-checklist.md`](./docs/hackathon/deploy-checklist.md) and [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
 
 ## Screenshots
 

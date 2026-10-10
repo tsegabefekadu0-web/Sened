@@ -15,6 +15,7 @@ RUN npm ci
 # ─── Build ───────────────────────────────────────────────────────────────────
 FROM node:22-alpine AS build
 WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -46,6 +47,11 @@ FROM node:22-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
+# No telemetry pings from a production container. The heap cap keeps a small
+# (free-plan) container from being OOM-killed by V8 growing past its limit; raise
+# it if the host gives more RAM. Not verified: EthioDeploy publishes no RAM figure.
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_OPTIONS=--max-old-space-size=384
 # Platforms that route to a container set PORT; Next's standalone server reads
 # it, so the same image works on 3000 locally and wherever it is hosted.
 ENV PORT=3000
@@ -67,10 +73,11 @@ COPY --from=build --chown=sened:sened /app/public ./public
 USER sened
 EXPOSE 3000
 
-# A real check rather than `curl`, which alpine does not ship. It hits `/` and
-# refuses to report healthy on anything but a 200, so a container that starts
+# A real check rather than `curl`, which alpine does not ship. It hits the cheap
+# `/api/health` (no database call, never rate limited) and refuses to report
+# healthy on anything but a 200, so a container that starts
 # but cannot serve is failed by the orchestrator instead of being sent traffic.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "server.js"]

@@ -1,0 +1,33 @@
+# EthioDeploy's Free plan sleeps a service after 30 minutes idle (ethiodeploy.com/pricing),
+# so the first visitor after a quiet spell waits for a cold start. A tiny request to the
+# cheap /api/health every 10 minutes keeps it awake. Needs repo variable (or secret) SITE_URL,
+# e.g. https://sened.ethiodeploy.com
+#
+# Caveats: GitHub disables scheduled workflows after 60 days with no repository activity
+# (re-enable in the Actions tab or push a commit), and scheduled runs can be delayed by
+# several minutes under load, so this reduces sleeping, it does not guarantee zero cold starts.
+name: keep-warm
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Hit /api/health
+        env:
+          SITE_URL: ${{ vars.SITE_URL || secrets.SITE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SITE_URL}" ]; then
+            echo "Set the SITE_URL repository variable (or secret)." >&2
+            exit 1
+          fi
+          curl --silent --show-error --fail --max-time 60 --retry 3 --retry-delay 10 \
+            "${SITE_URL%/}/api/health" --output /dev/null
+          echo "Site responded OK."

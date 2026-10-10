@@ -25,7 +25,7 @@ export const metadata: Metadata = {
   // The origin, so OpenGraph URLs can be absolute. Derived from an env var because
   // there is no configured production domain yet, and a guessed one would point
   // every shared link at the wrong host. Falls back to the dev server.
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL?.trim() || "http://localhost:3000"),
   title: "ሰነድ · Sened",
   description: "A shared ledger for your equb: say what was paid, the bank confirms it, everyone can see.",
   manifest: "/manifest.json",

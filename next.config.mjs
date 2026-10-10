@@ -10,6 +10,10 @@ const BUILD_ID = rawBuildId.replace(/[^A-Za-z0-9._-]/g, "").slice(0, 12) || "bui
 
 const nextConfig = {
   reactStrictMode: true,
+  // gzip responses in the Node server (the host's proxy is not known to do it);
+  // matters on slow mobile links. Also drop the X-Powered-By header.
+  compress: true,
+  poweredByHeader: false,
 
   env: { NEXT_PUBLIC_BUILD_ID: BUILD_ID },
   generateBuildId: async () => BUILD_ID,
